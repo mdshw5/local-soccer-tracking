@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        margin: 0;
+        font-family: sans-serif;
+        background: transparent;
+        color: #e5e7eb;
+      }
+      #controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding-bottom: 6px;
+      }
+      #controls button {
+        background: #1f2937;
+        color: white;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        padding: 4px 10px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      #controls button:hover {
+        border-color: #6b7280;
+      }
+      select {
+        background: #1f2937;
+        color: white;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        padding: 4px 6px;
+        font-size: 13px;
+      }
+      #scrub {
+        flex: 1 1 220px;
+        min-width: 140px;
+        accent-color: #4f8ef7;
+      }
+      #clock {
+        font-variant-numeric: tabular-nums;
+        font-size: 13px;
+        color: #cbd5e1;
+        min-width: 92px;
+        text-align: right;
+      }
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 13px;
+        color: #cbd5e1;
+      }
+      #stage {
+        border: 1px solid #374151;
+        background: #05240f;
+        line-height: 0;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+      }
+      #legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        padding-top: 6px;
+        font-size: 12px;
+        color: #9ca3af;
+      }
+      .chip {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-right: 5px;
+        vertical-align: middle;
+      }
+      #empty {
+        padding: 18px;
+        color: #9ca3af;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="controls">
+      <button id="play" title="Play / pause">&#9654;</button>
+      <button id="step-back" title="Previous frame">&#9664;&#9474;</button>
+      <button id="step-fwd" title="Next frame">&#9474;&#9654;</button>
+      <input id="scrub" type="range" min="0" max="1" step="0.05" value="0" />
+      <span id="clock">0:00.0</span>
+      <select id="speed" title="Playback speed">
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option>
+        <option value="2">2x</option>
+        <option value="4">4x</option>
+      </select>
+      <label class="toggle"><input id="loop" type="checkbox" /> loop</label>
+      <label class="toggle"><input id="trails" type="checkbox" checked /> trails</label>
+      <label class="toggle"><input id="labels" type="checkbox" checked /> shirts</label>
+      <label class="toggle"
+        >heat
+        <select id="heat">
+          <option value="off">off</option>
+          <option value="selected">selected</option>
+          <option value="all">all</option>
+        </select>
+      </label>
+    </div>
+    <div id="stage"><canvas id="canvas"></canvas></div>
+    <div id="legend"></div>
+    <div id="empty">Waiting for the replay data...</div>
+
+    <script>
+      // ---------------------------------------------------------------------------------------------------
+      // Streamlit component protocol (same shape as the annotation component).
+      // ---------------------------------------------------------------------------------------------------
+      const Streamlit = {
+        RENDER_EVENT: 'streamlit:render',
+        events: new EventTarget(),
+        setFrameHeight(height) {
+          window.parent.postMessage(
+            {isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: height || document.body.scrollHeight},
+            '*'
+          );
+        },
+      };
+      window.addEventListener('message', (event) => {
+        if (event.data && event.data.type === 'streamlit:render') {
+          Streamlit.events.dispatchEvent(new CustomEvent(Streamlit.RENDER_EVENT, {detail: event.data}));
+        }
+      });
+      window.parent.postMessage({isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1}, '*');
+
+      // ---------------------------------------------------------------------------------------------------
+      // State and small helpers.
+      // ---------------------------------------------------------------------------------------------------
+      const TEAM_COLOURS = ['#4f8ef7', '#fb7185'];
+      const OTHER_COLOUR = '#9ca3af';
+      const AIM_COLOUR = '#fde047';
+      const MARGIN_M = 3.5; // room around the pitch for goals and breathing space
+      const TRAIL_SECONDS = 4.0;
+      const HEAT_RADIUS_M = 2.6;
+
+      const state = {
+        data: null,
+        loadedUrl: '',
+        numbers: {},
+        time: 0,
+        playing: false,
+        speed: 1,
+        loop: false,
+        trails: true,
+        labels: true,
+        heat: 'off',
+        selected: null,
+        heatCanvas: null,
+        heatKey: '',
+        index: [], // per player: {byFrame: {frame: i}}
+        pitchCanvas: null,
+        cssW: 0,
+      };
+
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      const clock = document.getElementById('clock');
+      const scrub = document.getElementById('scrub');
+      const playBtn = document.getElementById('play');
+      const legend = document.getElementById('legend');
+      const emptyNote = document.getElementById('empty');
+
+      function teamColour(team) {
+        return team >= 0 && team < TEAM_COLOURS.length ? TEAM_COLOURS[team] : OTHER_COLOUR;
+      }
+      function clockText(seconds) {
+        const m = Math.floor(seconds / 60);
+        const s = seconds - m * 60;
+        return `${m}:${s < 10 ? '0' : ''}${s.toFixed(1)}`;
+      }
+      function textFor(player) {
+        const entry = state.numbers[player.track_id];
+        if (entry && entry.number) return String(entry.number);
+        // Only label substantial tracks with their id: on real footage the camera loses players out of shot and
+        // they return as new tracks, so there are many short fragments - labelling all of them is noise.
+        const major = player.stats && player.stats.observations >= 60;
+        return state.labels && major ? '#' + player.track_id : '';
+      }
+      function labelFor(player) {
+        const entry = state.numbers[player.track_id] || {};
+        const name = entry.name ? ' ' + entry.name : '';
+        return entry.number ? `#${entry.number}${name}` : `track ${player.track_id}${name}`;
+      }
+
+      // ---------------------------------------------------------------------------------------------------
+      // Geometry: pitch metres -> canvas pixels.
+      // ---------------------------------------------------------------------------------------------------
+      function geometry() {
+        const pitch = state.data.pitch;
+        const usableW = state.cssW;
+        const scale = usableW / (pitch[0] + 2 * MARGIN_M);
+        const height = (pitch[1] + 2 * MARGIN_M) * scale;
+        return {
+          scale,
+          height,
+          x: (x) => (MARGIN_M + x) * scale,
+          y: (y) => (MARGIN_M + (pitch[1] - y)) * scale, // near touchline (y=0) at the bottom of the view
+        };
+      }
+
+      function buildPitchCanvas() {
+        const pitch = state.data.pitch;
+        const g = geometry();
+        const dpr = window.devicePixelRatio || 1;
+        const layer = document.createElement('canvas');
+        layer.width = Math.round(state.cssW * dpr);
+        layer.height = Math.round(g.height * dpr);
+        const c = layer.getContext('2d');
+        c.scale(dpr, dpr);
+        const s = g.scale;
+        // All markings drawn in pitch metres: y-up, so the canvas y axis is flipped.
+        c.save();
+        c.translate(MARGIN_M * s, (MARGIN_M + pitch[1]) * s);
+        c.scale(s, -s);
+
+        c.fillStyle = '#0b3d20';
+        c.fillRect(0, 0, pitch[0], pitch[1]);
+        c.strokeStyle = '#d7e6dd';
+        c.lineWidth = 0.14;
+        const [L, W] = pitch;
+        c.strokeRect(0, 0, L, W);
+        c.beginPath();
+        c.moveTo(L / 2, 0);
+        c.lineTo(L / 2, W);
+        c.stroke();
+        c.beginPath();
+        c.arc(L / 2, W / 2, 9.15, 0, Math.PI * 2);
+        c.stroke();
+        c.beginPath();
+        c.arc(L / 2, W / 2, 0.3, 0, Math.PI * 2);
+        c.fillStyle = '#d7e6dd';
+        c.fill();
+
+        const arc = Math.acos(5.5 / 9.15); // penalty arc: the part of the circle outside the box
+        for (const side of [0, 1]) {
+          const sign = side === 0 ? 1 : -1;
+          const goalX = side === 0 ? 0 : L;
+          const spotX = side === 0 ? 11 : L - 11;
+          c.strokeRect(Math.min(goalX, goalX + sign * 16.5), W / 2 - 20.16, 16.5, 40.32);
+          c.strokeRect(Math.min(goalX, goalX + sign * 5.5), W / 2 - 9.16, 5.5, 18.32);
+          c.beginPath();
+          c.arc(spotX, W / 2, 0.3, 0, Math.PI * 2);
+          c.fill();
+          c.beginPath();
+          if (side === 0) {
+            c.arc(spotX, W / 2, 9.15, -arc, arc);
+          } else {
+            c.arc(spotX, W / 2, 9.15, Math.PI - arc, Math.PI + arc);
+          }
+          c.stroke();
+          // goal frame, just outside the line
+          c.strokeRect(side === 0 ? -2 : L, W / 2 - 3.66, 2, 7.32);
+          const corners = [
+            [0, 0, 0, Math.PI / 2],
+            [L, 0, Math.PI / 2, Math.PI],
+            [L, W, Math.PI, (3 * Math.PI) / 2],
+            [0, W, (3 * Math.PI) / 2, 2 * Math.PI],
+          ];
+          for (const [cx, cy, from, to] of corners) {
+            c.beginPath();
+            c.arc(cx, cy, 1, from, to);
+            c.stroke();
+          }
+        }
+        c.restore();
+        state.pitchCanvas = layer;
+      }
+
+      // ---------------------------------------------------------------------------------------------------
+      // Heat map: accumulate observation density on a 1 m grid, colour through a simple LUT.
+      // ---------------------------------------------------------------------------------------------------
+      function buildHeatCanvas() {
+        const pitch = state.data.pitch;
+        const cols = Math.round(pitch[0]);
+        const rows = Math.round(pitch[1]);
+        const counts = new Float32Array(cols * rows);
+        let max = 0;
+        for (const player of state.data.players) {
+          if (state.heat === 'selected' && player.track_id !== state.selected) continue;
+          for (const [x, y] of player.xy) {
+            const cx = Math.min(cols - 1, Math.max(0, Math.floor(x)));
+            const cy = Math.min(rows - 1, Math.max(0, Math.floor(y)));
+            counts[cy * cols + cx] += 1;
+            if (counts[cy * cols + cx] > max) max = counts[cy * cols + cx];
+          }
+        }
+        const layer = document.createElement('canvas');
+        layer.width = cols;
+        layer.height = rows;
+        const c = layer.getContext('2d');
+        const image = c.createImageData(cols, rows);
+        for (let row = 0; row < rows; row++) {
+          for (let col = 0; col < cols; col++) {
+            const value = max > 0 ? counts[row * cols + col] / max : 0;
+            // row 0 of the image is the top of the view, which is the FAR touchline (y = width)
+            const [r, g, b] = heatColour(Math.sqrt(value));
+            const i = ((rows - 1 - row) * cols + col) * 4; // flip so y=0 is at the bottom
+            image.data[i] = r;
+            image.data[i + 1] = g;
+            image.data[i + 2] = b;
+            image.data[i + 3] = value > 0.02 ? 200 : 0;
+          }
+        }
+        c.putImageData(image, 0, 0);
+        state.heatCanvas = layer;
+      }
+
+      function heatColour(t) {
+        // transparent -> blue -> green -> yellow -> red
+        const stops = [
+          [0, 40, 80, 200],
+          [0.35, 40, 180, 120],
+          [0.65, 220, 220, 60],
+          [1, 230, 60, 40],
+        ];
+        for (let i = 1; i < stops.length; i++) {
+          if (t <= stops[i][0]) {
+            const [t0, r0, g0, b0] = stops[i - 1];
+            const [t1, r1, g1, b1] = stops[i];
+            const u = (t - t0) / (t1 - t0);
+            return [r0 + (r1 - r0) * u, g0 + (g1 - g0) * u, b0 + (b1 - b0) * u].map(Math.round);
+          }
+        }
+        return [230, 60, 40];
+      }
+
+      // ---------------------------------------------------------------------------------------------------
+      // Playback loop.
+      // ---------------------------------------------------------------------------------------------------
+      function positionOf(player, frame, frac) {
+        const entry = state.index[player.index_in_list].byFrame;
+        const p = entry[frame];
+        if (p !== undefined) {
+          if (frac > 0 && entry[frame + 1] !== undefined) {
+            const a = player.xy[p];
+            const b = player.xy[entry[frame + 1]];
+            return [a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac];
+          }
+          return player.xy[p];
+        }
+        return null;
+      }
+
+      function draw() {
+        if (!state.data || !state.pitchCanvas) return;
+        const dpr = window.devicePixelRatio || 1;
+        const g = geometry();
+        const pitch = state.data.pitch;
+        const viewH = canvas.height / dpr;
+        // Everything below draws in CSS pixels; the pitch layer is a dpr-sized bitmap drawn 1:1.
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, state.cssW, viewH);
+        ctx.drawImage(state.pitchCanvas, 0, 0, state.cssW, viewH);
+
+        const fps = state.data.fps;
+        const duration = state.data.duration_s;
+        const t = Math.min(state.time, duration);
+        const frame = Math.min(state.data.frame_count - 1, Math.floor(t * fps));
+        const frac = t * fps - frame;
+
+        if (state.heat !== 'off') {
+          if (state.heatCanvas) {
+            ctx.globalAlpha = 0.55;
+            ctx.drawImage(state.heatCanvas, g.x(0), g.y(pitch[1]), pitch[0] * g.scale, pitch[1] * g.scale);
+            ctx.globalAlpha = 1;
+          }
+        }
+
+        if (state.trails) {
+          const trailFrames = TRAIL_SECONDS * fps;
+          for (const player of state.data.players) {
+            if (state.selected !== null && player.track_id !== state.selected) continue;
+            const points = [];
+            for (let f = Math.max(0, frame - trailFrames); f <= frame; f++) {
+              const p = positionOf(player, f, 0);
+              if (p) points.push(p);
+            }
+            if (points.length < 2) continue;
+            for (let i = 1; i < points.length; i++) {
+              const alpha = 0.05 + 0.5 * (i / points.length);
+              ctx.strokeStyle = teamColour(player.team);
+              ctx.globalAlpha = alpha;
+              ctx.lineWidth = 1.6;
+              ctx.beginPath();
+              ctx.moveTo(g.x(points[i - 1][0]), g.y(points[i - 1][1]));
+              ctx.lineTo(g.x(points[i][0]), g.y(points[i][1]));
+              ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+          }
+        }
+
+        // ball proxy: the point the gimbal was aimed at
+        const aim = state.data.aim[frame];
+        if (aim) {
+          ctx.beginPath();
+          ctx.arc(g.x(aim[0]), g.y(aim[1]), Math.max(2.5, 0.35 * g.scale), 0, Math.PI * 2);
+          ctx.fillStyle = AIM_COLOUR;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+
+        const radius = Math.max(4.0, 0.85 * g.scale);
+        for (const player of state.data.players) {
+          const p = positionOf(player, frame, frac);
+          if (!p) continue;
+          const px = g.x(p[0]);
+          const py = g.y(p[1]);
+          const dim = state.selected !== null && player.track_id !== state.selected;
+          ctx.globalAlpha = dim ? 0.45 : 1;
+          ctx.beginPath();
+          ctx.arc(px, py, radius, 0, Math.PI * 2);
+          ctx.fillStyle = teamColour(player.team);
+          ctx.fill();
+          ctx.lineWidth = player.track_id === state.selected ? 3 : 1.4;
+          ctx.strokeStyle = player.track_id === state.selected ? '#ffffff' : 'rgba(15,23,42,0.85)';
+          ctx.stroke();
+
+          const text = textFor(player);
+          if (text) {
+            ctx.fillStyle = '#ffffff';
+            ctx.font = `bold ${Math.max(9, radius)}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, px, py + 0.5);
+          }
+          if (player.track_id === state.selected) {
+            const label = labelFor(player);
+            ctx.font = 'bold 12px sans-serif';
+            const width = ctx.measureText(label).width + 12;
+            const ly = Math.max(14, py - radius - 22);
+            ctx.fillStyle = 'rgba(15,23,42,0.9)';
+            ctx.beginPath();
+            ctx.roundRect(px - width / 2, ly, width, 18, 5);
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, px, ly + 9.5);
+          }
+          ctx.globalAlpha = 1;
+        }
+        clock.textContent = clockText(t);
+        if (document.activeElement !== scrub) scrub.value = String(t);
+      }
+
+      function setPlaying(playing) {
+        state.playing = playing;
+        playBtn.innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
+        if (playing) {
+          lastTimestamp = 0;
+          state.raf = requestAnimationFrame(tick);
+        } else if (state.raf) {
+          cancelAnimationFrame(state.raf);
+          state.raf = null;
+        }
+      }
+
+      let lastTimestamp = 0;
+      function tick(timestamp) {
+        if (!state.playing) return;
+        if (!lastTimestamp) lastTimestamp = timestamp;
+        const dt = (timestamp - lastTimestamp) / 1000;
+        lastTimestamp = timestamp;
+        state.time += dt * state.speed;
+        if (state.time >= state.data.duration_s) {
+          if (state.loop) {
+            state.time = 0;
+          } else {
+            state.time = state.data.duration_s;
+            setPlaying(false);
+            draw();
+            return;
+          }
+        }
+        draw();
+        state.raf = requestAnimationFrame(tick);
+      }
+
+      // ---------------------------------------------------------------------------------------------------
+      // Loading, sizing, controls.
+      // ---------------------------------------------------------------------------------------------------
+      function rebuildHeatIfNeeded() {
+        const key = `${state.heat}|${state.selected}|${state.loadedUrl}`;
+        if (state.heatKey === key) return;
+        state.heatKey = key;
+        if (state.heat === 'off') {
+          state.heatCanvas = null;
+        } else {
+          buildHeatCanvas();
+        }
+      }
+
+      function resize() {
+        if (!state.data) return;
+        state.cssW = Math.max(320, document.body.clientWidth - 2);
+        const g = geometry();
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.round(state.cssW * dpr);
+        canvas.height = Math.round(g.height * dpr);
+        canvas.style.height = `${g.height}px`;
+        buildPitchCanvas();
+        state.heatKey = ''; // the heat canvas is drawn with explicit size, so a resize only re-renders it
+        rebuildHeatIfNeeded();
+        draw();
+        Streamlit.setFrameHeight(document.body.scrollHeight + 6);
+      }
+
+      async function loadData(url) {
+        state.loadedUrl = url;
+        const response = await fetch(url);
+        if (!response.ok) {
+          emptyNote.textContent = `Could not load the replay (${response.status}). Rebuild it in Step 3.`;
+          return;
+        }
+        state.data = await response.json();
+        state.index = [];
+        state.data.players.forEach((player, i) => {
+          player.index_in_list = i;
+          const byFrame = {};
+          player.frames.forEach((frame, j) => {
+            byFrame[frame] = j;
+          });
+          state.index.push({byFrame});
+        });
+        state.time = 0;
+        scrub.max = String(state.data.duration_s);
+        emptyNote.style.display = 'none';
+        renderLegend();
+        resize();
+      }
+
+      function renderLegend() {
+        const names = state.data.team_names || ['Team A', 'Team B'];
+        const counts = [0, 0];
+        let other = 0;
+        for (const player of state.data.players) {
+          if (player.team === 0 || player.team === 1) counts[player.team] += 1;
+          else other += 1;
+        }
+        const chips = names
+          .slice(0, 2)
+          .map(
+            (name, i) =>
+              `<span><span class="chip" style="background:${TEAM_COLOURS[i]}"></span>${name} (${counts[i]})</span>`
+          )
+          .join('');
+        legend.innerHTML =
+          chips +
+          (other ? `<span><span class="chip" style="background:${OTHER_COLOUR}"></span>other (${other})</span>` : '') +
+          `<span><span class="chip" style="background:${AIM_COLOUR}"></span>ball proxy (camera aim)</span>` +
+          `<span>${state.data.players.length} tracks, ${Math.round(state.data.duration_s)}s at ${state.data.fps} fps</span>`;
+      }
+
+      playBtn.addEventListener('click', () => setPlaying(!state.playing));
+      document.getElementById('step-back').addEventListener('click', () => {
+        setPlaying(false);
+        state.time = Math.max(0, state.time - 1 / state.data.fps);
+        draw();
+      });
+      document.getElementById('step-fwd').addEventListener('click', () => {
+        setPlaying(false);
+        state.time = Math.min(state.data.duration_s, state.time + 1 / state.data.fps);
+        draw();
+      });
+      scrub.addEventListener('input', () => {
+        setPlaying(false);
+        state.time = Number(scrub.value);
+        draw();
+      });
+      document.getElementById('speed').addEventListener('change', (event) => {
+        state.speed = Number(event.target.value);
+      });
+      document.getElementById('loop').addEventListener('change', (event) => {
+        state.loop = event.target.checked;
+      });
+      document.getElementById('trails').addEventListener('change', (event) => {
+        state.trails = event.target.checked;
+        draw();
+      });
+      document.getElementById('labels').addEventListener('change', (event) => {
+        state.labels = event.target.checked;
+        draw();
+      });
+      document.getElementById('heat').addEventListener('change', (event) => {
+        state.heat = event.target.value;
+        rebuildHeatIfNeeded();
+        draw();
+      });
+
+      window.addEventListener('resize', resize);
+      new ResizeObserver(() => resize()).observe(document.body);
+
+      Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
+        const args = event.detail.args || {};
+        const selected = args.selected_track;
+        state.selected = selected === undefined || selected === null || selected < 0 ? null : selected;
+        state.numbers = args.numbers || {};
+        const url = args.data_url || '';
+        if (url && url !== state.loadedUrl) {
+          loadData(url);
+        } else {
+          rebuildHeatIfNeeded();
+          draw();
+        }
+        Streamlit.setFrameHeight(document.body.scrollHeight + 6);
+      });
+    </script>
+  </body>
+</html>

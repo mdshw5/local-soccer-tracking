@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        margin: 0;
+        font-family: sans-serif;
+        background: transparent;
+        color: #e5e7eb;
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 0 0 8px 0;
+      }
+      button {
+        background: #1f2937;
+        color: white;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        padding: 6px 10px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      button.active {
+        background: #2563eb;
+        border-color: #2563eb;
+      }
+      #zoom-out,
+      #zoom-in {
+        min-width: 32px;
+        font-weight: 700;
+      }
+      #zoom-readout {
+        font-size: 12px;
+        color: #9ca3af;
+        min-width: 62px;
+        text-align: center;
+      }
+      /* The marker picker preselects what the next click on the magnified view means, so a landmark can be named
+         before it is placed instead of only afterwards. It sits just left of the zoom controls. */
+      #marker-picker {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: #9ca3af;
+      }
+      #marker-kind {
+        background: #1f2937;
+        color: white;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 13px;
+        max-width: 220px;
+      }
+
+      /* Two viewports side by side: the magnified crop you click on, and the whole frame that you aim it with.
+         They share the available width, so both scale down rather than needing controls between them. */
+      #layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 10px;
+        align-items: start;
+      }
+      #crop-wrap {
+        grid-column: 1;
+        border: 1px solid #374151;
+        background: #0f172a;
+        line-height: 0;
+      }
+      #overview-wrap {
+        grid-column: 2;
+        border: 1px solid #374151;
+        background: #0f172a;
+        line-height: 0;
+        cursor: crosshair;
+        position: relative;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      #overviewVideo {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      /* The whole-frame viewport is also the timeline. With a proxy the video carries the picture and the overlay
+         canvas rides on top of it, so the crop box and the landmark markers are drawn over the moving frames.
+         Without one (the proxy is still building) the canvas keeps drawing a still frame and sizes the box, exactly
+         as it did before, and the scrub row stays hidden. */
+      #layout.video-mode #overview {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      #layout.image-mode #overviewVideo,
+      #layout.image-mode #scrub-row {
+        display: none;
+      }
+      #scrub-row {
+        grid-column: 1 / -1;
+        grid-row: 3;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      #play {
+        min-width: 58px;
+      }
+      #scrub {
+        flex: 1;
+        accent-color: #22d3ee;
+        margin: 0;
+      }
+      #scrub-caption {
+        font-size: 12px;
+        color: #9ca3af;
+        white-space: nowrap;
+      }
+      #timeline-readout {
+        font-size: 12px;
+        color: #9ca3af;
+        min-width: 150px;
+        text-align: right;
+        white-space: nowrap;
+      }
+      .viewport-label {
+        padding-top: 4px;
+        font-size: 11px;
+        line-height: 1.4;
+        color: #9ca3af;
+      }
+      #layout .viewport-label {
+        grid-row: 2;
+      }
+      #crop-label {
+        grid-column: 1;
+      }
+      #overview-label {
+        grid-column: 2;
+      }
+      /* Scrubbing does not re-render the crop, so say when the two views are on different frames. */
+      #crop-note {
+        color: #facc15;
+      }
+
+      #hint {
+        padding-top: 6px;
+        font-size: 12px;
+        color: #9ca3af;
+        min-height: 16px;
+      }
+      #hint b {
+        color: #22d3ee;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <button data-mode="polygon">Polygon</button>
+      <button data-mode="line">Line</button>
+      <button data-mode="point" class="active">Point</button>
+      <button id="clear-btn">Clear</button>
+      <button id="apply-btn">Apply</button>
+      <label id="marker-picker" title="The pitch marker the next click on the magnified view will be tagged as">
+        <span>Marker</span>
+        <select id="marker-kind"></select>
+      </label>
+      <button id="zoom-out" title="Zoom out">-</button>
+      <span id="zoom-readout">zoom 8x</span>
+      <button id="zoom-in" title="Zoom in">+</button>
+    </div>
+
+    <div id="layout">
+      <div id="crop-wrap">
+        <canvas id="fieldCanvas"></canvas>
+      </div>
+      <div id="overview-wrap">
+        <video id="overviewVideo" muted playsinline preload="auto"></video>
+        <canvas id="overview"></canvas>
+      </div>
+      <div id="crop-label" class="viewport-label">
+        <b>Magnified.</b> Click landmarks here, then press Apply.
+        <span id="crop-note"></span>
+      </div>
+      <div id="overview-label" class="viewport-label">
+        <b>Whole frame.</b> Click a point to aim the magnified view there; scroll to zoom in on it; scrub the timeline
+        below to a frame where the markings are clear.
+      </div>
+      <div id="scrub-row">
+        <button id="play" title="Play or pause the whole-frame view">Play</button>
+        <span id="scrub-caption">Timeline</span>
+        <input id="scrub" type="range" min="0" max="0" step="1" value="0" title="Scrub the whole-frame view" />
+        <span id="timeline-readout"></span>
+      </div>
+    </div>
+    <div id="hint"></div>
+
+    <script>
+      const Streamlit = {
+        RENDER_EVENT: 'streamlit:render',
+        events: new EventTarget(),
+        setComponentValue(value) {
+          window.parent.postMessage({isStreamlitMessage: true, type: 'streamlit:setComponentValue', value}, '*');
+        },
+        setFrameHeight(height) {
+          window.parent.postMessage(
+            {isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: height || document.body.scrollHeight},
+            '*'
+          );
+        },
+      };
+
+      window.addEventListener('message', (event) => {
+        if (event.data && event.data.type === 'streamlit:render') {
+          Streamlit.events.dispatchEvent(new CustomEvent(Streamlit.RENDER_EVENT, {detail: event.data}));
+        }
+      });
+
+      window.parent.postMessage({isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1}, '*');
+
+      const ZOOM_MIN = 1;
+      const ZOOM_MAX = 16;
+      const WHEEL_STEP = 1.25;
+      const CLICK_SLOP_PX = 4;
+
+      const canvas = document.getElementById('fieldCanvas');
+      const ctx = canvas.getContext('2d');
+      const overview = document.getElementById('overview');
+      const overviewCtx = overview.getContext('2d');
+      const overviewVideo = document.getElementById('overviewVideo');
+      const layout = document.getElementById('layout');
+      const scrub = document.getElementById('scrub');
+      const playBtn = document.getElementById('play');
+      const timelineReadout = document.getElementById('timeline-readout');
+      const cropNote = document.getElementById('crop-note');
+      const zoomReadout = document.getElementById('zoom-readout');
+      const hint = document.getElementById('hint');
+      const toolbarButtons = [...document.querySelectorAll('[data-mode]')];
+      const clearBtn = document.getElementById('clear-btn');
+      const applyBtn = document.getElementById('apply-btn');
+      const markerKind = document.getElementById('marker-kind');
+
+      let mode = 'point';
+      let currentPoints = [];
+      let savedPolygon = [];
+      let savedFeatures = [];
+      let markerOptions = ''; // the landmark list last written into the picker, so a rerun does not reset the choice
+      let bgImage = null;
+      let overviewImage = null;
+      let overviewDataSrc = ''; // so an unchanged still is not re-decoded on every rerun
+      let args = {};
+      let lastActual = {x: 0.5, y: 0.5};
+      // The view is described entirely by where it is centred (fractions of frame width and height) and how far in
+      // it is zoomed. Everything the user does - clicking or scrolling the overview, pressing the zoom buttons, or
+      // scrubbing the timeline - only changes these, and Python is told about it afterwards.
+      let centre = {x: 0.5, y: 0.5};
+      let zoom = 8;
+      let navigating = false;
+      let panning = false;
+      let panStart = null;
+      let movedPx = 0;
+      let wheelTimer = null;
+      // Timeline state. The proxy is optional: without one (it is still being built) the viewport falls back to a
+      // still frame and the scrub row is hidden.
+      let videoMode = false;
+      let videoReady = false;
+      let frameCount = 1;
+      let duration = 0;
+      let mounted = false; // whether this iframe has applied its initial frame yet
+      let pendingFrame = null; // the frame to land on once the video's metadata has loaded
+      let cropFrame = 0; // the frame the magnified crop was actually rendered from
+      let seekPending = false;
+
+      function clamp(value, low, high) {
+        if (high < low) return (low + high) / 2;
+        return Math.min(Math.max(value, low), high);
+      }
+      function clamp01(value) {
+        return clamp(value, 0, 1);
+      }
+
+      function updateButtons() {
+        toolbarButtons.forEach((btn) => {
+          btn.classList.toggle('active', btn.dataset.mode === mode);
+        });
+      }
+
+      function updateZoomReadout() {
+        zoomReadout.textContent = `zoom ${zoom.toFixed(zoom < 10 ? 1 : 0)}x`;
+      }
+
+      /* While a gesture is in progress the hint only describes what has been asked for. Whether the request is
+         actually reachable depends on the crop being held at a frame edge, which Python works out and reports back
+         in `actual_*` - guessing it here would mean claiming "held" for perfectly reachable positions. */
+      function updateHint() {
+        const requested = `zoom <b>${zoom.toFixed(1)}x</b>, centred on <b>${(centre.x * 100).toFixed(0)}%</b>, <b>${(
+          centre.y * 100
+        ).toFixed(0)}%</b> of the frame`;
+        if (navigating) {
+          hint.innerHTML = requested;
+          return;
+        }
+        const held = Math.abs(centre.x - lastActual.x) > 0.002 || Math.abs(centre.y - lastActual.y) > 0.002;
+        hint.innerHTML = held
+          ? `${requested} (held at ${(lastActual.x * 100).toFixed(0)}%, ${(lastActual.y * 100).toFixed(0)}% by the frame edge)`
+          : requested;
+      }
+
+      function setCanvasSize(target, width, height) {
+        target.width = width;
+        target.height = height;
+      }
+
+      /* Where the crop would sit if the centre were applied right now, in native frame pixels. Mirrors the clamping
+         in `zoom_box` on the Python side so the box drawn here is the box that will actually be used. */
+      function cropBox() {
+        const frameWidth = args.frame_width || canvas.width;
+        const frameHeight = args.frame_height || canvas.height;
+        const cropW = frameWidth / zoom;
+        const cropH = frameHeight / zoom;
+        const centreX = clamp(centre.x * frameWidth, cropW / 2, frameWidth - cropW / 2);
+        const centreY = clamp(centre.y * frameHeight, cropH / 2, frameHeight - cropH / 2);
+        return {x: centreX - cropW / 2, y: centreY - cropH / 2, w: cropW, h: cropH};
+      }
+
+      /* Whether the picture on screen really is the frame the crop - and so the markers - belong to.
+         In video mode the proxy is only a scrubbing aid: it is built from the camera's keyframes, so it holds one
+         picture per second and at speed its picture sits half a second behind the readout. A marker drawn on it
+         would point where the corner was half a second ago, which reads as a bug in the click. The still Python
+         sends with every render is the exact crop frame, so it is shown instead whenever the viewport is at rest
+         on that frame. */
+      function pictureIsExact() {
+        if (!videoMode) return true;
+        if (!videoReady || !overviewImage || !overviewVideo.paused) return false;
+        return clampFrame(Number(scrub.value)) === cropFrame;
+      }
+
+      function drawOverview() {
+        if (!videoMode && !overviewImage) return;
+        const frameWidth = args.frame_width || overview.width;
+        const frameHeight = args.frame_height || overview.height;
+        const toX = overview.width / frameWidth;
+        const toY = overview.height / frameHeight;
+        const exact = pictureIsExact();
+
+        overviewCtx.clearRect(0, 0, overview.width, overview.height);
+        if (exact && overviewImage) {
+          // Covers the video underneath, so what is compared with the crop is the crop's own frame.
+          overviewCtx.drawImage(overviewImage, 0, 0, overview.width, overview.height);
+        }
+
+        // Landmarks already clicked on this frame, so the whole frame shows the work in progress - but only while
+        // the picture is the frame they were clicked on, or they would be markers for a picture nobody can see.
+        if (exact) {
+          overviewCtx.save();
+          (args.marker_points || []).forEach(([u, v]) => {
+            overviewCtx.beginPath();
+            overviewCtx.arc(u * frameWidth * toX, v * frameWidth * toY, 6, 0, Math.PI * 2);
+            overviewCtx.fillStyle = '#facc15';
+            overviewCtx.fill();
+            overviewCtx.strokeStyle = '#78350f';
+            overviewCtx.lineWidth = 2;
+            overviewCtx.stroke();
+          });
+          overviewCtx.restore();
+        }
+
+        const box = cropBox();
+        overviewCtx.strokeStyle = '#facc15';
+        overviewCtx.lineWidth = 2;
+        overviewCtx.strokeRect(box.x * toX, box.y * toY, box.w * toX, box.h * toY);
+      }
+
+      function drawImage() {
+        if (!bgImage) {
+          drawSavedAnnotations();
+          return;
+        }
+        const img = new Image();
+        img.onload = () => {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          drawSavedAnnotations();
+        };
+        img.src = bgImage;
+      }
+
+      function drawSavedAnnotations() {
+        if (savedPolygon.length > 1) {
+          ctx.beginPath();
+          savedPolygon.forEach(([x, y], index) => {
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.closePath();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        savedFeatures.forEach((feature) => {
+          if (feature.type === 'line' && feature.points.length >= 2) {
+            ctx.beginPath();
+            feature.points.forEach(([x, y], index) => {
+              if (index === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            });
+            ctx.strokeStyle = '#22d3ee';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+          if (feature.type === 'point') {
+            const [x, y] = feature.point;
+            ctx.beginPath();
+            ctx.arc(x, y, 6, 0, Math.PI * 2);
+            ctx.fillStyle = '#facc15';
+            ctx.fill();
+            ctx.strokeStyle = '#78350f';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            if (feature.label) {
+              // Which marker is which. With five markers on screen the name is what makes the drag a decision
+              // rather than a guess, and outlined text stays readable over grass and over the pitch markings.
+              ctx.font = '600 12px system-ui, sans-serif';
+              ctx.textBaseline = 'bottom';
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 3;
+              ctx.strokeText(feature.label, x + 10, y - 8);
+              ctx.fillStyle = '#ffffff';
+              ctx.fillText(feature.label, x + 10, y - 8);
+            }
+          }
+        });
+
+        if (currentPoints.length > 1) {
+          ctx.beginPath();
+          currentPoints.forEach(([x, y], index) => {
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        if (currentPoints.length > 0) {
+          currentPoints.forEach(([x, y]) => {
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.fillStyle = '#fbbf24';
+            ctx.fill();
+          });
+        }
+      }
+
+      function redraw() {
+        drawOverview();
+        drawImage();
+      }
+
+      function addPoint(x, y) {
+        if (mode === 'point') {
+          // Tag the click with whatever the picker has selected, so the landmark is chosen before the click rather
+          // than assigned afterwards. An empty value means "decide by click order" on the Python side.
+          savedFeatures.push({type: 'point', point: [x, y], label: markerKind.value});
+          currentPoints = [];
+          redraw();
+          return;
+        }
+
+        if (mode === 'line') {
+          currentPoints.push([x, y]);
+          if (currentPoints.length === 2) {
+            savedFeatures.push({type: 'line', points: currentPoints.slice()});
+            currentPoints = [];
+          }
+          redraw();
+          return;
+        }
+
+        if (mode === 'polygon') {
+          currentPoints.push([x, y]);
+          if (currentPoints.length > 2 && isNearStart(currentPoints[0], x, y)) {
+            savedPolygon = currentPoints.slice();
+            currentPoints = [];
+          }
+          redraw();
+        }
+      }
+
+      function isNearStart(start, x, y) {
+        return Math.hypot(start[0] - x, start[1] - y) < 12;
+      }
+
+      canvas.addEventListener('click', (event) => {
+        if (suppressClick) {
+          // The pointer was dragging a marker, not placing one: the drag has already said what it had to say.
+          suppressClick = false;
+          return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        const x = (event.clientX - rect.left) * (canvas.width / rect.width);
+        const y = (event.clientY - rect.top) * (canvas.height / rect.height);
+        addPoint(Math.round(x), Math.round(y));
+      });
+
+      /* Dragging a placed marker is how a projected landmark is corrected: the marker carries its label, so moving
+         it onto the real marking is the whole measurement Python needs - and it is quicker than clicking from
+         scratch. Only in point mode, because the polygon and line tools own their own click sequences. A drag that
+         actually moved suppresses the click that follows, so a drag never leaves a fresh point behind it. */
+      const DRAG_RADIUS = 14;
+      let dragging = null;
+      let suppressClick = false;
+
+      function canvasPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        return [
+          Math.round((event.clientX - rect.left) * (canvas.width / rect.width)),
+          Math.round((event.clientY - rect.top) * (canvas.height / rect.height)),
+        ];
+      }
+
+      function featureNear(x, y) {
+        let found = null;
+        let best = DRAG_RADIUS;
+        savedFeatures.forEach((feature, index) => {
+          if (feature.type !== 'point') return;
+          const distance = Math.hypot(feature.point[0] - x, feature.point[1] - y);
+          if (distance <= best) {
+            found = index;
+            best = distance;
+          }
+        });
+        return found;
+      }
+
+      canvas.addEventListener('mousedown', (event) => {
+        if (mode !== 'point') return;
+        const [x, y] = canvasPoint(event);
+        const index = featureNear(x, y);
+        if (index === null) return;
+        dragging = { index, dx: savedFeatures[index].point[0] - x, dy: savedFeatures[index].point[1] - y, moved: false };
+        event.preventDefault();
+      });
+
+      canvas.addEventListener('mousemove', (event) => {
+        if (!dragging) return;
+        const [x, y] = canvasPoint(event);
+        const feature = savedFeatures[dragging.index];
+        const nextX = clamp(x + dragging.dx, 0, canvas.width);
+        const nextY = clamp(y + dragging.dy, 0, canvas.height);
+        if (Math.hypot(nextX - feature.point[0], nextY - feature.point[1]) > 1) dragging.moved = true;
+        feature.point = [nextX, nextY];
+        // Dirty means "moved since Python last heard about it": a rerun caused by anything else (aiming the view,
+        // zooming) must not yank the marker back to the position it was placed at.
+        feature.dirty = true;
+        redraw();
+      });
+
+      function endDrag() {
+        if (dragging && dragging.moved) suppressClick = true;
+        dragging = null;
+      }
+      canvas.addEventListener('mouseup', endDrag);
+      canvas.addEventListener('mouseleave', endDrag);
+
+      toolbarButtons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          mode = btn.dataset.mode;
+          currentPoints = [];
+          updateButtons();
+          redraw();
+        });
+      });
+
+      clearBtn.addEventListener('click', () => {
+        savedPolygon = [];
+        savedFeatures = [];
+        currentPoints = [];
+        redraw();
+      });
+
+      /* The current frame rides along with every aiming gesture while the timeline is live. Scrubbing is deliberately
+         local and reports nothing, so the magnified crop re-renders only when the user actually aims at a point; the
+         gesture therefore has to carry the frame, or aiming after a scrub would crop a frame that is not on screen.
+         Python ignores the frame on Apply, because the points on screen belong to the crop that is already loaded. */
+      function currentFrame() {
+        return videoMode ? clampFrame(Number(scrub.value)) : null;
+      }
+
+      function sendValue(action) {
+        Streamlit.setComponentValue({
+          polygon: savedPolygon,
+          features: savedFeatures,
+          centre_x: centre.x,
+          centre_y: centre.y,
+          zoom: zoom,
+          action: action,
+          frame: currentFrame(),
+        });
+      }
+
+      applyBtn.addEventListener('click', () => {
+        // The positions just sent become Python's canonical copy of the clicks, so nothing is pending any more.
+        savedFeatures.forEach((feature) => {
+          if (feature) feature.dirty = false;
+        });
+        sendValue('apply');
+      });
+
+      /* ---------------------------------------------------------------------------------------------------
+         The overview is the control surface: click to aim at a point, scroll to zoom in on it, drag to pan.
+         All of it updates locally and only tells Python once the gesture has finished, because a re-crop per
+         wheel notch would be a round trip each time.
+         --------------------------------------------------------------------------------------------------- */
+
+      function overviewPoint(event) {
+        const rect = overview.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const ox = (event.clientX - rect.left) * (overview.width / rect.width);
+        const oy = (event.clientY - rect.top) * (overview.height / rect.height);
+        // Note the two conventions, which are deliberately different: the centre is a fraction of the frame *width*
+        // across and a fraction of its *height* down (what `zoom_box` on the Python side expects). A landmark's `v`,
+        // by contrast, is normalised by width. Mixing them up shifts the view vertically by the aspect ratio, which
+        // looks plausible until you compare it with the frame.
+        return {
+          u: clamp01(ox / overview.width),
+          v: clamp01(oy / overview.height),
+          px: ox,
+          py: oy,
+        };
+      }
+
+      function applyGesture() {
+        // Aiming means looking at one frame, so a gesture freezes the picture. The frame is committed with the
+        // gesture's own message, so it never needs a separate round trip.
+        pausePlayback();
+        navigating = true;
+        updateZoomReadout();
+        updateHint();
+        redraw();
+      }
+
+      function commitGesture(delay) {
+        if (wheelTimer) clearTimeout(wheelTimer);
+        wheelTimer = setTimeout(() => sendValue('navigate'), delay || 0);
+      }
+
+      overview.addEventListener(
+        'wheel',
+        (event) => {
+          event.preventDefault();
+          const point = overviewPoint(event);
+          if (!point) return;
+          // Zooming keeps the point under the pointer: whatever you scroll over is what you end up looking at.
+          centre.x = point.u;
+          centre.y = point.v;
+          const factor = event.deltaY < 0 ? WHEEL_STEP : 1 / WHEEL_STEP;
+          zoom = clamp(zoom * factor, ZOOM_MIN, ZOOM_MAX);
+          applyGesture();
+          commitGesture(280);
+        },
+        {passive: false}
+      );
+
+      overview.addEventListener('pointerdown', (event) => {
+        const point = overviewPoint(event);
+        if (!point) return;
+        panning = true;
+        movedPx = 0;
+        panStart = {u: point.u, v: point.v, px: point.px, py: point.py, centre: {x: centre.x, y: centre.y}};
+        overview.setPointerCapture(event.pointerId);
+      });
+
+      overview.addEventListener('pointermove', (event) => {
+        if (!panning) return;
+        const point = overviewPoint(event);
+        if (!point) return;
+        movedPx = Math.max(movedPx, Math.hypot(point.px - panStart.px, point.py - panStart.py));
+        // Panning drags the frame with the pointer, so the centre moves the other way.
+        centre.x = clamp01(panStart.centre.x + (panStart.u - point.u));
+        centre.y = clamp01(panStart.centre.y + (panStart.v - point.v));
+        applyGesture();
+      });
+
+      function endPan(event) {
+        if (!panning) return;
+        panning = false;
+        if (movedPx <= CLICK_SLOP_PX) {
+          // A click, not a drag: aim the view straight at the point that was clicked.
+          const point = overviewPoint(event);
+          if (point) {
+            centre.x = point.u;
+            centre.y = point.v;
+          }
+          applyGesture();
+        }
+        commitGesture(0);
+      }
+      overview.addEventListener('pointerup', endPan);
+      overview.addEventListener('pointercancel', endPan);
+
+      document.getElementById('zoom-in').addEventListener('click', () => {
+        zoom = clamp(zoom * 2, ZOOM_MIN, ZOOM_MAX);
+        applyGesture();
+        commitGesture(0);
+      });
+      document.getElementById('zoom-out').addEventListener('click', () => {
+        zoom = clamp(zoom / 2, ZOOM_MIN, ZOOM_MAX);
+        applyGesture();
+        commitGesture(0);
+      });
+
+      /* ---------------------------------------------------------------------------------------------------
+         The timeline. The whole-frame viewport plays the proxy, so the drag is handled here and Python is told
+         only when it ends - a round trip per pixel would make the preview unusable.
+         --------------------------------------------------------------------------------------------------- */
+
+      function clampFrame(value) {
+        return Math.min(Math.max(Math.round(value), 0), Math.max(0, frameCount - 1));
+      }
+
+      function frameToTime(frame) {
+        if (frameCount <= 1 || duration <= 0) return 0;
+        return (clampFrame(frame) / (frameCount - 1)) * duration;
+      }
+
+      function timeToFrame(time) {
+        if (duration <= 0) return 0;
+        return clampFrame((time / duration) * (frameCount - 1));
+      }
+
+      function updateTimelineReadout() {
+        if (!videoMode) {
+          timelineReadout.textContent = '';
+          cropNote.textContent = '';
+          return;
+        }
+        const frame = clampFrame(Number(scrub.value));
+        const time = frameToTime(frame);
+        const minutes = Math.floor(time / 60);
+        const seconds = time - minutes * 60;
+        timelineReadout.textContent =
+          `frame ${frame} / ${Math.max(0, frameCount - 1)} · ${minutes}:${seconds.toFixed(1).padStart(4, '0')}`;
+        updateCropNote(frame);
+      }
+
+      /* Scrubbing moves the picture without telling Python, so the magnified crop can lag behind it. Say so, rather
+         than letting the two views quietly disagree about which frame is being shown. */
+      function updateCropNote(frame) {
+        if (!videoMode || !videoReady) {
+          cropNote.textContent = '';
+          return;
+        }
+        cropNote.textContent =
+          frame === cropFrame
+            ? ''
+            : `Showing frame ${frame} - the markers belong to frame ${cropFrame}; click the whole frame to load it.`;
+      }
+
+      function pausePlayback() {
+        if (!overviewVideo.paused) overviewVideo.pause();
+      }
+
+      /* A drag fires `input` many times a second; queue at most one seek per animation frame so the browser chases
+         the latest position instead of a backlog of stale ones. */
+      function requestSeek() {
+        if (seekPending) return;
+        seekPending = true;
+        requestAnimationFrame(() => {
+          seekPending = false;
+          if (videoMode && videoReady) overviewVideo.currentTime = frameToTime(Number(scrub.value));
+        });
+      }
+
+      // Land on the frame the crop was rendered from. This runs once per iframe: a remount (an Apply bumps the widget
+      // key) starts at frame 0, and the viewport would otherwise jump back there after the landmarks are committed.
+      function applyPendingFrame() {
+        if (pendingFrame === null || !videoReady) return;
+        const target = clampFrame(pendingFrame);
+        pendingFrame = null;
+        scrub.value = String(target);
+        overviewVideo.currentTime = frameToTime(target);
+        updateTimelineReadout();
+        drawOverview();
+      }
+
+      scrub.addEventListener('input', () => {
+        pausePlayback();
+        requestSeek();
+        updateTimelineReadout();
+        // The bar moving off the crop's frame drops the exact still and shows the scrub video (see pictureIsExact).
+        drawOverview();
+      });
+
+      playBtn.addEventListener('click', () => {
+        if (overviewVideo.paused) {
+          overviewVideo.play();
+        } else {
+          pausePlayback();
+        }
+        updatePlayLabel();
+      });
+
+      function updatePlayLabel() {
+        playBtn.textContent = overviewVideo.paused ? 'Play' : 'Pause';
+      }
+
+      // While playing the video drives the bar and the readout. Pausing does not commit on its own: a navigation
+      // gesture pauses the video too, and committing on `pause` would fire a rerun in the middle of every drag.
+      overviewVideo.addEventListener('timeupdate', () => {
+        if (overviewVideo.paused || !videoMode) return;
+        scrub.value = String(timeToFrame(overviewVideo.currentTime));
+        updateTimelineReadout();
+        drawOverview();
+      });
+      function updatePlayAndPicture() {
+        updatePlayLabel();
+        drawOverview();
+      }
+      overviewVideo.addEventListener('play', updatePlayAndPicture);
+      overviewVideo.addEventListener('pause', updatePlayAndPicture);
+
+      overviewVideo.addEventListener('loadedmetadata', () => {
+        duration = Number.isFinite(overviewVideo.duration) ? overviewVideo.duration : 0;
+        videoReady = true;
+        setCanvasSize(overview, overviewVideo.videoWidth, overviewVideo.videoHeight);
+        overviewVideo.currentTime = frameToTime(Number(scrub.value));
+        applyPendingFrame();
+        drawOverview();
+        updateTimelineReadout();
+        // A video element has no size before it loads, so the height sent on the first render clipped the picture.
+        Streamlit.setFrameHeight();
+      });
+
+      function onRender(event) {
+        args = event.detail.args || {};
+        if (args.frame_data) {
+          bgImage = args.frame_data;
+        }
+        // The proxy is optional: while it is still being built the viewport falls back to the still frame Python
+        // sends instead, and the scrub row is hidden.
+        videoMode = typeof args.proxy_url === 'string' && args.proxy_url.length > 0;
+        layout.classList.toggle('video-mode', videoMode);
+        layout.classList.toggle('image-mode', !videoMode);
+        if (typeof args.frame_count === 'number' && args.frame_count >= 1) {
+          frameCount = Math.round(args.frame_count);
+          scrub.max = String(Math.max(0, frameCount - 1));
+        }
+        // The picker's options come from Python (they depend on the pitch size). They only need writing when the
+        // list actually changes, or a rerun would reset the user's choice mid-click.
+        if (Array.isArray(args.marker_kinds)) {
+          const joined = args.marker_kinds.join('|');
+          if (joined !== markerOptions) {
+            markerOptions = joined;
+            const previous = markerKind.value;
+            markerKind.innerHTML = '';
+            markerKind.appendChild(new Option('Auto (click order)', ''));
+            for (const name of args.marker_kinds) {
+              markerKind.appendChild(new Option(name, name));
+            }
+            markerKind.value = args.marker_kinds.includes(previous) ? previous : '';
+          }
+        }
+        if (videoMode) {
+          if (overviewVideo.getAttribute('src') !== args.proxy_url) {
+            overviewVideo.setAttribute('src', args.proxy_url);
+            overviewVideo.load();
+          }
+        }
+        if (args.overview_data && args.overview_data !== overviewDataSrc) {
+          // The exact crop frame rides along in video mode too: the proxy only holds one picture per second, so
+          // this still is what gets compared with the crop whenever the viewport is at rest (see pictureIsExact).
+          overviewDataSrc = args.overview_data;
+          const loaded = new Image();
+          loaded.onload = () => {
+            overviewImage = loaded;
+            if (!videoMode) setCanvasSize(overview, loaded.naturalWidth, loaded.naturalHeight);
+            drawOverview();
+          };
+          loaded.src = args.overview_data;
+        }
+        // The frame the crop was rendered from, remembered so the note can tell when the viewport has been scrubbed
+        // somewhere the crop has not followed. A scrub the *user* made is never yanked back by the next rerun - but
+        // when *Python* moved the crop to another frame (a jump from the landmark list in the app), the viewport
+        // follows it, because landing on that frame is the whole point of the jump. An aiming gesture sets this too,
+        // and is a no-op: the bar is already on the frame the gesture carried.
+        const renderedFrom = typeof args.initial_frame === 'number' ? Math.round(args.initial_frame) : 0;
+        const movedByPython = mounted && videoMode && renderedFrom !== cropFrame;
+        cropFrame = renderedFrom;
+        if (!mounted) {
+          mounted = true;
+          pendingFrame = cropFrame;
+          applyPendingFrame();
+        } else if (movedByPython) {
+          pendingFrame = renderedFrom;
+          applyPendingFrame();
+        }
+        if (Array.isArray(args.initial_polygon)) {
+          savedPolygon = args.initial_polygon.map(([x, y]) => [Number(x), Number(y)]);
+        }
+        if (Array.isArray(args.initial_features)) {
+          // A marker the user has dragged (dirty) outranks Python's copy of it. Python's positions only change
+          // when an Apply commits them, so anything that moved since is a measurement in progress - and aiming
+          // the view or zooming causes reruns that must not undo it. Matched by id: stored clicks carry their
+          // pid, placed markers the landmark name they were projected from.
+          const moved = new Map();
+          savedFeatures.forEach((feature) => {
+            if (feature && feature.type === 'point' && feature.id && feature.dirty) moved.set(feature.id, feature);
+          });
+          savedFeatures = args.initial_features.map((feature) => {
+            const local = feature && feature.type === 'point' && feature.id ? moved.get(feature.id) : null;
+            return local ? {...feature, point: local.point.slice(), dirty: true} : feature;
+          });
+        }
+        if (typeof args.zoom === 'number') {
+          zoom = clamp(args.zoom, ZOOM_MIN, ZOOM_MAX);
+        }
+        if (typeof args.centre_x === 'number') {
+          centre.x = args.centre_x;
+        }
+        if (typeof args.centre_y === 'number') {
+          centre.y = args.centre_y;
+        }
+        // Where the crop actually ended up, which differs from the request when it is held at a frame edge.
+        lastActual = {
+          x: typeof args.actual_x === 'number' ? args.actual_x : centre.x,
+          y: typeof args.actual_y === 'number' ? args.actual_y : centre.y,
+        };
+        if (Array.isArray(args.modes)) {
+          mode = args.modes.includes(mode) ? mode : args.modes[0];
+          updateButtons();
+        }
+        setCanvasSize(canvas, args.width || 1280, args.height || 720);
+        currentPoints = [];
+        // A fresh crop has arrived, so the gesture that caused it is finished.
+        navigating = false;
+        updateZoomReadout();
+        updateHint();
+        updateTimelineReadout();
+        redraw();
+        Streamlit.setFrameHeight();
+      }
+
+      Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+      window.addEventListener('resize', () => Streamlit.setFrameHeight());
+      updateButtons();
+      updateZoomReadout();
+      updateHint();
+      Streamlit.setFrameHeight();
+    </script>
+  </body>
+</html>

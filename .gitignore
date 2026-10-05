@@ -1,0 +1,33 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editors and platforms
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.ipynb_checkpoints/
+
+# Model weights. Ultralytics downloads these on first use and they are 6-22 MB each, so they are fetched again
+# rather than stored. (A model someone deliberately wants versioned can be added with `git add -f`.)
+*.pt
+*.onnx
+*.engine
+*.torchscript
+
+# State written by the scripts when they are run from the repository root, plus any log a run leaves behind.
+/build.json
+*.log
+
+# The data itself lives in data/ and outputs/, each with its own .gitignore: every file in them is produced by
+# running the pipeline (or is local footage) and is regenerated from the source video, not read by the code.

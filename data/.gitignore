@@ -1,0 +1,17 @@
+# Everything under data/ is produced by running the pipeline, and it is not small - one 81 minute match is
+# hundreds of megabytes:
+#
+#   cache/      the audio track of each recording as wav (250 MB for one match), so a rescan need not re-decode it
+#   segments/   Stage A's per-frame results, chunk by chunk, and the scrub proxies built from them
+#   matches/    one directory per match: events, tags, reports, replays, preview clips and exported reels
+#   games/      the combined multi-clip game video's manifest and its low-resolution marking proxy
+#   videos/     local input footage (see the .gitignore in there)
+#   models/     downloaded detector weights and saved calibrations (see the .gitignore in there)
+#
+# All of it can be rebuilt from the source video, so none of it is committed. Small hand-written inputs that live
+# here - a saved calibration, a set of landmark annotations - are ignored too; force-add one if it is worth
+# keeping, for example:
+#
+#   git add -f data/models/calibration_half_a.json
+*
+!.gitignore

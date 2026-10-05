@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body { margin: 0; padding: 0; background: transparent; font-family: "Source Sans Pro", sans-serif; color: #fafafa; }
+    #wrap { display: flex; flex-direction: column; gap: 10px; padding: 2px 2px 4px; }
+    video { width: 100%; border-radius: 6px; background: #000; display: block; }
+    #bar { position: relative; height: 10px; border-radius: 5px; background: #262730; cursor: pointer; margin-top: 14px; }
+    #played { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #4a5568; border-radius: 5px; }
+    .mark { position: absolute; top: -5px; bottom: -5px; width: 2px; background: #ffd166; display: none; }
+    .mark span {
+      position: absolute; top: -16px; left: 50%; transform: translateX(-50%);
+      font-size: 11px; color: #ffd166; white-space: nowrap;
+    }
+    #head { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fafafa; }
+    #row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    #clock { font-variant-numeric: tabular-nums; font-size: 13px; color: #d5d5d9; margin-left: auto; }
+    button {
+      background: #262730; color: #fafafa; border: 1px solid #4a4a5a; border-radius: 4px;
+      padding: 5px 10px; font-size: 13px; cursor: pointer;
+    }
+    button:hover { border-color: #ffd166; }
+    button.set { border-color: #ffd166; color: #ffd166; }
+    #hint { font-size: 12px; color: #a3a8b8; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <video id="video" controls preload="metadata"></video>
+    <div id="bar" title="Click to jump to that moment">
+      <div id="played"></div>
+      <div class="mark" id="mark-start"><span></span></div>
+      <div class="mark" id="mark-half"><span></span></div>
+      <div class="mark" id="mark-end"><span></span></div>
+      <div id="head"></div>
+    </div>
+    <div id="row">
+      <button id="btn-start">Set kick-off</button>
+      <button id="btn-half">Set half-time</button>
+      <button id="btn-end">Set full-time</button>
+      <span id="clock">0:00 / 0:00</span>
+    </div>
+    <div id="hint">
+      Scrub the low-resolution proxy to the moment, then mark it. Marking is a *game* clock: kick-off, half-time
+      and full-time decide which footage is analysed and which half every event belongs to.
+    </div>
+  </div>
+
+  <script>
+    const Streamlit = {
+      RENDER_EVENT: 'streamlit:render',
+      events: new EventTarget(),
+      setComponentValue(value) {
+        window.parent.postMessage({isStreamlitMessage: true, type: 'streamlit:setComponentValue', value}, '*');
+      },
+      setFrameHeight(height) {
+        window.parent.postMessage(
+          {isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: height || document.body.scrollHeight},
+          '*'
+        );
+      },
+    };
+
+    window.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'streamlit:render') {
+        Streamlit.events.dispatchEvent(new CustomEvent(Streamlit.RENDER_EVENT, {detail: event.data}));
+      }
+    });
+
+    window.parent.postMessage({isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1}, '*');
+
+    const NAMES = ['start', 'half', 'end'];
+    const LABELS = {start: 'kick-off', half: 'half-time', end: 'full-time'};
+    const video = document.getElementById('video');
+    const bar = document.getElementById('bar');
+    const played = document.getElementById('played');
+    const head = document.getElementById('head');
+    const clock = document.getElementById('clock');
+    let marks = {start: null, half: null, end: null};
+    let duration = 0;
+    let seq = 0;
+
+    function fmt(seconds) {
+      if (!isFinite(seconds) || seconds < 0) seconds = 0;
+      const minutes = Math.floor(seconds / 60);
+      const rest = Math.floor(seconds % 60);
+      return `${minutes}:${String(rest).padStart(2, '0')}`;
+    }
+
+    function updatePosition() {
+      const time = video.currentTime || 0;
+      played.style.width = duration ? `${(time / duration) * 100}%` : '0%';
+      head.style.left = duration ? `calc(${(time / duration) * 100}% - 1px)` : '0px';
+      clock.textContent = `${fmt(time)} / ${fmt(duration)}`;
+    }
+
+    function renderMarks() {
+      for (const name of NAMES) {
+        const element = document.getElementById(`mark-${name}`);
+        const button = document.getElementById(`btn-${name}`);
+        const value = marks ? marks[name] : null;
+        const set = value !== null && value !== undefined;
+        button.classList.toggle('set', Boolean(set));
+        if (!set || !duration) {
+          element.style.display = 'none';
+          continue;
+        }
+        element.style.display = 'block';
+        element.style.left = `calc(${(value / duration) * 100}% - 1px)`;
+        element.querySelector('span').textContent = `${LABELS[name]} ${fmt(value)}`;
+      }
+    }
+
+    function sendMark(name) {
+      if (!video.getAttribute('src')) return;
+      Streamlit.setComponentValue({action: 'mark', mark: name, time: video.currentTime, seq: ++seq});
+    }
+
+    for (const name of NAMES) {
+      document.getElementById(`btn-${name}`).addEventListener('click', () => sendMark(name));
+    }
+
+    bar.addEventListener('click', (event) => {
+      if (!duration) return;
+      const rect = bar.getBoundingClientRect();
+      const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+      video.currentTime = fraction * duration;
+      updatePosition();
+    });
+
+    video.addEventListener('loadedmetadata', () => {
+      duration = isFinite(video.duration) ? video.duration : 0;
+      renderMarks();
+      updatePosition();
+      Streamlit.setFrameHeight();
+    });
+    video.addEventListener('timeupdate', updatePosition);
+    window.addEventListener('resize', () => Streamlit.setFrameHeight());
+
+    Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
+      const args = event.detail.args || {};
+      marks = args.marks || {start: null, half: null, end: null};
+      const url = typeof args.proxy_url === 'string' ? args.proxy_url : '';
+      if (url && video.getAttribute('src') !== url) {
+        // Re-setting the same URL would restart playback, so only a changed proxy reloads the element.
+        video.setAttribute('src', url);
+        video.load();
+      }
+      renderMarks();
+      Streamlit.setFrameHeight();
+    });
+
+    Streamlit.setFrameHeight();
+  </script>
+</body>
+</html>

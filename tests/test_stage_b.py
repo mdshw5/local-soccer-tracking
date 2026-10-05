@@ -1,0 +1,164 @@
+"""Stage B tested against a simulated match with known truth: does it recover what it claims to?"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from soccer_analytics.analysis.projection import project_segment, segment_poses
+from soccer_analytics.analysis.stage_b import build_report, _team_assignment, _track_people
+from soccer_analytics.geometry.pitch_calibration import PitchCalibration
+
+from synthetic_match import PITCH_LENGTH, PITCH_WIDTH, simulate_match
+
+
+def _prepared(frames: int = 400, seed: int = 1, attack_bias: float = 0.0):
+    segment, truth = simulate_match(frames=frames, seed=seed, attack_bias=attack_bias)
+    q, focal = segment_poses(segment, focal0=float(truth.focal[0]))
+    base = truth.calibration.base_rotation @ truth.q[0]
+    cal = PitchCalibration(
+        truth.calibration.position, base, truth.calibration.focal_scale, truth.calibration.aspect, 0.0, ()
+    )
+    detections = project_segment(segment, cal, poses=(q, focal))
+    return segment, truth, detections
+
+
+@pytest.fixture(scope="module")
+def prepared():
+    return _prepared()
+
+
+def _track_purity(truth, detections, assignment) -> tuple[float, int]:
+    """Mean fraction of each track's detections that belong to its single most common true person."""
+    from soccer_analytics.analysis.projection import on_pitch_mask
+
+    keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
+    pures = []
+    for tid, rows in assignment.tracks.items():
+        rows = rows[keep[rows]]
+        if len(rows) < 8:
+            continue
+        persons = truth.det_person[rows]
+        counts = np.bincount(persons)
+        pures.append(counts.max() / len(rows))
+    return (float(np.mean(pures)) if pures else 0.0), len(pures)
+
+
+def test_tracking_keeps_one_person_per_track(prepared) -> None:
+    _, truth, detections = _prepared()
+    from soccer_analytics.analysis.projection import on_pitch_mask
+
+    keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
+    assignment = _track_people(detections, keep)
+    purity, n_tracks = _track_purity(truth, detections, assignment)
+    assert n_tracks > 8, "tracking produced almost no tracks"
+    assert purity > 0.90, f"tracks are mixing people (purity {purity:.2f})"
+
+
+def test_team_clustering_matches_the_simulated_kits(prepared) -> None:
+    from soccer_analytics.analysis.projection import on_pitch_mask
+
+    _, truth, detections = _prepared()
+    keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
+    assignment = _track_people(detections, keep)
+    teams, quality = _team_assignment(detections, assignment)
+
+    correct = total = 0
+    for tid, team in teams.items():
+        persons = truth.det_person[assignment.tracks[tid]]
+        true_role = int(np.bincount(persons).argmax())
+        expected = truth.team_of_player[true_role]
+        if expected < 0:
+            continue  # referee/spectator: not a team assignment
+        correct += int(team == expected)
+        total += 1
+    assert total >= 6, "too few tracks had a team label"
+    assert correct / total > 0.9, f"team assignment accuracy {correct}/{total}"
+
+
+def test_kit_quality_is_low_when_two_teams_wear_similar_colours(monkeypatch) -> None:
+    """The report must be able to say 'this is a guess' rather than assert a team.
+
+    Everything on the pitch wears the same colour here (teams *and* the referee), so any split k-means produces is
+    arbitrary and the separation must collapse.
+    """
+    import synthetic_match as sim
+
+    same = dict(L=0.55, a=0.62, b=0.58, sat=0.8, val=0.85, hue=[0.0, 0.0, 0.0, 0.1, 0.9, 0.0])
+    monkeypatch.setitem(sim.TEAM_KITS, 1, same)
+    monkeypatch.setitem(sim.TEAM_KITS, 2, same)
+    _, _, detections = _prepared(frames=200, seed=2)
+    from soccer_analytics.analysis.projection import on_pitch_mask
+
+    keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
+    assignment = _track_people(detections, keep)
+    _, quality = _team_assignment(detections, assignment)
+    assert quality and max(quality.values()) < 0.5
+
+
+def _visible_truth_distance(truth, players: int = 18) -> float:
+    """Distance the camera could actually have measured: only frames where that person was detected, in runs."""
+    total = 0.0
+    for person in range(players):
+        frames = np.where(truth.detected[:, person])[0]
+        if len(frames) < 2:
+            continue
+        runs = np.split(frames, np.where(np.diff(frames) != 1)[0] + 1)
+        for run in runs:
+            if len(run) < 2:
+                continue
+            steps = np.linalg.norm(np.diff(truth.positions[run, person], axis=0), axis=1)
+            total += float(steps.sum())
+    return total
+
+
+def test_distances_and_speeds_are_physically_plausible(prepared) -> None:
+    _, truth, detections = _prepared()
+    report, _ = build_report(detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH)
+    assert report.players
+    for player in report.players:
+        assert player.distance_m >= 0
+        assert 0 <= player.speed_kmh.max() <= 36.0
+        # no player can cover more than ~5 m/s over the simulated passage
+        assert player.distance_m < 5.0 * (player.time[-1] - player.time[0]) + 5
+
+    # Compare with the distance that was actually observable: a following camera sees only part of the pitch, so
+    # summing the whole squad's motion over every frame would compare our estimate against motion nobody could see.
+    observable = _visible_truth_distance(truth)
+    estimated = float(sum(p.distance_m for p in report.players))
+    assert 0.5 < estimated / observable < 1.4, f"distance {estimated:.0f} m vs observable truth {observable:.0f} m"
+
+
+def test_territory_and_momentum_follow_the_simulated_play() -> None:
+    """With team 0 attacking (attack_bias), it must show up further up the pitch and hold more of the action."""
+    _, _, detections = _prepared(frames=600, seed=3, attack_bias=1.0)
+    report, _ = build_report(detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH)
+    team0, team1 = report.teams
+    assert team0.players_observed > 0 and team1.players_observed > 0
+    assert team0.mean_x_fraction > team1.mean_x_fraction, (team0.mean_x_fraction, team1.mean_x_fraction)
+    assert report.momentum, "no momentum buckets were produced"
+    for bucket in report.momentum.values():
+        assert bucket["team_0"] + bucket["team_1"] == pytest.approx(1.0, abs=1e-3)
+    mean_share = float(np.mean([m["team_0"] for m in report.momentum.values()]))
+    assert mean_share > 0.5, f"team 0 was attacking but only held {mean_share:.0%} of the action"
+    assert team0.possession_share == pytest.approx(mean_share, abs=0.01)
+    assert team0.possession_share + team1.possession_share == pytest.approx(1.0, abs=0.02)
+
+
+def test_report_states_its_own_limitations(prepared) -> None:
+    _, _, detections = _prepared()
+    report, _ = build_report(detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH)
+    joined = " ".join(report.notes).lower()
+    assert "manual" in joined and "ball" in joined
+    assert report.detections_used > 0
+    assert report.frames_analysed == 400
+
+
+def test_tracking_is_deterministic(prepared) -> None:
+    from soccer_analytics.analysis.projection import on_pitch_mask
+
+    _, _, detections = _prepared()
+    keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
+    first = _track_people(detections, keep).track_id
+    second = _track_people(detections, keep).track_id
+    assert np.array_equal(first, second)
