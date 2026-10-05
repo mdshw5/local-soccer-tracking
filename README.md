@@ -72,6 +72,25 @@ The dashboard walks through four steps in order, and every step stores its resul
    100% and 167% of its size), which is what the app checks. And the **remaining risk is the venue, not the maths**:
    with several goals in view it is easy to click a corner belonging to the next pitch along, and the only thing that
    reveals it is the clicks disagreeing with each other.
+
+   **Automatic registration is built, and its detector is downloadable.** `geometry/auto_register.py` takes
+   pitch-marker detections from any source, screens each frame against its own ground-plane homography (which is
+   what catches a detector that fires on a goalpost and calls it the centre spot), and hands the survivors to the
+   same robust solver as the clicks. The standard 32-marker template lives in `geometry/pitch_template.py`. The
+   keypoint source is the YOLO-pose model from `rustyneuron01/Real-Time-Football-Detection`, hosted at
+   `tmoklc/scorevisionv1` and fetched on demand by `geometry/pitch_keypoint_yolo.py` - unlike the reference
+   project's HRNet checkpoint, whose LFS object was never pushed, this one actually downloads. Because the camera
+   is a fixed tripod, `register_with_position_prior` searches orientations around the known position rather than
+   solving a free pose, which is what stops it locking onto a structure that is not the main pitch.
+
+   **On this footage the detector is not yet good enough to trust unattended.** The recording is a small-sided game
+   filmed from a 4 m tripod at midfield, and other goals and kickwalls share the frame. The model - trained on
+   broadcast views of one full-size pitch - regularly locks onto the neighbouring goal/half of the pitch instead:
+   on the reference segment its confident markers clustered on a goal that is not the one being filmed, and a
+   position-constrained solve could only reconcile one or two of them with the saved calibration. The model's
+   weights and the registration pipeline are here and tested against the synthetic oracle; the missing piece is a
+   detector that does not confuse one pitch with the next, which means fine-tuning on this camera's own footage.
+   The test server (`scripts/pitch_keypoint_demo.py`) exists to show that evidence directly rather than hide it.
 3. **Build the report.** Project detections to the pitch, track players across frames, split them into two teams from
    their kit colours, and compute distances, speeds, territory and a momentum chart. This step takes seconds, so you
    can re-run it after re-clicking landmarks without touching the video again.
@@ -159,7 +178,15 @@ Honest limits, because the report is only useful if its numbers can be trusted:
   pitch. The reference approach (a fixed ±10 hue band around the mean grass) covered only 51-94% of the grass
   pixels on the real game: grass has two hue modes, shaded and sunlit, with the mean in the gap between them.
   Masking the measured 2nd-98th percentile span instead covers 98%+, and halved the green contamination in the
-  large, camera-followed torsos.
+  large, camera-followed torsos. That band is still *frame-wide*, so it has to be wide enough to cover every
+  lighting mode in the picture at once; the mask now measures a band per tile of a 4x3 grid (`measure_grass`), so a
+  player on shaded turf is masked against shaded turf instead of against a band stretched to also cover the sunlit
+  half. It also measures the grass in Lab, so sun-bleached turf that has fallen below the saturation floor - which
+  used to leak into every kit colour on a bright afternoon - is still removed. Re-running the descriptors over the
+  first 120 frames of the real 17:28 segment (4,261 detections) cut the green hue mass left in the kit by a further
+  11.2%, with the usable-crop fraction unchanged at 0.92 (no kit was discarded to get it). A crop that is entirely
+  grass is reported at low confidence rather than dropped, because a genuinely green kit and a box holding no kit
+  look the same and dropping it sends those players into whichever team is nearer in grey space.
 - **…but the reported team colour is still washed out, and the reason is size, not masking.** The descriptors
   themselves are good — a near player's torso crop reads as pure saturated red or blue. What the clustering is
   fed is dominated by *tiny* far-side and touchline figures (median box height 2.2% of the frame width, ~85 px),
@@ -179,6 +206,56 @@ Honest limits, because the report is only useful if its numbers can be trusted:
 
 The abandoned two-camera workflow (`video_merge.py`, `roi_mask.py`, the stitching dashboard and the fixed-camera
 detector/tracker path) has been removed; the gimbal pipeline above is the only supported path.
+
+## Fine-tuning the pitch detector
+
+The YOLO pitch-keypoint model (`football-pitch-detection.pt`, from `rustyneuron01/Real-Time-Football-Detection`)
+is trained on broadcast views of one full-size pitch. On this camera's footage - a small-sided game from a 4 m
+tripod at midfield, with other goals and kickwalls in frame - it locks onto neighbouring structures, and the
+registration built on top of it is only as good as the detector. Fine-tuning it on this camera's own games is the
+fix. Three scripts run the loop; all three are tested end to end on the reference match.
+
+**Step 0, the one that matters: a good calibration.** The labels are only as accurate as the camera pose they are
+projected through, and a handful of clicks on one moment is not accurate enough - the reference match's own clicks
+reproject 4-63 px away. The calibration studio (`scripts/pitch_calibration_studio.py`) is what fixes that. It runs
+the model on sampled frames, drops its suggestions into the same click editor the dashboard uses, and lets a person
+drag each marker onto the real marking. Corrections accumulate across many frames, and the fit solves a
+drift-corrected camera path from all of them - much more accurate than the same number of clicks on one frame. It
+writes `calibration.json` and `clicks.json` for the match.
+
+```bash
+.venv/bin/streamlit run scripts/pitch_calibration_studio.py --server.port 8507
+```
+
+Then the loop:
+
+```bash
+# 1. Labels, from a match that was calibrated by clicking landmarks. The template is projected through the
+#    calibration and only the main pitch's markers are written, so the neighbouring goals are never taught.
+python scripts/build_pitch_dataset.py \
+    --segment data/segments/game_...__whole_game_541_4851 \
+    --calibration data/matches/2026-10-04_17-28-37-430/calibration.json \
+    --out data/pitch_keypoints --max-frames 1200
+
+# 2. Fine-tune from the downloaded checkpoint (horizontal flip and mosaic off - see the script's docstring).
+python scripts/train_pitch_keypoints.py --data data/pitch_keypoints/data.yaml --epochs 60 --imgsz 1280
+
+# 3. Score it by the thing that matters - a correct camera pose - not keypoint mAP.
+python scripts/evaluate_pitch_registration.py \
+    --segment data/segments/game_...__whole_game_541_4851 \
+    --calibration data/matches/2026-10-04_17-28-37-430/calibration.json \
+    --weights runs/pose/pitch_keypoints_finetune/weights/best.pt
+```
+
+What the reference run showed, honestly: the dataset builder works (`249` frames, median `10` visible markers
+each, correct labels - Ultralytics' own label plot has every keypoint on the main pitch), and even a short 5-epoch
+fine-tune visibly moves the model's predictions off the neighbouring goal and onto the main pitch. It is **not yet
+reliable enough to register unattended** - the pose loss is still falling and keypoints are imprecise, so the
+registration check fails. The reason is label quality, and it was measured: the reference calibration's own clicks
+reproject 4-63 px away, recomputing it with drift correction tightens the fit (rms 1.47 -> 0.55 m) but leaves those
+click errors, and the model cannot learn finer than its labels (pose mAP stayed 0 while box mAP reached 0.49). The
+fix is Step 0 above - correct the markers on many frames in the studio, rebuild, retrain. Training at a higher
+resolution (`--imgsz 1280`) and over several games rather than one 30-minute slice will help too.
 
 ## Tests
 

@@ -86,9 +86,9 @@ def refresh(segment_dir: Path, limit_chunks: int = 0) -> dict:
     if limit_chunks:
         todo = todo[:limit_chunks]
 
-    # `frame_grass_window` is imported here rather than at module scope so the import cost sits after the
+    # `frame_grass_model` is imported here rather than at module scope so the import cost sits after the
     # argument parsing: a bad --segment should fail before OpenCV is loaded, not after.
-    from soccer_analytics.analysis.kit import frame_grass_window
+    from soccer_analytics.analysis.kit import frame_grass_model
 
     done = 0
     changed = 0
@@ -130,7 +130,7 @@ def refresh(segment_dir: Path, limit_chunks: int = 0) -> dict:
             if local >= len(times):
                 break
             seen = local
-            grass = frame_grass_window(frame)
+            grass = frame_grass_model(frame)
             rows_of_frame = np.where(frames == local)[0]
             for row in rows_of_frame:
                 x1, y1, x2, y2 = (float(v) * width for v in rows["det_box"][row])

@@ -26,7 +26,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from soccer_analytics.analysis.kit import DESCRIPTOR_SIZE, frame_grass_window, kit_descriptor
+from soccer_analytics.analysis.kit import DESCRIPTOR_SIZE, frame_grass_model, kit_descriptor
 from soccer_analytics.geometry.camera_motion import (
     DEFAULT_FOCAL,
     CameraMotionTracker,
@@ -299,7 +299,7 @@ def analyse_segment(
             rows["step"].append(state.step if state.step is not None else np.eye(3))
             rows["focal"].append(state.focal)
 
-            grass = frame_grass_window(frame)
+            grass = frame_grass_model(frame)
             for x1, y1, x2, y2, conf in detect_people(model, frame, config, ignore_mask):
                 width = frame.shape[1]
                 rows["det_frame"].append(frame_idx)

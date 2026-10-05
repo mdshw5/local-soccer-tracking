@@ -9,11 +9,22 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from soccer_analytics.tracking.team_classifier import MIN_SATURATION, MIN_VALUE, grass_hue_window, torso_crop
+from soccer_analytics.tracking.team_classifier import (
+    MIN_SATURATION,
+    MIN_VALUE,
+    GrassModel,
+    measure_grass,
+    torso_crop,
+)
 
 DESCRIPTOR_SIZE = 12
 HUE_BINS = 6
 MIN_CROP_PIXELS = 24
+# Confidence stored for a crop that was *entirely* grass. See `kit_descriptor`: the two causes (no kit in view, and
+# a genuinely green kit) are indistinguishable, so this is deliberately above the trust floor the tracker uses and
+# deliberately low - a green kit should cluster with the other green kits rather than vanish, while never outvoting
+# a clean reading.
+ALL_GRASS_KIT_FRACTION = 0.25
 # Descriptor layout, for readers of the stored arrays.
 DESCRIPTOR_FIELDS = (
     "kit_fraction", "L", "a", "b", "saturation", "value",
@@ -90,33 +101,71 @@ def suggest_team_name(rgb: tuple[int, int, int]) -> str:
     return f"{word[0].upper()}{word[1:]}s"
 
 
-def frame_grass_window(frame: np.ndarray) -> tuple[int, int] | None:
-    """Grass hue window for a frame, estimated on a thumbnail (it is the same answer, ~20x cheaper)."""
+def frame_grass_model(frame: np.ndarray) -> GrassModel | None:
+    """The frame's grass, measured on a thumbnail (the per-tile bands need area, but not full resolution).
+
+    Measured at 320 px wide, so a 4x3 tile is ~80 px across - ample for a few thousand grass pixels per tile, and
+    twenty times cheaper. A tile that comes back unmeasured at that size borrows the frame-wide band, which is the
+    correct answer for it anyway.
+    """
     scale = 320.0 / max(frame.shape[1], 1)
     thumb = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else frame
-    return grass_hue_window(thumb)
+    return measure_grass(thumb)
+
+
+def _grass_mask_for(
+    crop: np.ndarray,
+    grass: GrassModel | tuple[int, int] | None,
+    band: tuple[int, int] | None,
+    hsv: np.ndarray,
+    lab: np.ndarray,
+) -> np.ndarray:
+    """Boolean "this is grass" mask for a crop, from a model (spatial) or a plain hue pair (flat).
+
+    ``hsv`` and ``lab`` are the crop's own conversions, passed in so the caller converts once and reuses both for the
+    descriptor's colour statistics.
+    """
+    if isinstance(grass, GrassModel):
+        return grass.mask(hsv, lab, band)
+    if grass is None:
+        return np.zeros(crop.shape[:2], dtype=bool)
+    return cv2.inRange(
+        hsv, np.array([grass[0], MIN_SATURATION, MIN_VALUE]), np.array([grass[1], 255, 255])
+    ).astype(bool)
 
 
 def kit_descriptor(
-    frame: np.ndarray, bbox: tuple[float, float, float, float], grass_hues: tuple[int, int] | None
+    frame: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    grass: GrassModel | tuple[int, int] | None,
 ) -> np.ndarray:
-    """12-float descriptor of the torso colour with grass masked out; zeros if the crop is unusable."""
+    """12-float descriptor of the torso colour with grass masked out; zeros if the crop is unusable.
+
+    The mask is taken with the grass *behind this player*: when ``grass`` is a :class:`GrassModel`, the band of the
+    tile the box sits in is used rather than the frame-wide one, so a player on shaded turf is masked against
+    shaded turf instead of against a band stretched to also cover the sunlit half of the pitch.
+
+    A crop that comes back entirely grass gets its colour measured from the raw crop with a low confidence, rather
+    than being left at zero. The two reasons for an all-grass crop cannot be told apart - the box may hold no kit at
+    all (an occlusion, a badly drawn box) or the player may simply be wearing green - and leaving it at zero is
+    not neutral between them: it removes the green team from the clustering entirely, where those players then land
+    in whichever of the two real teams is nearer in grey space. Reporting them at low confidence keeps them with
+    their own kind and lets `TrackAssignment.kit_quality` mark the split as weak.
+    """
     out = np.zeros(DESCRIPTOR_SIZE, dtype=np.float32)
     crop = torso_crop(frame, bbox)
     if crop is None or crop.shape[0] * crop.shape[1] < MIN_CROP_PIXELS:
         return out
+    band = grass.band_for(bbox, frame.shape) if isinstance(grass, GrassModel) else None
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    kit = np.ones(crop.shape[:2], dtype=bool)
-    if grass_hues is not None:
-        grass = cv2.inRange(
-            hsv, np.array([grass_hues[0], MIN_SATURATION, MIN_VALUE]), np.array([grass_hues[1], 255, 255])
-        ).astype(bool)
-        kit &= ~grass
-    fraction = float(kit.mean())
-    out[0] = fraction
-    if kit.sum() < MIN_CROP_PIXELS // 2:
-        return out  # all grass-coloured: leave the colour fields at zero so it never looks like a kit
-    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+    kit = ~_grass_mask_for(crop, grass, band, hsv, lab)
+    if int(kit.sum()) < MIN_CROP_PIXELS // 2:
+        kit = np.ones(crop.shape[:2], dtype=bool)
+        out[0] = ALL_GRASS_KIT_FRACTION
+    else:
+        out[0] = float(kit.mean())
+    lab = lab.astype(np.float32)
     out[1:4] = lab[kit].mean(axis=0) / 255.0
     out[4] = hsv[..., 1][kit].mean() / 255.0
     out[5] = hsv[..., 2][kit].mean() / 255.0
