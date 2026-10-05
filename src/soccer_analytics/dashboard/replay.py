@@ -6,22 +6,41 @@ Streamlit websocket on every rerun.
 
 One entry per player holds their frame indices, pitch positions (metres) and speeds; upstream positions stay in
 ``PlayerTrack`` order, which is sorted by time - the component interpolates between consecutive observations.
+
+Beside the players the payload carries the two *measurements* the view draws as they are: each team's measured kit
+colour (what the clustering actually saw on the pitch) and the ball scan's track with its measured/forecast flag.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
 from soccer_analytics.analysis.stage_b import PlayerTrack
+from soccer_analytics.dashboard.reports import team_name
 
 # A player is "on the ball" when they are the nearest player to the camera's aim point and within this distance.
-# Same gate as stage_b's momentum: the aim point is a ball proxy, not a detection.
+# Same gate as stage_b's momentum: the aim point is a ball proxy, not the scanned ball - a touch here means
+# "nearest to where the camera was pointed", and it is labelled that way in the UI.
 POSSESSION_RADIUS_M = 12.0
 ROUND_M = 0.1
 
 
 def _round(value: float) -> float:
     return float(round(float(value), 1))
+
+
+def _kit_colour(entry: Sequence[int] | None) -> list[int] | None:
+    """One team's kit colour as a plain JSON list of three ints, or None when there is none to show.
+
+    Clamped rather than trusted: the browser paints markers with ``rgb(...)`` built from these numbers, and a
+    value that can make that string invalid must not leave here. ``None`` is kept as ``None`` - it means the kits
+    were not separable, which is exactly when the component should fall back to its own palette.
+    """
+    if entry is None or len(entry) != 3:
+        return None
+    return [int(min(255, max(0, channel))) for channel in entry]
 
 
 def build_replay(
@@ -31,17 +50,36 @@ def build_replay(
     aim_xy: np.ndarray,
     players: list[PlayerTrack],
     team_names: list[str],
+    ball: tuple[np.ndarray, np.ndarray] | None = None,
+    team_colours: Sequence[Sequence[int] | None] | None = None,
 ) -> dict:
-    """Assemble the replay payload from tracks and the per-frame camera aim (ball proxy).
+    """Assemble the replay payload from tracks, the per-frame camera aim (ball proxy) and the ball track.
 
     Shirt numbers are deliberately *not* baked in here: they come from the roster and the scanner and are passed to
     the component as a small argument, so editing a roster updates the view without rebuilding the replay. Players
     keep every observation the tracker produced - the client decides what to draw.
+
+    ``ball`` is the optional ``(xy (F, 2), measured (F,))`` pair from ``projection.project_ball_track`` (the ball
+    scan, when one has run): NaN rows become ``null``, and the ``measured`` flag rides along as a third element so
+    the view can draw a detection differently from a forecast across a missed frame - the scan's own honesty rule,
+    kept through to the last consumer.
+
+    ``team_colours`` is each team's measured kit colour as ``(r, g, b)``, ``None`` where the clustering could not
+    separate the kits: the component paints its markers with the colour that was actually on the pitch, and keeps
+    its own palette only as the fallback.
     """
     aim = [
         [_round(x), _round(y)] if np.isfinite(x) and np.isfinite(y) else None
         for x, y in np.asarray(aim_xy, dtype=np.float64)
     ]
+
+    ball_out = None
+    if ball is not None:
+        ball_xy, ball_measured = (np.asarray(part, dtype=np.float64) for part in ball)
+        ball_out = [
+            [_round(x), _round(y), int(m)] if np.isfinite(x) and np.isfinite(y) else None
+            for (x, y), m in zip(ball_xy, ball_measured)
+        ]
 
     # Who was on the ball each frame, by proximity to the camera's aim point (the same proxy stage_b uses).
     by_frame: dict[int, list[tuple[int, float, float]]] = {}
@@ -93,7 +131,9 @@ def build_replay(
         "frame_count": int(frame_count),
         "duration_s": _round(frame_count / max(fps, 1e-6)),
         "team_names": list(team_names),
+        "team_colours": None if team_colours is None else [_kit_colour(entry) for entry in team_colours],
         "aim": aim,
+        "ball": ball_out,
         "players": out_players,
     }
 
@@ -102,11 +142,14 @@ def player_table_rows(replay: dict, numbers: dict[int, dict] | None = None):  # 
     """One row per player for the dashboard table; ``numbers`` merges shirt numbers/names in.
 
     Sorted by time on screen descending: with fragmented real-footage tracks there are hundreds of rows, and the
-    players who were actually followed belong at the top.
+    players who were actually followed belong at the top. The team names come out of the replay payload itself -
+    it already carries them for the frontend, so the table cannot end up labelling the teams differently from the
+    map beside it.
     """
     import pandas as pd
 
     numbers = numbers or {}
+    team_names = list(replay.get("team_names") or [])
     rows = []
     for player in replay["players"]:
         stats = player["stats"]
@@ -114,7 +157,7 @@ def player_table_rows(replay: dict, numbers: dict[int, dict] | None = None):  # 
         rows.append(
             {
                 "track": player["track_id"],
-                "team": "referee/other" if player["team"] < 0 else f"Team {player['team'] + 1}",
+                "team": "referee/other" if player["team"] < 0 else team_name(player["team"], team_names),
                 "number": identity.get("number"),
                 "name": identity.get("name") or "",
                 "source": identity.get("source") or "unassigned",

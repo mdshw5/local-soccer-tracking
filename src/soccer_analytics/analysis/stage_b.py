@@ -6,8 +6,9 @@ requires decoding the video again.
 
 Honesty about what is and is not measurable with one following camera:
 * positions/teams/distances/territory/momentum are derived from players we can see on the pitch;
-* the ball is NOT detectable (measured: the COCO ball class never fires on this footage), so goals, shots, saves and
-  blocks are *manual* tags or candidates for review, never claimed automatically;
+* the ball has its own dedicated scan (``analysis.ball``, run from the dashboard); this stage does not consume it yet,
+  so goals, shots, saves and blocks remain *manual* tags or candidates for review, never claimed automatically;
+  this stage's ball *proxy* is the aim point - the pitch position the camera was pointed at each frame;
 * the camera sees part of the pitch at a time, so no full-pitch formation is reported.
 """
 
@@ -18,6 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from soccer_analytics.analysis.kit import kit_rgb
 from soccer_analytics.analysis.projection import PitchDetections, on_pitch_mask
 
 # Physics-limited gating: at 5 fps a player covers < ~1 m per frame, so anything beyond this is not the same person.
@@ -69,6 +71,9 @@ class TeamMetrics:
     mean_speed_kmh: float
     mean_x_fraction: float  # mean pitch x of the team's players, 0 = own goal line, 1 = opponent's
     possession_share: float  # share of frames the team had the nearest player to the action
+    # The team's mean kit colour as RGB, or None when the kits could not be separated. It is what makes "team 0"
+    # recognisable - it anchors the name the user gives the team to the colour they can see on the pitch.
+    kit_rgb: tuple[int, int, int] | None = None
 
 
 @dataclass
@@ -286,11 +291,12 @@ def _stitch_tracks(detections: PitchDetections, assignment: TrackAssignment) -> 
 
 def _team_assignment(
     detections: PitchDetections, assignment: TrackAssignment, *, num_teams: int = 2
-) -> tuple[dict[int, int], dict[int, float]]:
+) -> tuple[dict[int, int], dict[int, float], dict[int, np.ndarray]]:
     """Cluster per-track kit descriptors into teams, plus a possible "other" cluster for the referee.
 
-    Returns the team label per track (``-1`` for a cluster identified as neither team) and how separable the basis
-    was. Two things make this honest rather than confident:
+    Returns the team label per track (``-1`` for a cluster identified as neither team), how separable the basis was,
+    and each team's mean kit descriptor - the colour that tells the two teams apart, read back out for display.
+    Two things make this honest rather than confident:
     * a third cluster is only believed when there are enough tracks, and it is only treated as "other" when it is
       clearly smaller than the two team clusters - that is the referee or a stray track, who would otherwise be
       counted as a team member and would inflate that team's numbers (a referee follows the ball everywhere);
@@ -306,7 +312,7 @@ def _team_assignment(
         if len(usable) >= MIN_KIT_OBSERVATIONS:
             per_track[tid] = np.median(colours[usable], axis=0)
     if len(per_track) < num_teams * 2:
-        return {}, {tid: 0.0 for tid in assignment.tracks}
+        return {}, {tid: 0.0 for tid in assignment.tracks}, {}
 
     ids = sorted(per_track)
     features = np.stack([per_track[tid] for tid in ids])
@@ -330,13 +336,21 @@ def _team_assignment(
     remap = {int(cluster): team for team, cluster in enumerate(team_clusters)}
     teams = {tid: remap.get(int(label), -1) for tid, label in zip(ids, labels)}
 
+    # Each team's colour, averaged over the kit descriptors of the tracks that wear it (not the cluster centre,
+    # which lives in standardised space and no longer means a colour).
+    members: dict[int, list[np.ndarray]] = {}
+    for tid, team in teams.items():
+        if team >= 0:
+            members.setdefault(team, []).append(per_track[tid])
+    colours = {team: np.mean(np.stack(rows), axis=0) for team, rows in members.items()}
+
     within = float(np.mean(np.linalg.norm(features - centres[labels], axis=1)))
     between = float(np.linalg.norm(centres[team_clusters[0]] - centres[team_clusters[1]])) if len(team_clusters) >= 2 else 0.0
     separation = float(np.clip((between - within) / (between + within + 1e-9), 0.0, 1.0))
     quality: dict[int, float] = {tid: separation for tid in ids}
     for tid in assignment.tracks:
         quality.setdefault(tid, 0.0)
-    return teams, quality
+    return teams, quality, colours
 
 
 def _speeds(xy: np.ndarray, time: np.ndarray, sigma_m: np.ndarray) -> np.ndarray:
@@ -466,7 +480,7 @@ def build_report(
     keep = on_pitch_mask(detections, pitch_length_m, pitch_width_m)
     assignment = _stitch_tracks(detections, _track_people(detections, keep, on_progress=lambda f: report(0.55 * f)))
     report(0.6)
-    teams, quality = _team_assignment(detections, assignment)
+    teams, quality, kit_colours = _team_assignment(detections, assignment)
     assignment.team = teams
     assignment.kit_quality = quality
     players = build_tracks(detections, keep, assignment, teams)
@@ -497,6 +511,7 @@ def build_report(
                 mean_speed_kmh=round(float(moving.mean()) if len(moving) else 0.0, 1),
                 mean_x_fraction=round(mean_x, 3),
                 possession_share=round(possession, 3),
+                kit_rgb=kit_rgb(kit_colours.get(team)),
             )
         )
     notes = []
@@ -505,7 +520,10 @@ def build_report(
     weak = [tid for tid, q in quality.items() if q < 0.35]
     if weak:
         notes.append(f"{len(weak)} track(s) had weakly separated kit colours; their team label is a best guess.")
-    notes.append("Goals, shots, saves and blocks are manual tags: the ball is not detectable in this footage.")
+    notes.append(
+        "Goals, shots, saves and blocks are manual tags: the ball scan can follow the ball, but no event is inferred "
+        "from it yet."
+    )
     notes.append("Only part of the pitch is in view at once, so no full-pitch formation is reported.")
     report(1.0)
     return (

@@ -5,8 +5,8 @@ found by tracking how much a single frequency bin stands out from its neighbourh
 rather than by loudness - on the real sample the whole match is dominated by speech near the microphone, and a
 loudness threshold flagged nothing at all.
 
-Everything else is a manual tag. The ball is not detectable (measured on real footage: the COCO ball class never
-fires), so goals, shots, saves and blocks cannot be inferred, and the report says so rather than inventing them.
+Everything else is a manual tag. The ball has its own dedicated scan (``analysis.ball``), but no event is inferred
+from it yet, so goals, shots, saves and blocks stay human calls, and the report says so rather than inventing them.
 Audio-derived moments are therefore *candidates for review*, presented to the user as such.
 """
 

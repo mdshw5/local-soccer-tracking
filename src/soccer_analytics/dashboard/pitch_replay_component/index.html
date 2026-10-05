@@ -144,6 +144,7 @@
       const TEAM_COLOURS = ['#4f8ef7', '#fb7185'];
       const OTHER_COLOUR = '#9ca3af';
       const AIM_COLOUR = '#fde047';
+      const BALL_COLOUR = '#f8fafc';
       const MARGIN_M = 3.5; // room around the pitch for goals and breathing space
       const TRAIL_SECONDS = 4.0;
       const HEAT_RADIUS_M = 2.6;
@@ -175,8 +176,22 @@
       const legend = document.getElementById('legend');
       const emptyNote = document.getElementById('empty');
 
+      function detectedKit(team) {
+        const entry = team >= 0 ? (state.data.team_colours || [])[team] : null;
+        return Array.isArray(entry) && entry.length === 3 ? entry : null;
+      }
       function teamColour(team) {
+        // Markers wear the kit the clustering measured for their team; the fixed palette is only the fallback
+        // (a replay built before the colours were recorded, or kits the clustering could not separate).
+        const rgb = detectedKit(team);
+        if (rgb) return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
         return team >= 0 && team < TEAM_COLOURS.length ? TEAM_COLOURS[team] : OTHER_COLOUR;
+      }
+      function markerTextColour(team) {
+        // The shirt number has to stay readable *on the kit colour*: a white number on a white kit disappears.
+        const rgb = detectedKit(team);
+        if (!rgb) return '#ffffff';
+        return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 150 ? '#0f172a' : '#ffffff';
       }
       function clockText(seconds) {
         const m = Math.floor(seconds / 60);
@@ -195,6 +210,42 @@
         const entry = state.numbers[player.track_id] || {};
         const name = entry.name ? ' ' + entry.name : '';
         return entry.number ? `#${entry.number}${name}` : `track ${player.track_id}${name}`;
+      }
+
+      function drawSoccerBall(bx, by, r) {
+        // The classic pattern at mark size: a white disc, a dark pentagon at the centre and five patches around
+        // it. Drawn bigger than a player dot on purpose (see the draw loop) - this is the mark the eye follows.
+        const dark = 'rgba(15,23,42,0.92)';
+        ctx.beginPath();
+        ctx.arc(bx, by, r, 0, Math.PI * 2);
+        ctx.fillStyle = BALL_COLOUR;
+        ctx.fill();
+        ctx.lineWidth = Math.max(1, r * 0.16);
+        ctx.strokeStyle = dark;
+        ctx.stroke();
+        ctx.fillStyle = dark;
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+          const angle = -Math.PI / 2 + (i * 2 * Math.PI) / 5;
+          const px = bx + Math.cos(angle) * r * 0.44;
+          const py = by + Math.sin(angle) * r * 0.44;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+        for (let i = 0; i < 5; i++) {
+          const angle = -Math.PI / 2 + ((i + 0.5) * 2 * Math.PI) / 5;
+          ctx.beginPath();
+          ctx.arc(
+            bx + Math.cos(angle) * r * 0.8,
+            by + Math.sin(angle) * r * 0.8,
+            r * 0.2,
+            0,
+            Math.PI * 2
+          );
+          ctx.fill();
+        }
       }
 
       // ---------------------------------------------------------------------------------------------------
@@ -435,7 +486,7 @@
 
           const text = textFor(player);
           if (text) {
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle = markerTextColour(player.team);
             ctx.font = `bold ${Math.max(9, radius)}px sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -459,6 +510,29 @@
             ctx.fillText(label, px, ly + 9.5);
           }
           ctx.globalAlpha = 1;
+        }
+
+        // the ball the scan tracked, when the payload carries it: a drawn football on a frame where a detector
+        // saw it, a dashed ring where the position is only a short forecast across a missed frame. Drawn after
+        // the players and *larger than them* on purpose - the ball is what the eye follows, and a mark that
+        // could be mistaken for another player dot would be the wrong thing to look at. The two styles are the
+        // point: a forecast must not read as a sighting.
+        const ball = state.data.ball ? state.data.ball[frame] : null;
+        if (ball) {
+          const bx = g.x(ball[0]);
+          const by = g.y(ball[1]);
+          const ballRadius = Math.max(6.0, 1.2 * g.scale);
+          if (ball[2]) {
+            drawSoccerBall(bx, by, ballRadius);
+          } else {
+            ctx.beginPath();
+            ctx.arc(bx, by, ballRadius, 0, Math.PI * 2);
+            ctx.setLineDash([ballRadius * 0.55, ballRadius * 0.4]);
+            ctx.strokeStyle = BALL_COLOUR;
+            ctx.lineWidth = Math.max(1.5, ballRadius * 0.2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
         }
         clock.textContent = clockText(t);
         if (document.activeElement !== scrub) scrub.value = String(t);
@@ -562,13 +636,17 @@
           .slice(0, 2)
           .map(
             (name, i) =>
-              `<span><span class="chip" style="background:${TEAM_COLOURS[i]}"></span>${name} (${counts[i]})</span>`
+              `<span><span class="chip" style="background:${teamColour(i)}"></span>${name} (${counts[i]})</span>`
           )
           .join('');
         legend.innerHTML =
           chips +
           (other ? `<span><span class="chip" style="background:${OTHER_COLOUR}"></span>other (${other})</span>` : '') +
           `<span><span class="chip" style="background:${AIM_COLOUR}"></span>ball proxy (camera aim)</span>` +
+          (state.data.ball
+            ? `<span><span class="chip" style="background:${BALL_COLOUR}"></span>` +
+              `ball (scan: drawn = seen, dashed ring = forecast)</span>`
+            : '') +
           `<span>${state.data.players.length} tracks, ${Math.round(state.data.duration_s)}s at ${state.data.fps} fps</span>`;
       }
 

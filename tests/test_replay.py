@@ -10,14 +10,15 @@ import numpy as np
 import pytest
 
 from soccer_analytics.analysis import stage_b
-from soccer_analytics.analysis.projection import project_segment, segment_poses
+from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
 from soccer_analytics.dashboard.replay import build_replay, player_table_rows
-from soccer_analytics.geometry.pitch_calibration import PitchCalibration
+from soccer_analytics.geometry.pitch_calibration import PitchCalibration, pitch_to_pixels
 from synthetic_match import PITCH_LENGTH, PITCH_WIDTH, simulate_match
 
 
 @pytest.fixture(scope="module")
-def replay_case():
+def simulated_match_case():
+    """One simulated match, its recovered poses and the calibration a projection needs."""
     segment, truth = simulate_match(frames=200, seed=3)
     q, focal = segment_poses(segment, focal0=float(truth.focal[0]))
     calibration = PitchCalibration(
@@ -28,6 +29,12 @@ def replay_case():
         0.0,
         (),
     )
+    return segment, truth, calibration, q, focal
+
+
+@pytest.fixture(scope="module")
+def replay_case(simulated_match_case):
+    segment, _truth, calibration, q, focal = simulated_match_case
     detections = project_segment(segment, calibration, poses=(q, focal))
     report, _ = stage_b.build_report(
         detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH, match_frames=len(segment.time)
@@ -41,6 +48,12 @@ def replay_case():
         ["Team A", "Team B"],
     )
     return replay, report, segment, detections
+
+
+@pytest.fixture(scope="module")
+def ball_case(simulated_match_case):
+    """The same match, plus what a ball record needs to be projected back to the pitch it was seen on."""
+    return simulated_match_case
 
 
 def test_every_reported_track_is_in_the_replay(replay_case) -> None:
@@ -79,6 +92,106 @@ def test_the_aim_trail_has_one_entry_per_frame(replay_case) -> None:
     for entry in replay["aim"]:
         assert entry is None or (len(entry) == 2 and all(isinstance(value, float) for value in entry))
     assert any(entry is not None for entry in replay["aim"]), "the camera looked at the pitch at least sometimes"
+    # The ball layer is absent, not empty, when no scan has run: the component draws it only when it exists.
+    assert replay["ball"] is None
+
+
+def test_a_ball_record_projects_back_onto_the_pitch(ball_case) -> None:
+    """A scan record stores a pixel; the replay needs metres, and the round trip must return the same spot.
+
+    ``pitch_to_pixels`` is the oracle: the simulated ball's true position, projected with the same calibration the
+    scan's records are projected with. If framing, normalisation or the corrected chain were off, the ball would
+    be drawn metres from the spot it was on.
+    """
+    segment, truth, calibration, q, focal = ball_case
+    frames = [12, 40, 90, 150]
+    records = []
+    for frame in frames:
+        uv, in_front = pitch_to_pixels(calibration, truth.ball[frame][None, :], q[frame], float(focal[frame]))
+        if not in_front[0] or not np.isfinite(uv).all():
+            continue
+        records.append({"i": frame, "status": "tracking", "u": float(uv[0, 0]), "v": float(uv[0, 1])})
+    assert records, "the camera follows the ball, so its true position must be projectable on these frames"
+
+    xy, measured = project_ball_track(records, calibration, q, focal)
+
+    assert len(xy) == len(segment.time)
+    for record in records:
+        frame = record["i"]
+        error = float(np.linalg.norm(xy[frame] - truth.ball[frame]))
+        assert error < 0.05, f"frame {frame}: projected ball {error:.3f} m off"
+        assert measured[frame] == 1.0, "a tracking record is a measurement"
+
+
+def test_a_coasted_frame_is_a_forecast_and_a_lost_frame_is_empty(ball_case) -> None:
+    """The scan's honesty rule has to survive into the replay payload: a forecast never reads as a sighting."""
+    segment, truth, calibration, q, focal = ball_case
+    uv, _ = pitch_to_pixels(calibration, truth.ball[5][None, :], q[5], float(focal[5]))
+    records = [
+        {"i": 5, "status": "coasting", "u": float(uv[0, 0]), "v": float(uv[0, 1])},
+        {"i": 6, "status": "out_of_view", "u": float(uv[0, 0]), "v": float(uv[0, 1])},
+        {"i": 7, "status": "lost", "u": None, "v": None},
+    ]
+    xy, measured = project_ball_track(records, calibration, q, focal)
+
+    assert np.isfinite(xy[5]).all() and measured[5] == 0.0, "a coasted position is a forecast, not a detection"
+    assert np.isnan(xy[6]).all(), "out of view: the ball left the picture, so there is no sighting to draw"
+    assert np.isnan(xy[7]).all(), "lost: the scan has no position at all"
+    assert np.isnan(xy[:5]).all() and np.isnan(xy[8:]).all(), "frames the scan has not reached stay empty"
+
+
+def test_the_payload_keeps_the_ball_and_marks_forecasts(replay_case) -> None:
+    """The component decides what to draw from this payload alone, so the measured flag must ride along.
+
+    Entries are ``[x, y, measured]`` per frame or ``null``: the round trip through JSON must not turn a forecast
+    into a sighting (or the filled dot into a ring, the other way round).
+    """
+    replay, report, segment, detections = replay_case
+    frames = len(segment.time)
+    xy = np.full((frames, 2), np.nan)
+    xy[3] = (21.5, 30.3)
+    xy[4] = (21.9, 30.4)
+    measured = np.zeros(frames)
+    measured[3] = 1.0  # a detection; frame 4 is the tracker's forecast across a miss
+
+    rebuilt = build_replay(
+        (PITCH_LENGTH, PITCH_WIDTH),
+        float(segment.meta["fps"]),
+        frames,
+        detections.aim_xy,
+        report.players,
+        ["Team A", "Team B"],
+        ball=(xy, measured),
+    )
+
+    assert rebuilt["ball"][3] == [21.5, 30.3, 1] and rebuilt["ball"][4] == [21.9, 30.4, 0]
+    assert rebuilt["ball"][0] is None, "no record: nothing to draw"
+    assert len(rebuilt["ball"]) == frames
+
+
+def test_the_payload_carries_the_measured_kit_colours(replay_case) -> None:
+    """The markers wear the kit the clustering measured, so the colours must ride in the payload - and stay absent.
+
+    ``None`` is a value here, not a gap: a team whose kits could not be separated must arrive as ``None`` so the
+    component falls back to its own palette, rather than being handed a made-up colour that looks measured.
+    """
+    replay, report, segment, detections = replay_case
+    common = (
+        (PITCH_LENGTH, PITCH_WIDTH),
+        float(segment.meta["fps"]),
+        len(segment.time),
+        detections.aim_xy,
+        report.players,
+        ["Team A", "Team B"],
+    )
+
+    rebuilt = build_replay(*common, team_colours=[(220, 30, 30), None])
+    assert rebuilt["team_colours"] == [[220, 30, 30], None]
+    assert replay["team_colours"] is None, "a replay built without colours must not carry an invented palette"
+
+    # The browser builds rgb(...) from these numbers; out-of-range values would make that string invalid.
+    clamped = build_replay(*common, team_colours=[(300, -5, 128), (0, 0, 0)])
+    assert clamped["team_colours"] == [[255, 0, 128], [0, 0, 0]]
 
 
 def test_the_touch_proxy_is_bounded_by_frames_with_an_aim(replay_case) -> None:
@@ -100,3 +213,21 @@ def test_the_player_table_merges_shirt_numbers(replay_case) -> None:
     others = table[table["track"] != track]
     assert (others["source"] == "unassigned").all()
     assert (others["number"].isna()).all()
+
+
+def test_the_player_table_labels_teams_the_same_way_the_replay_does(replay_case) -> None:
+    """The table's team column has to come from the payload the map is built from.
+
+    It previously used a name that was never passed in, which took the whole replay section down with a NameError
+    the moment a report existed - the kind of break that only shows up on real data.
+    """
+    replay, _, _, _ = replay_case
+    table = player_table_rows(replay)
+    named = [player for player in replay["players"] if player["team"] >= 0]
+    assert named, "the fixture should have tracked players on a team"
+    expected = {player["track_id"]: replay["team_names"][player["team"]] for player in named}
+    for track, name in expected.items():
+        assert table[table["track"] == track].iloc[0]["team"] == name
+    # A payload without names must still produce a table rather than raising.
+    anonymous = {**replay, "team_names": []}
+    assert len(player_table_rows(anonymous)) == len(replay["players"])

@@ -36,8 +36,9 @@ class PitchDetections:
     conf: np.ndarray  # (D,)
     kit: np.ndarray  # (D, K)
     det_index: np.ndarray  # (D,) index into the segment's detection arrays (for provenance)
-    # (F, 2) pitch position the camera was aimed at each frame. The gimbal follows the ball, so this is the best
-    # available ball proxy - and it is a *measurement*, not a guess about which pixel is the ball.
+    # (F, 2) pitch position the camera was aimed at each frame. The gimbal follows the ball, so this is a good
+    # ball proxy where the ball's own scan (analysis.ball) has not been run - and it is a *measurement* either way,
+    # not a guess about which pixel is the ball.
     aim_xy: np.ndarray
 
 
@@ -120,6 +121,44 @@ def _aim_points(
         if ok[0]:
             aim[frame] = hit[0]
     return aim
+
+
+def project_ball_track(
+    records: list[dict],
+    calibration: PitchCalibration,
+    q: np.ndarray,
+    focal: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The ball scan's per-frame positions in pitch metres, and whether each one was a detection.
+
+    ``records`` is the ``frames`` list of a segment's ``ball_track.json`` (see ``analysis.ball`` and
+    ``scripts/run_ball_scan.py``) - one entry per analysis frame with ``status`` and image-space ``u``/``v``.
+    Returns ``(xy (F, 2), measured (F,))``: ``xy`` is NaN wherever the scan has no position to show, and
+    ``measured`` is 1 where a detector saw the ball that frame, 0 where the position is the tracker's forecast
+    across a miss. Frames the scan has not reached, and frames where the ball was out of view or lost, stay NaN -
+    a forecast that left the picture is exactly what the replay must not draw as a sighting.
+
+    The projection intersects the ball's *centre* pixel with the ground, the same way the foot points are
+    intersected, so a frame reads a ball radius or so beyond the true spot; at these distances that is well
+    inside the ±metre spread of a click. The camera path is the calibration's corrected chain, so ball and
+    players land on the same pitch.
+    """
+    q = calibration.corrected_chain(q)
+    focal = calibration.corrected_focal(focal)
+    frames = len(q)
+    xy = np.full((frames, 2), np.nan)
+    measured = np.zeros(frames)
+    for record in records:
+        status = record.get("status")
+        u, v = record.get("u"), record.get("v")
+        frame = int(record.get("i", -1))
+        if status not in ("tracking", "coasting") or u is None or v is None or not 0 <= frame < frames:
+            continue
+        hit, ok = pixels_to_pitch(calibration, np.array([[float(u), float(v)]]), q[frame], focal[frame])
+        if ok[0]:
+            xy[frame] = hit[0]
+            measured[frame] = 1.0 if status == "tracking" else 0.0
+    return xy, measured
 
 
 def on_pitch_mask(

@@ -6,12 +6,13 @@ Workflow, in the order it appears on screen:
    (Stage A) in the background with a progress bar and resume.
 2. **Register the pitch** - click landmarks in a reference frame; the camera's motion is already known, so this
    calibrates position and orientation and reports how well it fits, per landmark.
-3. **Build the report** - cheap and re-runnable: pitch-space tracking, teams, distances, momentum.
+3. **Build the report** - cheap and re-runnable: pitch-space tracking, teams, distances, momentum, and the
+   separately-scanned ball track when one has run.
 4. **Tag events and cut highlights** - whistle candidates from the audio, manual tags for goals/shots/saves, and the
    three highlight tiers.
 
-Every number on the page is either measured or explicitly labelled as a guess or a manual tag. Where the footage
-cannot support a metric - above all the ball - the page says so rather than inventing one.
+Every number on the page is either measured or explicitly labelled as a guess or a manual tag. Where a metric is
+beyond what the footage (and the scans built on it) can honestly support, the page says so rather than inventing one.
 """
 
 from __future__ import annotations
@@ -59,8 +60,9 @@ from soccer_analytics.analysis.highlights import (
     write_manifest,
 )
 from soccer_analytics.analysis.library import MatchLibrary, new_match_id
+from soccer_analytics.analysis.kit import colour_hex, colour_name, suggest_team_name
 from soccer_analytics.analysis.jerseys import merge_numbers
-from soccer_analytics.analysis.projection import project_segment, segment_poses
+from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
 from soccer_analytics.analysis.stage_a import SegmentConfig, load_segment, read_status, resolve_window, segment_dir_for
 from soccer_analytics.dashboard.pitch_clicks import (
     LANDMARK_HELP,
@@ -86,7 +88,14 @@ from soccer_analytics.dashboard.pitch_clicks import (
     zoom_box,
 )
 from soccer_analytics.dashboard import timeline
-from soccer_analytics.dashboard.reports import report_from_library
+from soccer_analytics.dashboard.reports import (
+    DEFAULT_TEAM_NAMES,
+    colours_were_recorded,
+    is_default_team_name,
+    report_from_library,
+    team_colours,
+    team_name,
+)
 from soccer_analytics.dashboard.replay import build_replay, player_table_rows
 from soccer_analytics.geometry.pitch_calibration import (
     MIN_CLICKS_PER_ANCHOR,
@@ -299,11 +308,135 @@ def replay_view(data_url: str, numbers: dict[int, dict], selected_track: int, te
     )
 
 
+def _team_name_editor(library: MatchLibrary, match_id: str, payload: dict) -> list[str]:
+    """Show each team's kit colour and let it be named; returns the names to use from here on.
+
+    Everything the pipeline writes calls the teams 0 and 1 (the more red kit is 0), which nobody can picture. The
+    report carries the colour the clustering measured for each of them, so the swatch is the anchor: a person
+    names "the red team", not "team 0", and from then on the table, the chart, the replay and the tags agree. The
+    measured colour also suggests the name itself ("Reds", "Dark blues"), which turns naming into a press and an
+    edit rather than a blank field - and a team that already has a name keeps it, because the suggestion only ever
+    fills a placeholder.
+    """
+    record = library.load(match_id)
+    stored = list(record.team_names)[:2] + list(DEFAULT_TEAM_NAMES[len(record.team_names) :])
+    # A report written before the colours were recorded has no such field at all; one that has the field but no
+    # value is a match whose kits the clustering could not separate. The two need different advice.
+    team_rows = list(payload.get("teams") or [])
+    colours_recorded = colours_were_recorded(team_rows)
+    colours = team_colours(team_rows)
+    suggestions = [suggest_team_name(rgb) if rgb is not None else "" for rgb in colours]
+
+    st.subheader("Teams")
+    st.caption(
+        "The two teams are told apart by kit colour, and each keeps the same number every time this report is built. "
+        "Name them here - the table below, the momentum chart, the replay and the event tags then use the names."
+    )
+    for index, column in enumerate(st.columns(2)):
+        with column:
+            rgb = colours[index]
+            if rgb is not None:
+                st.color_picker(
+                    f"Team {index + 1} kit colour",
+                    value=colour_hex(rgb),
+                    disabled=True,
+                    key=f"kit_swatch::{match_id}::{index}",
+                    help="Measured from the match footage: the average colour of the kit pixels of the players the clustering put in this team.",
+                )
+                looks = f"Looks {colour_name(rgb)} in the footage."
+                if suggestions[index] and is_default_team_name(stored[index]):
+                    looks += f" A name for that might be **{suggestions[index]}**."
+                st.caption(looks)
+            elif not colours_recorded:
+                st.caption(
+                    f"Team {index + 1}: this report was built before kit colours were recorded, so there is no "
+                    "swatch or suggested name to show yet - build the report again below and they appear."
+                )
+            else:
+                st.caption(f"Team {index + 1}: no kit colour recorded - the kits were not separable here.")
+
+    with st.form(f"team_names::{match_id}"):
+        for index in (0, 1):
+            current = stored[index]
+            if is_default_team_name(current):
+                current = suggestions[index] or DEFAULT_TEAM_NAMES[index]
+            st.text_input(
+                f"Team {index + 1} name",
+                value=current,
+                key=f"team_name::{match_id}::{index}",
+                max_chars=40,
+            )
+
+        def _save_names() -> None:
+            fresh = library.load(match_id)
+            fresh.team_names = [
+                str(st.session_state.get(f"team_name::{match_id}::{i}", "")).strip() or DEFAULT_TEAM_NAMES[i]
+                for i in (0, 1)
+            ]
+            library.save(fresh)
+            st.session_state["step3_flash"] = (
+                "success",
+                f"Teams are now {fresh.team_names[0]} (team 1) and {fresh.team_names[1]} (team 2).",
+            )
+
+        st.form_submit_button("Save team names", on_click=_save_names)
+    return [
+        str(st.session_state.get(f"team_name::{match_id}::{i}", stored[i])).strip() or DEFAULT_TEAM_NAMES[i]
+        for i in (0, 1)
+    ]
+
+
 @st.cache_data(show_spinner=False)
 def _load_replay_cached(path: str, mtime_ns: int) -> dict:
     """Parse the replay once per file version; it is re-read on every rerun otherwise."""
     del mtime_ns
     return json.loads(Path(path).read_text())
+
+
+BALL_STATUS_STALE_S = 300.0
+BALL_STATUS_FILE = "ball_scan.json"  # written by scripts/run_ball_scan.py beside the segment
+BALL_TRACK_FILE = "ball_track.json"  # the scan's result, beside the status
+
+
+def _ball_status(segment_dir: Path) -> dict:
+    """The ball scan's status file beside the segment; {} until it has ever run."""
+    try:
+        return json.loads((Path(segment_dir) / BALL_STATUS_FILE).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _ball_scan_alive(segment_dir: Path) -> bool:
+    """Whether a scan is running right now: its status says so *and* it was updated recently.
+
+    The recentness is the point. A process killed without a chance to write (a reboot, a crash) leaves "running"
+    behind, and a button disabled by a dead process cannot be pressed to resume it - so anything that has not
+    reported for minutes counts as stopped. The scan updates every few seconds while it runs, so the window is
+    generous.
+    """
+    status = _ball_status(segment_dir)
+    if status.get("state") != "running":
+        return False
+    return (time.time() - float(status.get("updated") or 0.0)) < BALL_STATUS_STALE_S
+
+
+def _ball_track_for_replay(
+    segment_dir: Path, calibration: PitchCalibration, q: np.ndarray, focal: np.ndarray
+):  # noqa: ANN201 - (xy (F,2), measured (F,)) from project_ball_track, or None
+    """The segment's ball scan projected into pitch metres, or None when it has not been scanned.
+
+    A partial scan is used as it stands: the replay draws the frames the scan has reached, and the scan's own
+    status line says whether it is finished. A scan that lands after the report was built shows up on the next
+    build - which is cheap, so the page tells the user to press it again rather than rebuilding behind their back.
+    """
+    try:
+        payload = json.loads((Path(segment_dir) / BALL_TRACK_FILE).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    records = payload.get("frames") or []
+    if not records:
+        return None
+    return project_ball_track(records, calibration, q, focal)
 
 
 @st.cache_data(show_spinner=False)
@@ -459,11 +592,18 @@ def saved_calibration(library: MatchLibrary, match_id: str | None) -> PitchCalib
     return library.load_calibration(match_id)
 
 
-def momentum_chart(momentum: dict, half_minute: float | None = None) -> go.Figure:
+def momentum_chart(momentum: dict, half_minute: float | None = None, team_names: list[str] | None = None) -> go.Figure:
+    """Share of contested frames per minute, for the team the clustering called team 0.
+
+    The curve is named after *that* team - by the name the user gave it - because which team is on top of the chart
+    is the one thing a reader has to know before reading anything into it.
+    """
     minutes = sorted(momentum)
     share = [momentum[m]["team_0"] for m in minutes]
     figure = go.Figure()
-    figure.add_trace(go.Scatter(x=minutes, y=share, name="Team A share", mode="lines+markers"))
+    figure.add_trace(
+        go.Scatter(x=minutes, y=share, name=f"{team_name(0, team_names)} share", mode="lines+markers")
+    )
     figure.add_hline(y=0.5, line_dash="dot", line_color="grey")
     if half_minute is not None:
         # Momentum is keyed by the video's own minutes, so the mark goes straight in without rescaling.
@@ -556,20 +696,82 @@ def _audio_scan_status(library: MatchLibrary, match_id: str, watch_key: str) -> 
         st.rerun()
 
 
+@st.fragment(run_every=POLL_SECONDS)
+def _ball_scan_status(segment_dir: Path, watch_key: str) -> None:
+    """Live progress of the background ball scan; the replay draws the track once the report is rebuilt."""
+    status = _ball_status(segment_dir)
+    state = status.get("state")
+    previous = st.session_state.get(watch_key)
+    st.session_state[watch_key] = state
+    if not status:
+        st.caption(
+            "Not scanned yet. The scan re-reads this segment's video at full resolution and follows the ball frame "
+            "by frame: a window around the prediction while it holds the ball, the whole frame to re-find it after "
+            "a gap, and the camera's own motion (plus the ball's velocity) as the prediction between frames. It is "
+            "expensive - about an hour for a whole game - and it checkpoints on the way, so it can be stopped and "
+            "resumed."
+        )
+    elif state == "running":
+        if _ball_scan_alive(segment_dir):
+            st.progress(
+                min(1.0, float(status.get("progress") or 0.0)),
+                text=str(status.get("message") or "Scanning..."),
+            )
+            st.caption("Running in the background - this bar updates by itself. It can be closed and resumed later.")
+        else:
+            # The process died without a chance to write (a reboot, a crash): the file still says "running" but
+            # nothing has moved the bar for minutes. Saying so beats a progress bar that will never advance.
+            st.warning(
+                "A scan says it is running but has not reported for minutes, so it has probably stopped. The "
+                "button below resumes it from its last checkpoint."
+            )
+    elif state == "error":
+        st.error(f"The scan failed: {status.get('error')}")
+    else:
+        counts = status.get("counts") or {}
+        scanned = int(status.get("scanned") or 0)
+        if counts and scanned:
+            total = int(status.get("total_frames") or 0)
+            seen = 100 * counts.get("tracking", 0) / scanned
+            forecast = 100 * counts.get("coasting", 0) / scanned
+            off = 100 * (counts.get("out_of_view", 0) + counts.get("lost", 0)) / scanned
+            summary = (
+                f"Last scan: {scanned} of {total} frame(s) - the ball was seen on {seen:.0f}% of them, "
+                f"forecast across a missed frame on {forecast:.0f}%, off the picture on {off:.0f}%."
+            )
+        else:
+            # A status written by an older version of the scan has no counts in it; the replay itself does not
+            # care - the track on disk is the same - so the summary degrades to the message rather than inventing
+            # percentages.
+            summary = f"Last scan: {status.get('message') or 'finished'}."
+        if state == "partial":
+            summary += " The scan was stopped early; press the button again to resume it."
+        else:
+            summary += " Press **Build report** to draw the track on the replay."
+        st.caption(summary)
+    if previous == "running" and state != "running":
+        st.rerun()
+
+
 def replay_section(
     library: MatchLibrary, match_id: str, segment, segment_dir: Path, video: str, calibration
 ) -> None:
     """The animated pitch view plus everything known about each player.
 
     Playback is entirely client-side (the component fetches the replay JSON once), so scrubbing and play/pause cost
-    no Streamlit round trips. What *is* Python-side: the annotated player table, the roster editor and the
-    background shirt-number scan - all three share the merge rule "manual beats scan".
+    no Streamlit round trips. What *is* Python-side: the annotated player table, the roster editor and the two
+    background scans (shirt numbers, ball) - the table, the editor and the number scan share the merge rule
+    "manual beats scan", and only the ball scan feeds the *map* itself, through the replay payload.
     """
     replay_path = library.path(match_id) / "replay.json"
     if not replay_path.exists():
         st.info("The animated replay is built together with the report above - press **Build report**.")
         return
     replay = _load_replay_cached(str(replay_path), replay_path.stat().st_mtime_ns)
+    team_names = library.load(match_id).team_names
+    # The payload on disk carries whatever the names were when the report was built; the record is where renaming
+    # lands, so the loaded copy is brought up to date rather than the table disagreeing with the map beside it.
+    replay["team_names"] = list(team_names)
     jerseys = library.load_jerseys(match_id)
     roster = library.load_roster(match_id)
     track_ids = [int(player["track_id"]) for player in replay["players"]]
@@ -584,7 +786,7 @@ def replay_section(
         if entry.get("name"):
             who += f" {entry['name']}"
         team = team_of.get(track, -1)
-        return f"{who} ({'referee/other' if team < 0 else f'Team {team + 1}'})"
+        return f"{who} ({team_name(team, team_names)})"
 
     selected = st.selectbox(
         "Highlight a player in the replay",
@@ -592,12 +794,22 @@ def replay_section(
         format_func=lambda track: "no highlight" if track < 0 else player_label(track),
         key=f"replay_selected::{match_id}",
     )
-    replay_view(_replay_media_url(replay_path), numbers, selected, replay["team_names"], key=f"replay::{match_id}")
+    replay_view(_replay_media_url(replay_path), numbers, selected, team_names, key=f"replay::{match_id}")
+    has_ball = any(entry is not None for entry in (replay.get("ball") or []))
     st.caption(
-        "Press play or drag the timeline. Team colours follow the kit clustering; the yellow dot is the camera aim - "
-        "the best ball proxy this footage allows (the gimbal follows the ball). Trails, shirt numbers and a "
-        "pitch-usage heat map (all players, or just the selected one) are toggled above the map. Numbers come from "
-        "the roster below and the automatic scan; tracks without either show their track id once they last 12 s."
+        "Press play or drag the timeline. Player markers wear each team's measured kit colour; the yellow dot is "
+        "the camera aim - "
+        + (
+            "the ball proxy used when the ball scan has not found the ball. The white football is the ball the "
+            "scan tracked: drawn where a detector saw it, a dashed ring where the position is a short forecast "
+            "across a missed frame."
+            if has_ball
+            else "the best ball proxy this footage allows (the gimbal follows the ball; the scan below can track "
+            "the ball itself)."
+        )
+        + " Trails, shirt numbers and a pitch-usage heat map (all players, or just the selected one) are toggled "
+        "above the map. Numbers come from the roster below and the automatic scan; tracks without either show their "
+        "track id once they last 12 s."
     )
     only_major = st.checkbox(
         "Show only main tracks (seen for 6 s or more)",
@@ -627,7 +839,7 @@ def replay_section(
             editors.append(
                 {
                     "track": track,
-                    "team": "referee/other" if player["team"] < 0 else f"Team {player['team'] + 1}",
+                    "team": team_name(player["team"], team_names),
                     "number": entry.get("number"),
                     "name": entry.get("name") or "",
                     "source": entry.get("source") or "unassigned",
@@ -678,6 +890,40 @@ def replay_section(
             disabled=segment is None or calibration is None,
             key=f"scan_jerseys::{match_id}",
         )
+
+    with st.expander("Track the ball in the footage (automatic scan)"):
+        _ball_scan_status(segment_dir, watch_key=f"ball_watch::{match_id}")
+
+        def _start_ball_scan() -> None:
+            # The child takes seconds to boot (interpreter, torch, the segment's meta) and only then writes its
+            # first status. Writing the same "Starting..." the scan itself would write closes that window: the
+            # button is disabled from the moment of the click instead of briefly offering a second scan that
+            # would race the first over the same checkpoint. The child's own first update overwrites this one.
+            status_path = Path(segment_dir) / BALL_STATUS_FILE
+            command = [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "run_ball_scan.py"),
+                "--segment",
+                str(segment_dir),
+            ]
+            try:
+                status_path.write_text(json.dumps({"state": "running", "message": "Starting...", "updated": time.time()}))
+            except OSError:
+                pass  # an unwritable segment directory fails the child too, and its error lands in the terminal
+            try:
+                subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
+                status_path.write_text(json.dumps({"state": "error", "error": str(exc), "updated": time.time()}))
+                st.session_state["replay_flash"] = ("warning", f"The scan could not be started: {exc}")
+                return
+            st.session_state["replay_flash"] = ("success", "Ball scan started in the background.")
+
+        st.button(
+            "Scan for the ball (background)",
+            on_click=_start_ball_scan,
+            disabled=segment is None or _ball_scan_alive(segment_dir),
+            key=f"scan_ball::{match_id}",
+        )
     show_flash("replay_flash")
 
 
@@ -725,71 +971,100 @@ MATCH_SCOPED_STATE = (
     "calib_reference",
     "calib_clicks_key",
     "events_flash",
+    "step3_flash",
 )
 
-with st.sidebar:
-    st.header("Match")
-    match_ids = library.list_ids()
-    # A match created in the last run asks to be selected. A widget's state can only be set before that widget exists
-    # in the run, and the create button runs long after the sidebar, so it leaves the id here for this run to pick up.
-    pending = st.session_state.pop("archive_select_pending", None)
-    if pending in match_ids:
-        st.session_state["archive_selection"] = pending
-    selection = st.selectbox("Archive", match_ids + ["(new match)"], index=0, key="archive_selection")
-    match_id = None if selection == "(new match)" else selection
-    if st.session_state.get("archive_scope") != match_id:
-        st.session_state["archive_scope"] = match_id
-        for scoped in MATCH_SCOPED_STATE:
-            st.session_state.pop(scoped, None)
-    if match_id:
-        st.caption(f"`{MATCHES_ROOT.relative_to(REPO_ROOT) / match_id}`")
+st.header("Match archive")
+match_ids = library.list_ids()
+
+with st.container(border=True):
+    session_col, footage_col = st.columns([1, 2])
+    with session_col:
+        # A match saved in the last run asks to be selected. A widget's state can only be set before that widget
+        # exists in the run, and the save button runs after this module has been drawn, so it leaves the id here for
+        # the next run to pick up.
+        pending = st.session_state.pop("archive_select_pending", None)
+        if pending in match_ids:
+            st.session_state["archive_selection"] = pending
+        selection = st.selectbox("Archive", match_ids + ["(new match)"], index=0, key="archive_selection")
+        match_id = None if selection == "(new match)" else selection
+        if st.session_state.get("archive_scope") != match_id:
+            st.session_state["archive_scope"] = match_id
+            for scoped in MATCH_SCOPED_STATE:
+                st.session_state.pop(scoped, None)
+        st.caption(
+            f"`{(MATCHES_ROOT / match_id).relative_to(REPO_ROOT)}`"
+            if match_id
+            else "No archive selected - saving the footage starts one."
+        )
+
+    with footage_col:
+        video_options = discover_videos()
+        if not video_options:
+            st.error("No video files found under data/videos or /srv/storage/home_video/Xbot.")
+            st.stop()
+
+        # Selecting an archive has to bring back the footage it was recorded from, or it cannot be reopened: the
+        # picker would stay on whichever video happened to be newest and Step 2 would find no segment belonging to
+        # the match. The widget is keyed per match rather than mutated, so each archive remembers its own choice and
+        # a first visit opens on the footage the match was made from.
+        default_video = 0
+        if match_id is not None:
+            recorded = library.load(match_id).sources
+            reachable = [source for source in recorded if Path(source).exists()]
+            if reachable and reachable[0] not in {str(path) for path in video_options}:
+                video_options = [Path(reachable[0]), *video_options]
+            if reachable:
+                default_video = [str(path) for path in video_options].index(reachable[0])
+            elif recorded:
+                st.warning("The footage this match was recorded from is not reachable: " + ", ".join(recorded))
+
+        video_col, probe_col = st.columns([2, 1])
+        with video_col:
+            chosen = st.selectbox(
+                "Video (newest first)",
+                [str(p) for p in video_options],
+                index=default_video,
+                format_func=lambda p: Path(p).name,
+                key=f"source_video::{match_id}",
+            )
+            manual = st.text_input(
+                "...or paste an absolute path", placeholder="/path/to/match.MP4", key=f"manual_video::{match_id}"
+            )
+            if manual.strip():
+                chosen = manual.strip()
+        with probe_col:
+            if not Path(chosen).exists():
+                st.error("File not found.")
+                st.stop()
+            probe = probe_cached(chosen)
+            st.metric("Resolution", f"{probe.width}x{probe.height}")
+            st.metric("Source FPS", f"{probe.fps:.0f}")
+            st.metric("Duration", f"{probe.duration_s / 60:.1f} min")
+
+# Saving the session: the archive entry everything below is stored against, made from the footage above.
+if match_id is None:
+    def _create_match() -> None:
+        """Runs before the next run's body, so this module picks the new match up in that same run."""
+        existed = new_match_id(chosen) in match_ids
+        record = library.create(chosen)
+        st.session_state["archive_select_pending"] = record.match_id
+        st.session_state["session_flash"] = (
+            "success",
+            f"`{record.match_id}` is already archived for {Path(chosen).name} - opened it rather than saving a "
+            f"second record for the same footage."
+            if existed
+            else f"Saved `{record.match_id}` for {Path(chosen).name}.",
+        )
+
+    st.button("Save as a new match", type="primary", on_click=_create_match)
+show_flash("session_flash")
 
 # --------------------------------------------------------------------------------------------------------------
-# Step 1 - footage and the heavy pass
+# Step 1 - the heavy pass
 # --------------------------------------------------------------------------------------------------------------
-st.header("Step 1 - Choose footage and run the heavy pass")
+st.header("Step 1 - Run the heavy pass")
 show_flash("step1_flash")
-
-video_options = discover_videos()
-if not video_options:
-    st.error("No video files found under data/videos or /srv/storage/home_video/Xbot.")
-    st.stop()
-
-# Selecting an archive has to bring back the footage it was recorded from, or it cannot be reopened: the picker
-# would stay on whichever video happened to be newest and Step 2 would find no segment belonging to the match. The
-# widget is keyed per match rather than mutated, so each archive remembers its own choice and a first visit opens on
-# the footage the match was made from.
-default_video = 0
-if match_id is not None:
-    recorded = library.load(match_id).sources
-    reachable = [source for source in recorded if Path(source).exists()]
-    if reachable and reachable[0] not in {str(path) for path in video_options}:
-        video_options = [Path(reachable[0]), *video_options]
-    if reachable:
-        default_video = [str(path) for path in video_options].index(reachable[0])
-    elif recorded:
-        st.warning("The footage this match was recorded from is not reachable: " + ", ".join(recorded))
-
-video_col, probe_col = st.columns([2, 1])
-with video_col:
-    chosen = st.selectbox(
-        "Video (newest first)",
-        [str(p) for p in video_options],
-        index=default_video,
-        format_func=lambda p: Path(p).name,
-        key=f"source_video::{match_id}",
-    )
-    manual = st.text_input("...or paste an absolute path", placeholder="/path/to/match.MP4", key=f"manual_video::{match_id}")
-    if manual.strip():
-        chosen = manual.strip()
-with probe_col:
-    if not Path(chosen).exists():
-        st.error("File not found.")
-        st.stop()
-    probe = probe_cached(chosen)
-    st.metric("Resolution", f"{probe.width}x{probe.height}")
-    st.metric("Source FPS", f"{probe.fps:.0f}")
-    st.metric("Duration", f"{probe.duration_s / 60:.1f} min")
 
 # --- one game out of several clips ----------------------------------------------------------------------------
 # The camera writes ~30-minute files, so a game arrives as two or three of them. Combining them (a stream copy, no
@@ -962,22 +1237,6 @@ if game_record is not None:
             game_record.clear_marks()
             game_record.save(game_directory)
             st.rerun()
-
-if match_id is None:
-    def _create_match() -> None:
-        """Runs before the next run's body, so the sidebar picks the new match up in that same run."""
-        existed = new_match_id(chosen) in match_ids
-        record = library.create(chosen)
-        st.session_state["archive_select_pending"] = record.match_id
-        st.session_state["step1_flash"] = (
-            "success",
-            f"`{record.match_id}` is already archived for {Path(chosen).name} - opened it rather than creating a "
-            f"second record for the same footage."
-            if existed
-            else f"Created `{record.match_id}` for {Path(chosen).name}.",
-        )
-
-    st.button("Create match from this video", on_click=_create_match)
 
 span_col, length_col = st.columns(2)
 # A marked game starts on kick-off rather than at the top of the recording - that is the point of marking it - and
@@ -1687,6 +1946,7 @@ are sure of.
 # Step 3 - report
 # --------------------------------------------------------------------------------------------------------------
 st.header("Step 3 - Build the tactical report")
+show_flash("step3_flash")
 
 calibration = saved_calibration(library, match_id)
 if segment is None or calibration is None:
@@ -1717,6 +1977,7 @@ else:
             )
             # The replay needs the same tracks, so it is built here rather than in a second pass over the segment.
             advance(0.88, "Building the replay...")
+            ball = _ball_track_for_replay(segment_dir, calibration, q, focal)
             replay = build_replay(
                 (length_m, width_m),
                 float(segment.meta["fps"]),
@@ -1724,6 +1985,8 @@ else:
                 detections.aim_xy,
                 report.players,
                 library.load(match_id).team_names,
+                ball=ball,
+                team_colours=[metrics.kit_rgb for metrics in report.teams],
             )
             advance(0.97, "Saving the report and the replay...")
             st.session_state["report"] = {
@@ -1761,11 +2024,25 @@ else:
         metric_columns[1].metric("Player detections used", payload["detections_used"])
         metric_columns[2].metric("Players tracked", len(payload["players"]))
         metric_columns[3].metric("Tracks with a team", sum(1 for p in payload["players"] if p["team"] >= 0))
-        st.dataframe(pd.DataFrame(payload["teams"]), hide_index=True, use_container_width=True)
+        team_names = _team_name_editor(library, match_id, payload)
+        # The table says the name rather than the index, and leaves out the kit colour: it is shown as a swatch just
+        # above, where it can actually be seen.
+        team_rows = [
+            {
+                **{key: value for key, value in row.items() if key != "kit_rgb"},
+                "team": team_name(int(row["team"]), team_names),
+            }
+            for row in payload["teams"]
+        ]
+        st.dataframe(pd.DataFrame(team_rows), hide_index=True, use_container_width=True)
         if payload["momentum"]:
             st.subheader("Momentum")
             st.plotly_chart(
-                momentum_chart(payload["momentum"], half_minute=None if game_marks is None else game_marks[1] / 60.0),
+                momentum_chart(
+                    payload["momentum"],
+                    half_minute=None if game_marks is None else game_marks[1] / 60.0,
+                    team_names=team_names,
+                ),
                 use_container_width=True,
             )
         st.subheader("Player replay - pitch usage over time")
@@ -1782,6 +2059,7 @@ if match_id is None:
     st.info("Create a match in Step 1 to store events and highlights.")
 else:
     events = library.events(match_id)
+    team_names = library.load(match_id).team_names
     show_flash("events_flash")
 
     # These run before the next run's body, so the table below is rebuilt with the change already in it. Doing the
@@ -1874,7 +2152,7 @@ else:
         "A shout or a bird of prey's call can clear that bar too, so a blast that brings its own low frequencies "
         "with it is rejected: the thresholds for that were measured against the candidates you confirmed and "
         "rejected. Each candidate's note records how far above the match's own level it sat. Goals, shots, saves "
-        "and blocks are yours to tag, because the ball cannot be detected in this footage."
+        "and blocks are yours to tag: the ball scan can follow the ball, but nothing infers an event from it yet."
     )
     tag_col, list_col = st.columns(2)
     with tag_col:
@@ -1882,7 +2160,10 @@ else:
             event_time = st.number_input("Time (s)", min_value=0.0, value=0.0, step=1.0, key="tag_time")
             event_type = st.selectbox("Type", EVENT_TYPES, index=0, key="tag_type")
             event_team = st.selectbox(
-                "Team", [-1, 0, 1], format_func=lambda t: "unspecified" if t < 0 else f"Team {t}", key="tag_team"
+                "Team",
+                [-1, 0, 1],
+                format_func=lambda t: "unspecified" if t < 0 else team_name(t, team_names),
+                key="tag_team",
             )
             event_note = st.text_input("Note", "", key="tag_note")
             st.form_submit_button("Add tag", on_click=_add_tag)
@@ -1931,8 +2212,15 @@ else:
             )
             shown = [e for e in events.events if not (hide_false and e.verdict == VERDICT_FALSE)]
             # The video path is not in the table: it is long, it is the same file for every candidate, and it is
-            # already named under the player when a candidate needs a different one from the selected video.
-            event_rows = [{k: v for k, v in event.to_json().items() if k != "video"} for event in shown]
+            # already named under the player when a candidate needs a different one from the selected video. The
+            # team is the name the user gave it, so a row reads the way the report does.
+            event_rows = [
+                {
+                    **{key: value for key, value in event.to_json().items() if key != "video"},
+                    "team": "unspecified" if event.team < 0 else team_name(event.team, team_names),
+                }
+                for event in shown
+            ]
             if game_marks is not None and game_record is not None:
                 # The half is a question about the game clock, so it comes from the marks, not from the analysed
                 # window: an event outside kick-off/full-time is labelled "-" rather than guessed at.
@@ -2139,7 +2427,7 @@ else:
 # Library
 # --------------------------------------------------------------------------------------------------------------
 st.divider()
-st.header("Match archive")
+st.header("Archive contents")
 rows = library.summaries()
 if rows:
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)

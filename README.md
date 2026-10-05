@@ -132,9 +132,12 @@ guessed. Logo and clock overlays are masked before estimation.
 
 Honest limits, because the report is only useful if its numbers can be trusted:
 
-- **No ball detection.** The ball is a few pixels across at typical gimbal zoom and is not reliably detectable, so
-  goals, shots, saves and blocks are manual tags. The camera's own aim point is used as a ball *proxy* for
-  possession, and the report says so.
+- **The ball is tracked by its own scan, not by the report.** The dashboard's ball scan
+  (`scripts/run_ball_scan.py`) re-reads a segment at 4K with two detectors and follows the ball frame by frame,
+  keeping measurements, short forecasts and "out of the picture" distinct; the replay draws it when a scan has
+  run. It is expensive (~70 min for a whole game) and checkpointed, so it can be stopped and resumed. No event is
+  inferred from it yet: goals, shots, saves and blocks are manual tags. Where no scan has run, the camera's own
+  aim point is used as the ball *proxy* for possession, and the report says so.
 - **Possession is a proximity estimate.** Possession is attributed to the team whose player is nearest the camera's
   aim point. Counting detections per team instead lets the referee decide possession (they follow the ball all
   match); measured as a 10-point swing, which is why the aim proxy is used.

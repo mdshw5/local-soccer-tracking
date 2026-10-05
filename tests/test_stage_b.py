@@ -61,7 +61,7 @@ def test_team_clustering_matches_the_simulated_kits(prepared) -> None:
     _, truth, detections = _prepared()
     keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
     assignment = _track_people(detections, keep)
-    teams, quality = _team_assignment(detections, assignment)
+    teams, quality, _colours = _team_assignment(detections, assignment)
 
     correct = total = 0
     for tid, team in teams.items():
@@ -74,6 +74,46 @@ def test_team_clustering_matches_the_simulated_kits(prepared) -> None:
         total += 1
     assert total >= 6, "too few tracks had a team label"
     assert correct / total > 0.9, f"team assignment accuracy {correct}/{total}"
+
+
+def test_each_clustered_team_carries_the_colour_it_wears() -> None:
+    """The clustering already knows which kit is which; the report has to keep that so a team can be named.
+
+    The simulated kits are deliberately invented numbers rather than colours (the simulator only promises that the
+    two are *separable*), so this checks the plumbing - a colour per team, read back as RGB - while the colour
+    maths itself is held by ``test_kit_colour``.
+    """
+    from soccer_analytics.analysis.kit import kit_rgb
+    from soccer_analytics.analysis.projection import on_pitch_mask
+
+    _, _truth, detections = _prepared()
+    keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
+    assignment = _track_people(detections, keep)
+    teams, _quality, colours = _team_assignment(detections, assignment)
+
+    assert teams, "no team labels were produced"
+    assert set(colours) == {0, 1}, f"expected a colour for each team, got {sorted(colours)}"
+    red, blue = kit_rgb(colours[0]), kit_rgb(colours[1])
+    assert red is not None and blue is not None, "a team's colour did not read back as RGB"
+    assert red != blue, "the two kits are separable, so they cannot be reported as the same colour"
+
+
+def test_the_report_records_the_colour_of_each_team_s_kit() -> None:
+    """What the page shows as a swatch and turns into a name has to survive into the saved report.
+
+    The report is what the dashboard reads back, so the colour has to be in it - not only in the moment the
+    clustering ran.
+    """
+    from soccer_analytics.analysis.stage_b import build_report
+
+    _, _truth, detections = _prepared(frames=200, seed=4)
+    report, _ = build_report(
+        detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH, match_frames=len(detections.time)
+    )
+    assert report.teams, "the report has no teams"
+    for team in report.teams:
+        assert team.kit_rgb is not None, f"team {team.team} has no kit colour"
+        assert len(team.kit_rgb) == 3 and all(0 <= channel <= 255 for channel in team.kit_rgb)
 
 
 def test_kit_quality_is_low_when_two_teams_wear_similar_colours(monkeypatch) -> None:
@@ -92,7 +132,7 @@ def test_kit_quality_is_low_when_two_teams_wear_similar_colours(monkeypatch) -> 
 
     keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
     assignment = _track_people(detections, keep)
-    _, quality = _team_assignment(detections, assignment)
+    _, quality, _colours = _team_assignment(detections, assignment)
     assert quality and max(quality.values()) < 0.5
 
 

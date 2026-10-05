@@ -2,7 +2,7 @@
 
 Three tiers, mirroring what the product describes:
 * ``clip``   - 15-30 s single moments, for sharing;
-* ``goals``  - 1-2 min of scoring plays (from manual tags, since goals cannot be detected);
+* ``goals``  - 1-2 min of scoring plays (from manual tags, since no goal event is inferred);
 * ``match``  - a ~5 min summary spread across the whole match.
 
 Moment ranking is explicit and inspectable: manual tags outrank audio candidates, and momentum swings add weight, so
