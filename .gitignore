@@ -29,5 +29,8 @@ htmlcov/
 /build.json
 *.log
 
+# Ultralytics training output (scripts/train_pitch_keypoints.py). Produced by a run, not read by the code.
+/runs/
+
 # The data itself lives in data/ and outputs/, each with its own .gitignore: every file in them is produced by
 # running the pipeline (or is local footage) and is regenerated from the source video, not read by the code.
