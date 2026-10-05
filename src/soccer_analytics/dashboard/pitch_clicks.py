@@ -33,7 +33,9 @@ CLICK_MAX_WIDTH = 1600  # canvas pixels sent to the browser; small crops go at n
 # Standard pitch markings (metres), the same for every format. Kept in one place so the clickable landmarks and the
 # outline drawn back onto the frame cannot drift apart.
 GOAL_BOX_DEPTH_M = 5.5
-GOAL_BOX_HALF_WIDTH_M = 5.5
+# The goal area (six-yard box) is 5.5 m out from *each goalpost*, and the posts are 7.32 m apart, so its half-width
+# is 3.66 + 5.5 = 9.16 m - not 5.5 m. Using 5.5 drew a goal box narrower than the real one.
+GOAL_BOX_HALF_WIDTH_M = 9.16
 PENALTY_BOX_DEPTH_M = 16.5
 PENALTY_BOX_HALF_WIDTH_M = 20.16
 PENALTY_SPOT_DISTANCE_M = 11.0

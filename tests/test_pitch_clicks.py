@@ -349,11 +349,13 @@ def test_box_and_circle_landmarks_sit_on_the_standard_markings() -> None:
     table = landmark_table(length_m, width_m)
     half_width = width_m / 2
 
-    # Goal box (six-yard): 5.5 m out from the goal line, 5.5 m either side of the goal centre.
-    assert table["goal box near-left"] == (0.0, half_width - 5.5)
-    assert table["goal box near-right"] == (0.0, half_width + 5.5)
-    assert table["goal box far-left"] == (length_m, half_width - 5.5)
-    assert table["goal box far-right"] == (length_m, half_width + 5.5)
+    # Goal box (six-yard): 5.5 m out from the goal line, 9.16 m either side of the goal centre. The half-width is
+    # 3.66 (half the 7.32 m goal) + 5.5 (the box's own depth), which is what the laws of the game specify - using
+    # 5.5 here drew a goal box narrower than the real one.
+    assert table["goal box near-left"] == (0.0, half_width - 9.16)
+    assert table["goal box near-right"] == (0.0, half_width + 9.16)
+    assert table["goal box far-left"] == (length_m, half_width - 9.16)
+    assert table["goal box far-right"] == (length_m, half_width + 9.16)
 
     # Penalty box (18-yard): 16.5 m out, 20.16 m either side of the goal centre.
     assert table["penalty box near-left"] == (0.0, half_width - 20.16)
