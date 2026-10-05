@@ -27,6 +27,7 @@ from soccer_analytics.geometry.pitch_template import (
     KEYPOINT_COUNT,
     STANDARD_LENGTH_M,
     STANDARD_WIDTH_M,
+    TEMPLATE_NAMES,
     template_for,
 )
 
@@ -49,6 +50,18 @@ def test_template_matches_the_standard_markings() -> None:
     # Halfway line meets both touchlines.
     assert template[13] == pytest.approx((STANDARD_LENGTH_M / 2, 0.0))
     assert template[16] == pytest.approx((STANDARD_LENGTH_M / 2, STANDARD_WIDTH_M))
+
+
+def test_template_names_pair_with_the_markers() -> None:
+    """Each marker has exactly one name, and spot checks pin the pairs that would silently mislead a person."""
+    assert len(TEMPLATE_NAMES) == KEYPOINT_COUNT == len(set(TEMPLATE_NAMES))
+    template = template_for()
+    named = dict(zip(TEMPLATE_NAMES, template))
+    # The names share vocabulary with the dashboard's click landmarks, so the same words mean the same pitch points.
+    assert named["corner near-left"] == pytest.approx((0.0, 0.0))
+    assert named["corner far-left"] == pytest.approx((0.0, STANDARD_WIDTH_M))
+    assert named["corner near-right"] == pytest.approx((STANDARD_LENGTH_M, 0.0))
+    assert named["penalty spot, left"] == pytest.approx((11.0, STANDARD_WIDTH_M / 2))
 
 
 def test_template_scales_independently_to_any_format() -> None:

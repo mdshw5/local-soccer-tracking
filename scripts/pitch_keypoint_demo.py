@@ -138,7 +138,7 @@ observations = frame_observations(model, frame, frame_index, image_sizes=tuple(i
 left, right = st.columns(2)
 with left:
     st.subheader("Model keypoints (magenta)")
-    st.image(draw_keypoints(frame, observations, width=1920)[:, :, ::-1], use_container_width=True)
+    st.image(draw_keypoints(frame, observations, width=1920)[:, :, ::-1], width='stretch')
     st.caption(f"{len(observations)} keypoint(s) over the confidence floor on frame {frame_index}.")
 
 with right:
@@ -153,7 +153,7 @@ with right:
         template = template_for(length_m, width_m)
         st.image(
             draw_template(frame, calibration, q[frame_index], float(focal[frame_index]), template, width=1920)[:, :, ::-1],
-            use_container_width=True,
+            width='stretch',
         )
         st.caption(
             f"Camera position {np.round(calibration.position, 2).tolist()}, focal scale "
@@ -220,10 +220,10 @@ if st.button("Run automatic registration", type="primary"):
             frame, result.calibration, q[frame_index], float(focal[frame_index]), template_for(length_m, width_m),
             width=1920,
         )[:, :, ::-1],
-        use_container_width=True,
+        width='stretch',
     )
     with st.expander("Per-frame screening"):
         st.dataframe(
             [{"frame": frame, **counts} for frame, counts in result.frames.items()],
-            use_container_width=True,
+            width='stretch',
         )

@@ -58,7 +58,7 @@ from soccer_analytics.geometry.pitch_keypoint_yolo import (  # noqa: E402
     load_pitch_keypoint_model,
     resolve_pitch_weights,
 )
-from soccer_analytics.geometry.pitch_template import template_for  # noqa: E402
+from soccer_analytics.geometry.pitch_template import TEMPLATE_NAMES, template_for  # noqa: E402
 from soccer_analytics.ingest.ffmpeg_reader import grab_frame, probe_video  # noqa: E402
 
 COMPONENT = components.declare_component(
@@ -114,8 +114,13 @@ def cached_suggestions(video: str, time_s: float, frame_index: int):
 
 
 def template_landmarks(length_m: float, width_m: float) -> dict[str, tuple[float, float]]:
-    """The 32 template markers as named landmarks, so the model's suggestions can be labelled and corrected."""
-    return {f"kp{index:02d}": tuple(point) for index, point in enumerate(template_for(length_m, width_m))}
+    """The 32 template markers as named landmarks, so the model's suggestions can be labelled and corrected.
+
+    The names are what the model's suggestion carries, and what the user sees in the marker picker - "kp17" would
+    be a number to look up, where "penalty area, far right corner" is the thing it is. Order is the template's, so
+    a name and its position stay paired.
+    """
+    return {name: tuple(point) for name, point in zip(TEMPLATE_NAMES, template_for(length_m, width_m))}
 
 
 def landmark_clicker(crop, overview, features, markers, centre, zoom, box, frame_size, key, *, frame_count, initial_frame, marker_kinds):
@@ -181,6 +186,44 @@ frame_count = len(segment.time)
 table = {**landmark_table(length_m, width_m), **template_landmarks(length_m, width_m)}
 names = list(table)
 
+# The legend the page is about: without it "kp17" is a number to look up and correcting a marker means guessing
+# which corner of the pitch it belongs to. Drawn as the pitch itself, so the layout reads at a glance.
+def _legend(length_m: float, width_m: float) -> np.ndarray:
+    scale = 900.0 / length_m
+    width_px, length_px = int(round(width_m * scale)) + 40, int(round(length_m * scale)) + 40
+    image = np.full((width_px, length_px, 3), 40, dtype=np.uint8)
+    template = template_for(length_m, width_m)
+    for index, (x, y) in enumerate(template):
+        px, py = int(20 + x * scale), int(20 + y * scale)
+        cv2.circle(image, (px, py), 4, (255, 200, 0), -1)
+        cv2.putText(image, str(index), (px + 6, py + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2)
+        cv2.putText(image, str(index), (px + 6, py + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    # The outline, so the numbers sit on a recognisable pitch rather than on a scatter plot.
+    edges = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (1, 4), (2, 6), (3, 7), (6, 7), (9, 12), (10, 11),
+             (9, 10), (11, 12), (0, 13), (5, 16), (13, 16), (13, 24), (16, 29), (17, 20), (18, 19),
+             (17, 18), (19, 20), (24, 25), (25, 26), (26, 27), (27, 28), (28, 29), (25, 28), (22, 23),
+             (22, 26), (23, 27), (30, 31)]
+    for a, b in edges:
+        ax, ay = template[a]
+        bx, by = template[b]
+        cv2.line(image, (int(20 + ax * scale), int(20 + ay * scale)), (int(20 + bx * scale), int(20 + by * scale)), (120, 120, 120), 2)
+    return image
+
+
+with sidebar.expander("What is each keypoint? (index -> name)", expanded=False):
+    st.image(_legend(length_m, width_m), caption="Template indices, on the pitch itself (yellow, 0-31)")
+    st.dataframe(
+        [{"index": index, "name": name} for index, name in enumerate(TEMPLATE_NAMES)],
+        width='stretch',
+        height=600,
+    )
+    st.caption(
+        "The drawing's top edge is the touchline **nearest the camera** (that is what `near` means), the bottom is "
+        "the far one; the left end of the pitch is x=0, the right end x=length. `Arc crossing` marks where the "
+        "penalty arc meets the penalty-area edge. Numbers match the index column, and the model's suggestions carry "
+        "these same names."
+    )
+
 sample_frames = sorted(set(np.linspace(0, frame_count - 1, SAMPLE_COUNT).astype(int).tolist()))
 frame_index = sidebar.select_slider(
     "Frame to correct",
@@ -234,7 +277,7 @@ if show_suggestions and not seeds and not any(p["frame"] == frame_index for p in
     suggestions = cached_suggestions(video, float(segment.time[frame_index]), frame_index)
     if suggestions:
         st.session_state["seeds"] = st.session_state.get("seeds", []) + [
-            {"frame": frame_index, "label": f"kp{index:02d}", "u": u, "v": v, "confidence": confidence}
+            {"frame": frame_index, "label": TEMPLATE_NAMES[index], "u": u, "v": v, "confidence": confidence}
             for index, u, v, confidence in suggestions
         ]
         seeds = [s for s in st.session_state["seeds"] if s["frame"] == frame_index]
@@ -249,8 +292,9 @@ landmark_clicker(
 )
 
 st.caption(
-    f"Frame {frame_index} of {frame_count}. Magenta markers are the model's suggestions (labels are its keypoint "
-    "indices); drag each onto the real marking and press **Apply**. Add more with the **Marker** picker."
+    f"Frame {frame_index} of {frame_count}. Magenta markers are the model's suggestions, labelled with the marker "
+    "they are meant to be - drag each onto the real marking and press **Apply**. Add more with the **Marker** "
+    "picker (names as in the sidebar's keypoint table)."
 )
 
 # ---- fit and save ------------------------------------------------------------------------------------------------
@@ -279,7 +323,7 @@ calibration = PitchCalibration.from_json(st.session_state["calibration"]) if "ca
 if calibration is not None:
     view_q, view_focal = calibration.corrected_frame(q[frame_index], float(focal[frame_index]), frame_index)
     overlay = pitch_overlay(overview, calibration, view_q, view_focal, length_m, width_m)
-    st.image(overlay[:, :, ::-1], caption="Current calibration projected onto this frame", use_container_width=True)
+    st.image(overlay[:, :, ::-1], caption="Current calibration projected onto this frame", width='stretch')
 
     save_col, _ = st.columns([1, 3])
     with save_col:

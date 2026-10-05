@@ -101,6 +101,44 @@ def _normalised_template() -> tuple[Tuple, ...]:
 NORMALISED_TEMPLATE: tuple[Tuple, ...] = _normalised_template()
 KEYPOINT_COUNT = len(NORMALISED_TEMPLATE)
 
+# What each template index is, in the words a person correcting a suggestion needs. Index order is the reference
+# project's, so name and position stay paired - reordering either would pair a name with the wrong marker.
+TEMPLATE_NAMES: tuple[str, ...] = (
+    "corner near-left",
+    "penalty area, left goal line, near corner",
+    "goal area, left goal line, near corner",
+    "goal area, left goal line, far corner",
+    "penalty area, left goal line, far corner",
+    "corner far-left",
+    "goal area, near, 5.5 m from the goal line",
+    "goal area, far, 5.5 m from the goal line",
+    "penalty spot, left",
+    "penalty area, left, near corner",
+    "penalty area, left, near arc crossing",
+    "penalty area, left, far arc crossing",
+    "penalty area, left, far corner",
+    "halfway line, near touchline",
+    "centre circle, near point",
+    "centre circle, far point",
+    "halfway line, far touchline",
+    "penalty area, right, near corner",
+    "penalty area, right, near arc crossing",
+    "penalty area, right, far arc crossing",
+    "penalty area, right, far corner",
+    "penalty spot, right",
+    "goal area, right, near corner",
+    "goal area, right, far corner",
+    "corner near-right",
+    "penalty area, right goal line, near corner",
+    "goal area, right goal line, near corner",
+    "goal area, right goal line, far corner",
+    "penalty area, right goal line, far corner",
+    "corner far-right",
+    "centre circle, left point",
+    "centre circle, right point",
+)
+assert len(TEMPLATE_NAMES) == KEYPOINT_COUNT
+
 
 def template_for(length_m: float = STANDARD_LENGTH_M, width_m: float = STANDARD_WIDTH_M) -> list[Tuple]:
     """The 32 keypoints in metres for a pitch of this format.
@@ -108,6 +146,8 @@ def template_for(length_m: float = STANDARD_LENGTH_M, width_m: float = STANDARD_
     Independent scaling on each axis, which is how the project's other landmarks are derived too: a 9v9 pitch is a
     smaller pitch, not the same pitch cropped. It also means the template is correct at the standard 105x68 exactly,
     since the normalised points came from there.
+
+    The names these positions belong to are in :data:`TEMPLATE_NAMES`, paired by index.
     """
     if length_m <= 0 or width_m <= 0:
         raise ValueError("pitch length and width must be positive")
