@@ -203,14 +203,31 @@ STITCH_SPEED_M_PER_FRAME = 1.4  # a full sprint between two observations (7 m/s 
 STITCH_MAX_KIT_DISTANCE = 0.45  # kit colours (L, a, b, saturation, value) further apart than this never stitch
 STITCH_NO_KIT_FACTOR = 0.6  # with no colour evidence the spatial window tightens
 
+KIT_SIZE_MIN_HEIGHT = 60.0  # px at 1920 width: below this a torso crop is a few pixels and reads grey
+KIT_SIZE_QUANTILE = 0.75  # per track, only its largest quartile of observations is trusted for colour
+
+
+def _track_kit_descriptor(detections: PitchDetections, rows: np.ndarray) -> np.ndarray | None:
+    """One kit descriptor per track, taken from its LARGEST observations.
+
+    Most detections in a fixed-camera game are tiny far-side figures whose torso crop is a handful of grey pixels;
+    the median over all of a track's observations is therefore washed out even when the same player was seen up
+    close reading pure kit colour. So the descriptor is the median over the track's largest quartile of boxes
+    (and never over boxes below ``KIT_SIZE_MIN_HEIGHT``), falling back to all usable observations only when the
+    track was never seen large enough. Returns None when there is not enough colour evidence at all.
+    """
+    usable = rows[detections.kit[rows, 0] > MIN_KIT_FOR_COST]
+    if len(usable) < MIN_KIT_OBSERVATIONS:
+        return None
+    heights = detections.height_px[usable]
+    big = usable[heights >= max(KIT_SIZE_MIN_HEIGHT, np.quantile(heights, KIT_SIZE_QUANTILE))]
+    chosen = big if len(big) >= MIN_KIT_OBSERVATIONS else usable
+    return np.median(detections.kit[chosen, 1:6], axis=0)
+
 
 def _track_kit_colours(detections: PitchDetections, tracks: dict[int, np.ndarray]) -> dict[int, np.ndarray | None]:
-    """Median kit colour per track (None when too few usable crops), used only to gate stitching."""
-    medians: dict[int, np.ndarray | None] = {}
-    for track_id, rows in tracks.items():
-        usable = rows[detections.kit[rows, 0] > MIN_KIT_FOR_COST]
-        medians[track_id] = np.median(detections.kit[usable, 1:6], axis=0) if len(usable) >= MIN_KIT_OBSERVATIONS else None
-    return medians
+    """Kit descriptor per track (None when too few usable crops), used only to gate stitching."""
+    return {track_id: _track_kit_descriptor(detections, rows) for track_id, rows in tracks.items()}
 
 
 def _stitch_tracks(detections: PitchDetections, assignment: TrackAssignment) -> TrackAssignment:
@@ -304,13 +321,11 @@ def _team_assignment(
     """
     from sklearn.cluster import KMeans
 
-    colours = detections.kit[:, 1:6]  # L, a, b, saturation, value: the part that identifies a kit
-    weight = detections.kit[:, 0]  # fraction of the torso that was kit rather than grass
     per_track: dict[int, np.ndarray] = {}
     for tid, rows in assignment.tracks.items():
-        usable = rows[(weight[rows] > MIN_KIT_FOR_COST)]
-        if len(usable) >= MIN_KIT_OBSERVATIONS:
-            per_track[tid] = np.median(colours[usable], axis=0)
+        descriptor = _track_kit_descriptor(detections, rows)
+        if descriptor is not None:
+            per_track[tid] = descriptor
     if len(per_track) < num_teams * 2:
         return {}, {tid: 0.0 for tid in assignment.tracks}, {}
 

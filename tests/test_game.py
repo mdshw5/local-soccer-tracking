@@ -14,9 +14,11 @@ from soccer_analytics.analysis.game import (
     Clip,
     GameRecord,
     build_game,
+    compatibility_problem,
     concat_list_text,
     find_for_video,
     half_labels_for,
+    locations,
     plan,
 )
 from soccer_analytics.ingest.ffmpeg_reader import FFmpegError, VideoProbe, probe_video
@@ -200,3 +202,38 @@ def test_a_failed_build_leaves_no_half_written_game(tmp_path: Path) -> None:
         build_game([clip], output)
 
     assert not output.exists()
+
+
+def test_one_clip_is_the_game_video_and_is_left_exactly_as_it_is(tmp_path: Path) -> None:
+    """A game already merged in an earlier pass must be usable on its own, with nothing copied or re-encoded.
+
+    The alternative - concatenating a single input onto itself - would rewrite a match-sized file to produce a
+    byte-identical one, and a run interrupted halfway through that leaves the original truncated. So the single
+    clip *is* the output, and the build must leave it untouched.
+    """
+    only = tmp_path / "game_16-28-37.784.mp4"
+    _write_clip(only, 4, 12)
+    before = only.read_bytes()
+
+    planned = plan([only])
+
+    assert planned.problem is None, "one clip has nothing to disagree with, so it is always combinable"
+    assert len(planned.clips) == 1 and planned.clips[0].start_s == 0.0
+    # The combined video is the clip itself, not a new file beside it.
+    ordered, output, directory = locations([only])
+    assert output == only
+    assert not list(tmp_path.glob("game_16-28-37.784_*.mp4"))
+
+    assert build_game(planned.clips, output) == only
+    assert only.read_bytes() == before, "the game video must not be rewritten"
+    assert probe_video(only).duration_s == pytest.approx(4.0, abs=0.4)
+    assert directory.name.startswith("game_"), "the manifest and proxy still get their own directory"
+
+
+def test_a_single_clip_does_not_need_a_second_one_to_be_accepted() -> None:
+    """The minimum that used to be two is now one: a lone file is a valid game, not a half-finished selection."""
+    assert compatibility_problem([_fake_probe()]) is None
+    assert compatibility_problem([]) is None
+    # Two clips still have to agree with each other.
+    assert compatibility_problem([_fake_probe(), _fake_probe()]) is None
+    assert compatibility_problem([_fake_probe(), _fake_probe(codec="h264")]) is not None

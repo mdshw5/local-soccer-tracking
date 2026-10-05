@@ -4,6 +4,9 @@ Usage::
 
     python scripts/run_build_game.py --clip 16-28.MP4 --clip 16-58.MP4 --out data/games/<game_id> [--cpu]
 
+A single ``--clip`` is also accepted: a file that is already the whole game is used as it stands, with nothing
+copied or re-encoded, and only the manifest and proxy are written.
+
 Combines the clips with a stream copy (``-c copy`` - the clips come from one camera, so nothing is re-encoded),
 writes the game's manifest, then builds the low-resolution proxy that kick-off, half-time and full-time are marked
 on. The state after each step is written to ``build.json`` in the output directory, which is what the page polls.
@@ -35,7 +38,14 @@ def main() -> int:
     args = parser.parse_args()
 
     directory = Path(args.out)
-    game.write_build_state(directory, state="running", pid=os.getpid(), started=time.time(), stage="combining", error=None)
+    game.write_build_state(
+        directory,
+        state="running",
+        pid=os.getpid(),
+        started=time.time(),
+        stage="combining" if len(args.clip) > 1 else "reading the single game video",
+        error=None,
+    )
     try:
         ordered, output, expected = game.locations(args.clip, root=directory.parent)
         if expected != directory:

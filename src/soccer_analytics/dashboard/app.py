@@ -1091,7 +1091,8 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
     st.caption(
         "A game usually arrives as two or three camera files. Combining them is a plain stream copy - nothing is "
         "re-encoded - and gives one continuous video. The combined file is written next to the first clip, because "
-        "it is as large as they are."
+        "it is as large as they are. If you have already merged them yourself, pick that one file on its own and "
+        "it is used as it stands: nothing is copied or re-encoded."
     )
     picked_clips = st.multiselect(
         "Clips (any order - the camera's own timestamps put them in playing order)",
@@ -1099,18 +1100,26 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
         format_func=lambda path: Path(path).name,
         key=f"game_clips::{match_id}",
     )
-    if len(picked_clips) < 2:
-        st.info("Pick at least two clips.")
+    if not picked_clips:
+        st.info("Pick at least one clip.")
     else:
         ordered_clips, expected_output, expected_dir = game_lib.locations(picked_clips)
         planned_game = game_lib.plan(ordered_clips)
         total_minutes = sum(clip.duration_s for clip in planned_game.clips) / 60.0
-        st.write(
-            "Playing order: "
-            + " -> ".join(Path(clip.path).name for clip in planned_game.clips)
-            + f" - {total_minutes:.0f} min"
-        )
-        st.caption(f"Will write `{expected_output}`")
+        if len(planned_game.clips) == 1:
+            only = Path(planned_game.clips[0].path)
+            st.write(f"Already one game video: {only.name} - {total_minutes:.0f} min")
+            st.caption(
+                "Used as it stands. The game metadata, the marking proxy and the half-time marks all live in "
+                f"`{expected_dir.name}` beside it, not in the video itself, so the file is never written to."
+            )
+        else:
+            st.write(
+                "Playing order: "
+                + " -> ".join(Path(clip.path).name for clip in planned_game.clips)
+                + f" - {total_minutes:.0f} min"
+            )
+            st.caption(f"Will write `{expected_output}`")
         if planned_game.problem:
             st.error(
                 f"These clips cannot be combined: {planned_game.problem}. A combination without a re-encode needs "
@@ -1118,6 +1127,7 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
                 "silently."
             )
         else:
+
             def _build_game() -> None:
                 command = [sys.executable, str(REPO_ROOT / "scripts" / "run_build_game.py")]
                 for clip in ordered_clips:
@@ -1132,8 +1142,9 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
 
             build_state = game_lib.read_build_state(expected_dir)
             running = build_state.get("state") == "running"
+            label = "Use this game video" if len(planned_game.clips) == 1 else "Combine into one game video"
             st.button(
-                "Combine into one game video",
+                label,
                 disabled=running,
                 on_click=_build_game,
                 key=f"build_game::{match_id}",
@@ -1147,10 +1158,16 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
             elif build_state.get("state") == "error":
                 st.error(f"The build failed: {build_state.get('error')}")
             elif expected_output.exists():
-                st.success(
-                    f"Combined: `{expected_output.name}`. Pick it in the video list above, then mark the game "
-                    "clock below."
-                )
+                if len(planned_game.clips) == 1:
+                    st.success(
+                        f"Ready: `{expected_output.name}`. Pick it in the video list above, then mark the game "
+                        "clock below."
+                    )
+                else:
+                    st.success(
+                        f"Combined: `{expected_output.name}`. Pick it in the video list above, then mark the game "
+                        "clock below."
+                    )
 
 if game_record is not None:
     game_directory = game_lib.game_dir(game_lib.GAMES_ROOT, game_record.game_id)

@@ -200,7 +200,14 @@ def game_id_for(paths: list[Path]) -> str:
 
 
 def output_for(paths: list[Path]) -> Path:
-    """Where the combined video goes: beside the clips, because it is as large as they are."""
+    """Where the combined video goes: beside the clips, because it is as large as they are.
+
+    A single clip is already the game video and is returned as it stands. The alternative - concatenating one
+    input onto itself - would copy tens of gigabytes to produce a byte-identical file, and on a filesystem that
+    is nearly full that is how you lose a match you already have.
+    """
+    if len(paths) == 1:
+        return Path(paths[0])
     first = Path(paths[0])
     return first.parent / f"game_{sanitise(first.stem)}.mp4"
 
@@ -221,9 +228,10 @@ def compatibility_problem(probes: list[VideoProbe]) -> str | None:
 
     Combining HEVC clips from one camera is a plain stream copy; clips that differ in codec or frame size would
     need a full re-encode of tens of gigabytes, so this refuses and says why rather than doing that silently.
+    One clip has nothing to disagree with: it is combined with nothing, so it is always compatible.
     """
     if len(probes) < 2:
-        return "need at least two clips to combine"
+        return None
     reference = probes[0]
     for index, probe in enumerate(probes[1:], start=2):
         reasons = []
@@ -281,6 +289,12 @@ def build_command(list_path: str | Path, output: str | Path) -> list[str]:
 def build_game(clips: list[Clip], output: str | Path) -> Path:
     """Concatenate the clips into one video, atomically, so a torn file is never mistaken for a finished game."""
     output = Path(output)
+    sources = {Path(clip.path).resolve() for clip in clips}
+    if output.resolve() in sources:
+        # A single already-merged game file: the "combined" video is that file. Copying it onto itself would
+        # rewrite a match-sized file for nothing, and replaces the original with a truncated one if it is
+        # interrupted, so there is nothing to do here and saying so is the honest outcome.
+        return output
     output.parent.mkdir(parents=True, exist_ok=True)
     tmp = output.with_name(output.name + ".tmp.mp4")
     with tempfile.TemporaryDirectory() as tmpdir:
