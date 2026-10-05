@@ -54,18 +54,22 @@ The dashboard walks through four steps in order, and every step stores its resul
 
    **If a corner is not in shot, use the goal centre** (`goal centre left` / `goal centre right`) - the middle of the
    goal line says as much about that end of the pitch as the corner flag does, and the goal mouth is far easier to
-   pick out. What you cannot substitute is *spread*: landmark clicks are the only thing tying the video to the pitch,
-   and a set that is all far away or all along one line leaves the fit badly undetermined. Measured against a
-   simulated match with 4 px of click noise, four distant landmarks were out by more than 50 m; eight spread across
-   the frame were within 2.4 m every time. Six is usually enough, four is the bare minimum.
+   pick out. The **goal box, penalty box, penalty spots and the four cardinals of the centre circle** are usually
+   visible too, and they are the same standard markings for every format: they sit at a range of distances from the
+   camera, which is exactly the spread the fit is short of when the near corners are out of shot. What you cannot
+   substitute is *spread*: landmark clicks are the only thing tying the video to the pitch, and a set that is all far
+   away or all along one line leaves the fit badly undetermined. Measured against a simulated match with 4 px of
+   click noise, four distant landmarks were out by more than 50 m; eight spread across the frame were within 2.4 m
+   every time. Six is usually enough, four is the bare minimum.
 
    Because the camera motion is already known, the calibration solves for the camera position, its rotation and a
    focal-length scale. **The app says when a fit cannot be trusted**: if the solver runs a parameter to the edge of
    its search range it reports that rather than presenting the number as a measurement, and it names the clicks that
-   disagree with the rest, by landmark and frame. A yellow pitch outline is drawn back onto the frame, with a magenta
-   cross on every landmark the fit implies - including the corners you never clicked - so you can see where the
-   missing ones have landed. If it sits on the real markings the registration is good, and if it is mirrored a label
-   is on the wrong corner. A fit that is no good can be discarded from the same panel and the clicks redone.
+   disagree with the rest, by landmark and frame. The whole set of pitch markings is drawn back onto the frame, with
+   a magenta cross on every landmark the fit implies - including the corners you never clicked - so you can see where
+   the missing ones have landed. If the markings sit on the real ones the registration is good, and if they are
+   mirrored a label is on the wrong corner. A fit that is no good can be discarded from the same panel and the
+   clicks redone.
 
    Two things that are easy to assume wrongly, both measured. A **wrong match format does not show up in the fit
    residual** - it moves the recovered camera height instead (2.3, 3.9 and 6.9 m for the same pitch described as 60%,

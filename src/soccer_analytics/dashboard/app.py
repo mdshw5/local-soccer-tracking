@@ -1459,8 +1459,9 @@ if segment is not None:
             """
 The camera moves, so the app has to work out *where the camera was* before it can say where a player is. It does
 that from **landmarks**: fixed markings on the pitch whose real position you already know, because the laws of the
-game put them there. Halfway line, centre spot, corner flags - those are the only things in the frame with a known
-real-world position, so the calibration is only ever as good as these clicks.
+game put them there. Halfway line, centre spot, corner flags, the goal and penalty boxes, the penalty spots, the
+centre circle - those are the only things in the frame with a known real-world position, so the calibration is only
+ever as good as these clicks.
 
 **What to click**
 
@@ -1488,15 +1489,20 @@ real-world position, so the calibration is only ever as good as these clicks.
    against the grass, but the goal mouth is easy to pick out, and the middle of the goal line says as much about
    that end of the pitch as the flag does. Click **goal centre left** / **goal centre right** in place of a corner
    you cannot see.
-5. **What you cannot substitute is spread.** Four clicks that are all a long way off, or all along one line, leave
+5. **The goal box, penalty box, penalty spots and centre circle are usually visible too.** The corners of the
+   six-yard and eighteen-yard boxes, the penalty spots and the four points where the centre circle crosses the
+   halfway and centre lines are all standard markings at a range of distances from the camera - exactly the spread
+   the fit is short of when the near corners are out of shot. Click the ones you can see clearly; the goal box in
+   particular is a good near landmark, because it sits close to the camera at the end you are filming from.
+6. **What you cannot substitute is spread.** Four clicks that are all a long way off, or all along one line, leave
    the fit with tens of metres of doubt - measured on a simulated match, four distant landmarks were out by more
    than 50 m. Aim for landmarks at a *range* of distances from the camera: the halfway line where it meets the near
    touchline is a good near one, because a long white line is easy to pick out. Click as many as you can be sure
    of. **Six to eight spread across the frame is comfortable; four is the absolute minimum.**
-6. Repeat as needed. The app discards a bad click for you, and the fit check projects the corners you never
+7. Repeat as needed. The app discards a bad click for you, and the fit check projects the corners you never
    clicked, so you can see where it thinks they are.
 
-Once a calibration is saved, the whole-frame view carries it too: the pitch outline and every landmark, projected
+Once a calibration is saved, the whole-frame view carries it too: the pitch markings and every landmark, projected
 through the fit onto whichever frame is loaded. To re-anchor a later moment, press **Place the calibrated landmarks
 as markers** - each landmark the calibration used lands in the magnified view where the fit expects it, and you
 **drag** it onto the real marking and Apply. A drag is a measurement, so it says how far the fit has slid by that
@@ -1506,9 +1512,10 @@ moment; it is also far quicker than finding five markings from scratch.
 other (this is the order in the dropdowns: `near-left`, `near-right`, then the two `far` ones). Get a consistent
 loop and the app can work out the rest.
 
-**Then check the yellow outline** the app draws back onto the frame. It is the pitch, projected through your
-calibration. If it lands on the real markings, the registration is good. If it is mirrored, or clearly in the wrong
-place, fix the labels and recalibrate - the per-landmark error table tells you which click to look at.
+**Then check the yellow markings** the app draws back onto the frame. They are the whole pitch - touchlines, halfway
+line, both boxes, the centre circle, the penalty arcs and spots and the corner arcs - projected through your
+calibration. If they land on the real markings, the registration is good. If they are mirrored, or clearly in the
+wrong place, fix the labels and recalibrate - the per-landmark error table tells you which click to look at.
 
 Be honest with yourself about the far corners: at 40-90 m, four pixels of click noise is worth several metres of
 ground error in the depth direction. If the far corner is a blurred smudge, leave it out and use the landmarks you
@@ -1945,9 +1952,9 @@ are sure of.
 
         if full is not None:
             st.write(
-                "**Fit check** - the yellow outline is the pitch projected through your calibration. The magenta "
-                "crosses are every landmark the fit implies, *including the ones you did not click*: that is where "
-                "the corners you could not see have ended up."
+                "**Fit check** - the yellow markings are the whole pitch projected through your calibration. The "
+                "magenta crosses are every landmark the fit implies, *including the ones you did not click*: that is "
+                "where the corners you could not see have ended up."
             )
             check = cv2.resize(full, (1440, int(1440 * full.shape[0] / full.shape[1])), interpolation=cv2.INTER_AREA)
             overlay_q, overlay_focal = calibration.corrected_frame(q[reference], float(focal[reference]), reference)
@@ -1969,7 +1976,7 @@ are sure of.
             st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), use_container_width=True)
             st.caption(
                 "Cyan dots are your clicks, magenta crosses are what the fit implies. If a magenta cross sits on a "
-                "corner you can see, the registration is good; if the outline is mirrored, a label is on the wrong "
+                "corner you can see, the registration is good; if the markings are mirrored, a label is on the wrong "
                 "corner."
             )
 

@@ -29,6 +29,8 @@ from soccer_analytics.dashboard.pitch_clicks import (
     parse_result,
     per_anchor_labels,
     pitch_landmark_order,
+    pitch_marking_polylines,
+    pitch_overlay,
     point_centre,
     points_in_crop,
     projected_landmarks,
@@ -334,6 +336,88 @@ def test_goal_centres_sit_midway_along_their_own_goal_line() -> None:
     points = np.array(list(table.values()))
     assert np.linalg.matrix_rank(points - points.mean(0), tol=0.5) == 2
     assert len({label for label in table}) == len(table), "duplicate landmark names would break the dropdowns"
+
+
+def test_box_and_circle_landmarks_sit_on_the_standard_markings() -> None:
+    """The extra landmarks are only useful if they are where the laws of the game put them.
+
+    The goal box, penalty box, penalty spots and centre-circle cardinals are the markings that are usually visible
+    when the corners are not, so a click on any of them is a measurement of the pitch - but only if the pitch
+    position is right. These are the standard dimensions, the same for every format.
+    """
+    length_m, width_m = 100.0, 64.0
+    table = landmark_table(length_m, width_m)
+    half_width = width_m / 2
+
+    # Goal box (six-yard): 5.5 m out from the goal line, 5.5 m either side of the goal centre.
+    assert table["goal box near-left"] == (0.0, half_width - 5.5)
+    assert table["goal box near-right"] == (0.0, half_width + 5.5)
+    assert table["goal box far-left"] == (length_m, half_width - 5.5)
+    assert table["goal box far-right"] == (length_m, half_width + 5.5)
+
+    # Penalty box (18-yard): 16.5 m out, 20.16 m either side of the goal centre.
+    assert table["penalty box near-left"] == (0.0, half_width - 20.16)
+    assert table["penalty box near-right"] == (0.0, half_width + 20.16)
+    assert table["penalty box far-left"] == (length_m, half_width - 20.16)
+    assert table["penalty box far-right"] == (length_m, half_width + 20.16)
+
+    # Penalty spots: 11 m out from the goal line, on the goal centre line.
+    assert table["penalty spot left"] == (11.0, half_width)
+    assert table["penalty spot right"] == (length_m - 11.0, half_width)
+
+    # Centre-circle cardinals: 9.15 m from the centre spot, on the halfway and centre lines.
+    assert table["centre circle near"] == (length_m / 2, half_width - 9.15)
+    assert table["centre circle far"] == (length_m / 2, half_width + 9.15)
+    assert table["centre circle left"] == (length_m / 2 - 9.15, half_width)
+    assert table["centre circle right"] == (length_m / 2 + 9.15, half_width)
+
+    # The box corners must be on the goal lines, and the box must be wider than the goal box.
+    for name in ("goal box near-left", "goal box near-right", "penalty box near-left", "penalty box near-right"):
+        assert table[name][0] == 0.0
+    for name in ("goal box far-left", "goal box far-right", "penalty box far-left", "penalty box far-right"):
+        assert table[name][0] == length_m
+    assert table["penalty box near-left"][1] < table["goal box near-left"][1]
+    assert table["penalty box near-right"][1] > table["goal box near-right"][1]
+
+
+def test_pitch_marking_polylines_cover_the_standard_markings() -> None:
+    """The overlay draws the whole pitch, not just the outline, so a fit can be checked against the visible markings.
+
+    The penalty arc is the part of the 9.15 m circle around the penalty spot that lies *outside* the penalty box -
+    the detail that makes it worth drawing rather than a full circle.
+    """
+    length_m, width_m = 100.0, 64.0
+    lines = pitch_marking_polylines(length_m, width_m)
+    assert len(lines) >= 10, "touchlines, halfway, two boxes each end, centre circle, two arcs, four corners"
+    for line in lines:
+        assert line.ndim == 2 and line.shape[1] == 2 and len(line) >= 2
+        assert np.isfinite(line).all()
+
+    # The penalty arc must stay outside the penalty box: its x never comes closer to the goal line than 16.5 m.
+    arc_half_height = 9.15 * np.sin(np.arccos(5.5 / 9.15))
+    arcs = [line for line in lines if np.isclose(np.ptp(line[:, 1]), 2 * arc_half_height, atol=0.5)]
+    assert arcs, "the penalty arcs should be present"
+    for arc in arcs:
+        assert arc[:, 0].min() >= 16.5 - 1e-6 or arc[:, 0].max() <= length_m - 16.5 + 1e-6
+
+    # The centre circle is a closed loop of radius 9.15 m around the centre spot.
+    centre = np.array([length_m / 2, width_m / 2])
+    circles = [line for line in lines if np.allclose(np.linalg.norm(line - centre, axis=1), 9.15, atol=1e-6)]
+    assert len(circles) == 1, "exactly one centre circle"
+    assert len(circles[0]) >= 16, "a circle needs enough points to look round under perspective"
+
+
+def test_pitch_overlay_draws_the_markings_onto_the_frame() -> None:
+    """The overlay is the only visual check of a registration, so it must actually paint the markings."""
+    from test_pitch_calibration import ASPECT, F_CHAIN, R_BASE, TRUE_FOCAL_SCALE, TRUE_POSITION, _q_for_pan
+
+    calibration = PitchCalibration(TRUE_POSITION, R_BASE, TRUE_FOCAL_SCALE, ASPECT, 0.0, ())
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    drawn = pitch_overlay(frame, calibration, _q_for_pan(0.0), F_CHAIN, 100.0, 64.0)
+    assert drawn.shape == frame.shape
+    assert not np.array_equal(drawn, frame), "the overlay drew nothing"
+    # The markings are yellow (BGR 0, 255, 255); the untouched frame is black.
+    assert ((drawn[:, :, 0] == 0) & (drawn[:, :, 1] == 255) & (drawn[:, :, 2] == 255)).any()
 
 
 def test_actual_centre_reports_where_the_crop_really_is() -> None:

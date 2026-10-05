@@ -30,25 +30,61 @@ from soccer_analytics.geometry.pitch_calibration import Landmark, PitchCalibrati
 
 CLICK_MAX_WIDTH = 1600  # canvas pixels sent to the browser; small crops go at native size, which gives the accuracy
 
+# Standard pitch markings (metres), the same for every format. Kept in one place so the clickable landmarks and the
+# outline drawn back onto the frame cannot drift apart.
+GOAL_BOX_DEPTH_M = 5.5
+GOAL_BOX_HALF_WIDTH_M = 5.5
+PENALTY_BOX_DEPTH_M = 16.5
+PENALTY_BOX_HALF_WIDTH_M = 20.16
+PENALTY_SPOT_DISTANCE_M = 11.0
+CENTRE_CIRCLE_RADIUS_M = 9.15
+
 
 def landmark_table(length_m: float, width_m: float) -> dict[str, tuple[float, float]]:
     """Pitch landmarks a user can click, in the order they should be clicked.
 
     Corners first because they spread the fit across the pitch, then the goal centres - which matter because the near
     corners are often out of frame, and the goal mouth is a far easier thing to pick out than a corner flag. The
-    halfway line and centre spot then pin the middle down. Values follow the standard markings, so the same list
-    works for any format once the dimensions are known.
+    halfway line and centre spot then pin the middle down.
+
+    The rest are the markings that are *usually* visible and add spread where the corners cannot: the goal box (the
+    six-yard box) and penalty box corners at each end, the penalty spots, and the four cardinals of the centre
+    circle. They are the same standard markings for every format, so the same list works once the dimensions are
+    known - and because they sit at a range of distances from the camera they are exactly the near landmarks the fit
+    is short of when the near corners are out of shot. The goal box and penalty box are drawn from the goal line
+    (``x = 0`` and ``x = length_m``) and the centre circle from the halfway line, so a click on any of them is a
+    measurement of the pitch, not of the camera.
     """
+    half_length = length_m / 2
+    half_width = width_m / 2
     return {
         "corner near-left": (0.0, 0.0),
         "corner near-right": (length_m, 0.0),
         "corner far-right": (length_m, width_m),
         "corner far-left": (0.0, width_m),
-        "goal centre left": (0.0, width_m / 2),
-        "goal centre right": (length_m, width_m / 2),
-        "halfway near": (length_m / 2, 0.0),
-        "halfway far": (length_m / 2, width_m),
-        "centre spot": (length_m / 2, width_m / 2),
+        "goal centre left": (0.0, half_width),
+        "goal centre right": (length_m, half_width),
+        "halfway near": (half_length, 0.0),
+        "halfway far": (half_length, width_m),
+        "centre spot": (half_length, half_width),
+        # Goal box (six-yard box): 5.5 m out from the goal line, 5.5 m either side of the goal centre.
+        "goal box near-left": (0.0, half_width - GOAL_BOX_HALF_WIDTH_M),
+        "goal box near-right": (0.0, half_width + GOAL_BOX_HALF_WIDTH_M),
+        "goal box far-left": (length_m, half_width - GOAL_BOX_HALF_WIDTH_M),
+        "goal box far-right": (length_m, half_width + GOAL_BOX_HALF_WIDTH_M),
+        # Penalty box (18-yard box): 16.5 m out, 20.16 m either side of the goal centre.
+        "penalty box near-left": (0.0, half_width - PENALTY_BOX_HALF_WIDTH_M),
+        "penalty box near-right": (0.0, half_width + PENALTY_BOX_HALF_WIDTH_M),
+        "penalty box far-left": (length_m, half_width - PENALTY_BOX_HALF_WIDTH_M),
+        "penalty box far-right": (length_m, half_width + PENALTY_BOX_HALF_WIDTH_M),
+        # Penalty spots: 11 m out from the goal line, on the goal centre line.
+        "penalty spot left": (PENALTY_SPOT_DISTANCE_M, half_width),
+        "penalty spot right": (length_m - PENALTY_SPOT_DISTANCE_M, half_width),
+        # Centre circle cardinals: 9.15 m from the centre spot, on the halfway line and the centre line.
+        "centre circle near": (half_length, half_width - CENTRE_CIRCLE_RADIUS_M),
+        "centre circle far": (half_length, half_width + CENTRE_CIRCLE_RADIUS_M),
+        "centre circle left": (half_length - CENTRE_CIRCLE_RADIUS_M, half_width),
+        "centre circle right": (half_length + CENTRE_CIRCLE_RADIUS_M, half_width),
     }
 
 
@@ -68,6 +104,39 @@ LANDMARK_HELP: dict[str, str] = {
     "halfway near": "Where the halfway line meets the near touchline.",
     "halfway far": "Where the halfway line meets the far touchline.",
     "centre spot": "The centre spot (or the centre of the centre circle).",
+    "goal box near-left": (
+        "The goal box (six-yard box) corner on the goal line, on the near side of the goal - where the goal line "
+        "meets the short line of the six-yard box. Usually visible even when the corner flag is not."
+    ),
+    "goal box near-right": (
+        "The goal box (six-yard box) corner on the goal line, on the far side of the goal - where the goal line "
+        "meets the short line of the six-yard box."
+    ),
+    "goal box far-left": (
+        "The goal box (six-yard box) corner on the goal line at the far end, on the near side of the goal."
+    ),
+    "goal box far-right": (
+        "The goal box (six-yard box) corner on the goal line at the far end, on the far side of the goal."
+    ),
+    "penalty box near-left": (
+        "The penalty box (18-yard box) corner on the goal line, on the near side of the goal - where the goal line "
+        "meets the long line of the penalty box. A good near landmark when the corner flag is out of shot."
+    ),
+    "penalty box near-right": (
+        "The penalty box (18-yard box) corner on the goal line, on the far side of the goal."
+    ),
+    "penalty box far-left": (
+        "The penalty box (18-yard box) corner on the goal line at the far end, on the near side of the goal."
+    ),
+    "penalty box far-right": (
+        "The penalty box (18-yard box) corner on the goal line at the far end, on the far side of the goal."
+    ),
+    "penalty spot left": "The penalty spot at the left-hand end - 11 m out from the goal line, on the goal centre line.",
+    "penalty spot right": "The penalty spot at the right-hand end - 11 m out from the goal line, on the goal centre line.",
+    "centre circle near": "Where the centre circle crosses the centre line, on the near side of the halfway line.",
+    "centre circle far": "Where the centre circle crosses the centre line, on the far side of the halfway line.",
+    "centre circle left": "Where the centre circle crosses the halfway line, on the left-hand side of the centre spot.",
+    "centre circle right": "Where the centre circle crosses the halfway line, on the right-hand side of the centre spot.",
 }
 
 
@@ -432,6 +501,71 @@ def project_landmarks(
     return projected
 
 
+def pitch_marking_polylines(length_m: float, width_m: float, *, arc_points: int = 48) -> list[np.ndarray]:
+    """The pitch markings as polylines in pitch metres, for drawing the outline back onto a frame.
+
+    Everything is a polyline - circles and arcs are sampled - so the caller only has to project points and draw
+    segments. That is what keeps the overlay honest under the perspective projection, where a circle on the ground is
+    not a circle in the image. The markings are the standard ones for every format, so the same shapes work once the
+    dimensions are known.
+    """
+    half_length, half_width = length_m / 2, width_m / 2
+    lines = [
+        # Touchlines and goal lines, as one closed loop.
+        np.array([[0.0, 0.0], [length_m, 0.0], [length_m, width_m], [0.0, width_m], [0.0, 0.0]]),
+        # Halfway line.
+        np.array([[half_length, 0.0], [half_length, width_m]]),
+    ]
+    # Goal box (six-yard) and penalty box (18-yard) at both ends.
+    for goal_x, inward in ((0.0, 1.0), (length_m, -1.0)):
+        lines.append(
+            np.array(
+                [
+                    [goal_x, half_width - GOAL_BOX_HALF_WIDTH_M],
+                    [goal_x + inward * GOAL_BOX_DEPTH_M, half_width - GOAL_BOX_HALF_WIDTH_M],
+                    [goal_x + inward * GOAL_BOX_DEPTH_M, half_width + GOAL_BOX_HALF_WIDTH_M],
+                    [goal_x, half_width + GOAL_BOX_HALF_WIDTH_M],
+                ]
+            )
+        )
+        lines.append(
+            np.array(
+                [
+                    [goal_x, half_width - PENALTY_BOX_HALF_WIDTH_M],
+                    [goal_x + inward * PENALTY_BOX_DEPTH_M, half_width - PENALTY_BOX_HALF_WIDTH_M],
+                    [goal_x + inward * PENALTY_BOX_DEPTH_M, half_width + PENALTY_BOX_HALF_WIDTH_M],
+                    [goal_x, half_width + PENALTY_BOX_HALF_WIDTH_M],
+                ]
+            )
+        )
+    # Centre circle.
+    angles = np.linspace(0.0, 2.0 * np.pi, arc_points)
+    lines.append(
+        np.column_stack(
+            [half_length + CENTRE_CIRCLE_RADIUS_M * np.cos(angles), half_width + CENTRE_CIRCLE_RADIUS_M * np.sin(angles)]
+        )
+    )
+    # Penalty arcs: the part of the 9.15 m circle around each penalty spot that lies outside the penalty box.
+    theta = np.arccos((PENALTY_BOX_DEPTH_M - PENALTY_SPOT_DISTANCE_M) / CENTRE_CIRCLE_RADIUS_M)
+    for spot_x, facing in ((PENALTY_SPOT_DISTANCE_M, 0.0), (length_m - PENALTY_SPOT_DISTANCE_M, np.pi)):
+        arc = np.linspace(facing - theta, facing + theta, arc_points)
+        lines.append(
+            np.column_stack(
+                [spot_x + CENTRE_CIRCLE_RADIUS_M * np.cos(arc), half_width + CENTRE_CIRCLE_RADIUS_M * np.sin(arc)]
+            )
+        )
+    # Corner arcs (1 m radius).
+    for corner_x, corner_y, start in (
+        (0.0, 0.0, 0.0),
+        (length_m, 0.0, np.pi / 2),
+        (length_m, width_m, np.pi),
+        (0.0, width_m, 3 * np.pi / 2),
+    ):
+        arc = np.linspace(start, start + np.pi / 2, 16)
+        lines.append(np.column_stack([corner_x + np.cos(arc), corner_y + np.sin(arc)]))
+    return lines
+
+
 def pitch_overlay(
     image: np.ndarray,
     calibration: PitchCalibration,
@@ -441,19 +575,17 @@ def pitch_overlay(
     width_m: float,
     table: dict[str, tuple[float, float]] | None = None,
 ) -> np.ndarray:
-    """Draw the pitch outline back into the frame - the check that the landmarks were labelled the right way round.
+    """Draw the pitch markings back into the frame - the check that the landmarks were labelled the right way round.
 
     Without this the user has no way to tell a good registration from a mirrored one: the numbers alone look
-    plausible either way. Pass ``table`` to mark each named landmark as well, which shows the corners that were never
-    clicked where the fit puts them.
+    plausible either way. The whole set of standard markings is drawn - touchlines, halfway line, both boxes, the
+    centre circle, the penalty arcs and spots and the corner arcs - so a fit can be checked against the markings
+    that are actually visible rather than only the outline. Pass ``table`` to mark each named landmark as well, which
+    shows the corners that were never clicked where the fit puts them.
     """
     drawn = image.copy()
     width = drawn.shape[1]
-    shapes = (
-        np.array([[0.0, 0.0], [length_m, 0.0], [length_m, width_m], [0.0, width_m], [0.0, 0.0]]),
-        np.array([[length_m / 2, 0.0], [length_m / 2, width_m]]),
-    )
-    for points in shapes:
+    for points in pitch_marking_polylines(length_m, width_m):
         uv, in_front = pitch_to_pixels(calibration, points, q, focal)
         pixels = uv * width
         for index in range(len(points) - 1):
@@ -463,6 +595,13 @@ def pitch_overlay(
             if not (np.isfinite(start).all() and np.isfinite(end).all()):
                 continue
             cv2.line(drawn, tuple(np.round(start).astype(int)), tuple(np.round(end).astype(int)), (0, 255, 255), 3)
+
+    # The penalty spots are points, not lines, so they are drawn as small filled dots.
+    spots = np.array([[PENALTY_SPOT_DISTANCE_M, width_m / 2], [length_m - PENALTY_SPOT_DISTANCE_M, width_m / 2]])
+    uv, in_front = pitch_to_pixels(calibration, spots, q, focal)
+    for point, front in zip(uv * width, in_front):
+        if front and np.isfinite(point).all():
+            cv2.circle(drawn, tuple(np.round(point).astype(int)), 5, (0, 255, 255), -1)
 
     if table:
         for name, (x, y) in project_landmarks(calibration, table, q, focal, width).items():
