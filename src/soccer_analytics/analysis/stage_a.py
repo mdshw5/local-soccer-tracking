@@ -42,6 +42,8 @@ CHUNK_FRAMES = 300  # 60 s at 5 fps
 MIN_PERSON_HEIGHT_PX = 14  # at 1920 wide; smaller boxes are far-side noise
 PERSON_CONF = 0.25
 SCHEMA_VERSION = 1
+REPO_ROOT = Path(__file__).resolve().parents[3]  # src/soccer_analytics/analysis/stage_a.py -> repo root
+MODELS_DIR = REPO_ROOT / "data" / "models"  # where a locally-supplied checkpoint is looked for
 
 
 @dataclass(frozen=True)
@@ -51,8 +53,32 @@ class SegmentConfig:
     detect_width: int = DETECT_WIDTH
     chunk_frames: int = CHUNK_FRAMES
     confidence: float = PERSON_CONF
-    weights: str = "data/models/yolov8n-coco-baseline.pt"
+    weights: str = "yolov8n.pt"  # stock COCO name: Ultralytics fetches it on first use, so a fresh clone runs
     device: str | int = 0
+
+
+def resolve_weights(weights: str | None = None) -> str:
+    """The weights to actually load, preferring a locally-supplied model over the stock download.
+
+    The default used to be ``data/models/yolov8n-coco-baseline.pt``, a file that is gitignored (weights are
+    fetched again rather than stored) and that Ultralytics' downloader does not recognise by name - so a fresh
+    clone died with a bare ``FileNotFoundError`` at ``YOLO(...)`` and no way to recover. The default is now the
+    stock ``yolov8n.pt``, which Ultralytics fetches itself. With no explicit ``--weights``, a checkpoint under
+    ``data/models/`` is still honoured - the most recently modified ``*.pt`` there wins, because that is where a
+    fine-tuned model for this sideline camera would be dropped. Person detection is the only class Stage A needs,
+    so stock COCO works - but a real fine-tuned checkpoint should detect far-side players better.
+    """
+    name = weights or SegmentConfig.weights
+    if name and Path(name).exists():
+        return name
+    # Only the *default* falls back to a local checkpoint: an explicit path is the caller's choice, and a stock
+    # name is a deliberate "give me exactly this model" - silently swapping either for whatever sits in
+    # data/models would make a run's weights depend on what happens to be on disk.
+    if weights is None:
+        local = sorted(MODELS_DIR.glob("*.pt"), key=lambda p: p.stat().st_mtime) if MODELS_DIR.exists() else []
+        if local:
+            return str(local[-1])
+    return name  # a stock name Ultralytics can download, or the caller's own (missing) path, reported as such
 
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
@@ -211,7 +237,7 @@ def analyse_segment(
     if model is None:
         from ultralytics import YOLO
 
-        model = YOLO(config.weights)
+        model = YOLO(resolve_weights(config.weights))
 
     first_chunk = completed_chunks(out_dir)
     started = time.time()

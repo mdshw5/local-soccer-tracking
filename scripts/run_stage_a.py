@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from soccer_analytics.analysis.stage_a import SegmentConfig, analyse_segment
+from soccer_analytics.analysis.stage_a import SegmentConfig, analyse_segment, resolve_weights
 
 
 def main() -> int:
@@ -29,6 +29,11 @@ def main() -> int:
     parser.add_argument("--fps", type=float, default=5.0, help="analysis frame rate (detections per second)")
     parser.add_argument("--width", type=int, default=1920, help="analysis frame width for detection")
     parser.add_argument("--chunk-frames", type=int, default=300, help="frames per checkpoint file")
+    parser.add_argument(
+        "--weights",
+        default=None,
+        help="detection weights (default: a local data/models/*.pt if there is one, else stock yolov8n.pt)",
+    )
     parser.add_argument("--cpu", action="store_true", help="do not use the GPU for detection")
     args = parser.parse_args()
 
@@ -36,6 +41,7 @@ def main() -> int:
         fps=args.fps,
         detect_width=args.width,
         chunk_frames=args.chunk_frames,
+        weights=resolve_weights(args.weights),
         device="cpu" if args.cpu else 0,
     )
     status = analyse_segment(

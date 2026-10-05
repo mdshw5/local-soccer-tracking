@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -34,7 +35,25 @@ from soccer_analytics.analysis.ball import BallTrack, blank_overlays  # noqa: E4
 from soccer_analytics.analysis.stage_a import load_segment  # noqa: E402
 from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader  # noqa: E402
 
-GAME = "/srv/storage/home_video/Xbot/2026-10-03/game_16-28-37.784.mp4"
+def default_game() -> str:
+    """The video to probe unless ``--video`` says otherwise.
+
+    The old hardcoded ``/srv/storage/...`` path only existed on the author's machine; ``SOCCER_VIDEO_ROOTS``
+    (the same variable the dashboard reads, colon-separated) is searched for the first match file instead, so
+    the probe works on any box that has footage at all.
+    """
+    for root in os.environ.get("SOCCER_VIDEO_ROOTS", "/srv/storage/home_video/Xbot").split(":"):
+        root = Path(root.strip()).expanduser()
+        if not root.exists():
+            continue
+        for pattern in ("*.mp4", "*.MP4"):
+            found = sorted(root.rglob(pattern))
+            if found:
+                return str(found[0])
+    return ""
+
+
+GAME = default_game()
 SEGMENT = "data/segments/game_16-28-37.784_32823901638__whole_game_541_4851"
 FPS = 5.0
 COCO_BALL_CLASS = 32
@@ -61,7 +80,7 @@ def detections_in(model, frame: np.ndarray, imgsz: int, origin: tuple[int, int],
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", default=GAME)
+    parser.add_argument("--video", default=GAME, help="default: first match file under SOCCER_VIDEO_ROOTS")
     parser.add_argument("--segment", default=SEGMENT)
     parser.add_argument("--start-s", type=float, default=700.0)
     parser.add_argument("--duration-s", type=float, default=180.0)

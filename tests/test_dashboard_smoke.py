@@ -31,12 +31,12 @@ def test_dashboard_renders_without_error() -> None:
 
     titles = [t.value for t in app.title]
     assert "Match analysis" in titles
-    headers = [h.value for h in app.header]
-    assert any("Step 1" in h for h in headers)
 
     # Either there is no footage (reported honestly) or Step 1 offers footage and formats downstream.
     if _no_footage(app):
         pytest.skip("no footage available in this environment")
+    headers = [h.value for h in app.header]
+    assert any("Step 1" in h for h in headers)
     assert any("Video (newest first)" == s.label for s in app.selectbox)
 
 

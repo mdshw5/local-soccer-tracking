@@ -33,9 +33,15 @@ why `ingest/ffmpeg_reader.py` exists.
 .venv/bin/streamlit run src/soccer_analytics/dashboard/app.py --server.port 8505
 ```
 
+Extra footage directories are picked up from `SOCCER_VIDEO_ROOTS` (colon-separated; default
+`/srv/storage/home_video/Xbot`), searched after the repo's own `data/videos`. Stage A's detection weights default
+to stock `yolov8n.pt` (fetched by Ultralytics on first use); a checkpoint dropped in `data/models/` is preferred
+over it, and `scripts/run_stage_a.py --weights` overrides both.
+
 The dashboard walks through four steps in order, and every step stores its result so you never repeat work:
 
-1. **Choose footage.** Pick a video (found under `data/videos` and `/srv/storage/home_video/Xbot`, newest first),
+1. **Choose footage.** Pick a video (found under `data/videos` and the `SOCCER_VIDEO_ROOTS` directories, newest
+   first),
    choose a start offset and length, and press *Run analysis* to launch the heavy pass in the background. Progress,
    analysed frames per second and lost frames come from `status.json` in the segment directory. Re-running resumes
    from the last completed chunk.
@@ -101,7 +107,8 @@ src/soccer_analytics/
     analysis/        # staged analysis (see below)
     dashboard/       # Streamlit app
 tests/               # including a synthetic-match oracle with known ground truth
-scripts/             # run_stage_a.py: the background heavy pass
+scripts/             # run_stage_a.py: the background heavy pass; run_ball_scan.py: the ball scan;
+                    # refresh_kit_descriptors.py: re-derive kit colours without re-analysing
 ```
 
 ## The two-stage split
@@ -116,6 +123,12 @@ realtime** (10.55 analysed frames per second), 36 detections per frame, ~0.9 MB 
 **Stage B** (`analysis/stage_b.py`) is cheap and re-runnable in seconds. It projects stored detections to the pitch
 using the current calibration, tracks players, assigns teams and computes the metrics — no video decoding. Re-clicking
 a landmark therefore costs seconds, not minutes: pitch calibration deliberately happens *after* Stage A.
+
+**Refreshing kit colours without Stage A.** The kit descriptor is a pure function of one decoded frame and one
+stored detection box, so improving how grass is masked out of a torso does not require redoing detection or camera
+motion. `scripts/refresh_kit_descriptors.py` re-reads the frames the boxes were found in and rewrites only
+`det_kit` in place (atomically, resumable, everything else copied through untouched) — minutes instead of the hour a
+Stage A re-run costs. Used after the grass-window fix below.
 
 ## Camera motion model
 
@@ -137,7 +150,23 @@ Honest limits, because the report is only useful if its numbers can be trusted:
   keeping measurements, short forecasts and "out of the picture" distinct; the replay draws it when a scan has
   run. It is expensive (~70 min for a whole game) and checkpointed, so it can be stopped and resumed. No event is
   inferred from it yet: goals, shots, saves and blocks are manual tags. Where no scan has run, the camera's own
-  aim point is used as the ball *proxy* for possession, and the report says so.
+  aim point is used as the ball *proxy* for possession, and the report says so. On the whole 2026-10-03 game the
+  scan held the ball on 70% of frames (15,071 detected, 5,380 forecast across a one-frame miss, 742 out of view,
+  359 lost); of the frames it *saw* the ball, 61% also project onto the ground, the rest being a ball in the air
+  (a ray with no ground intersection is left undrawn rather than guessed at a point on the pitch).
+- **Kit colour is grass-aware, and that matters more than it sounds.** A player's torso crop is mostly pitch, so
+  the grass is measured per frame and masked out before the colour is taken — otherwise the reported "kit" is the
+  pitch. The reference approach (a fixed ±10 hue band around the mean grass) covered only 51-94% of the grass
+  pixels on the real game: grass has two hue modes, shaded and sunlit, with the mean in the gap between them.
+  Masking the measured 2nd-98th percentile span instead covers 98%+, and halved the green contamination in the
+  large, camera-followed torsos.
+- **…but the reported team colour is still washed out, and the reason is size, not masking.** The descriptors
+  themselves are good — a near player's torso crop reads as pure saturated red or blue. What the clustering is
+  fed is dominated by *tiny* far-side and touchline figures (median box height 2.2% of the frame width, ~85 px),
+  where a torso crop is a handful of pixels and no kit colour is recoverable; those average to grey. Measured over
+  the whole game, only a fifth of the usable descriptors are clearly red-ish or blue-ish, and the split is
+  strongly time-skewed. So the swatch and suggested team name are a *weak* signal on this footage, and the page
+  says the colours are measured rather than claiming them as ground truth.
 - **Possession is a proximity estimate.** Possession is attributed to the team whose player is nearest the camera's
   aim point. Counting detections per team instead lets the referee decide possession (they follow the ball all
   match); measured as a 10-point swing, which is why the aim proxy is used.

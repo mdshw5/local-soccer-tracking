@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
@@ -140,11 +141,23 @@ st.set_page_config(page_title="Match analysis", layout="wide")
 # --------------------------------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------------------------------
+def video_roots() -> list[Path]:
+    """Where match footage is looked for, newest-first within each root.
+
+    ``data/videos`` in the repo comes first; ``SOCCER_VIDEO_ROOTS`` (colon-separated) adds machine-specific
+    archives after it - the old hardcoded ``/srv/storage/...`` path only existed on the author's machine, and on
+    any other box it silently halved the video picker.
+    """
+    extra = os.environ.get("SOCCER_VIDEO_ROOTS", "/srv/storage/home_video/Xbot")
+    roots = [REPO_ROOT / "data" / "videos"]
+    roots += [Path(part).expanduser() for part in extra.split(":") if part.strip()]
+    return roots
+
+
 def discover_videos() -> list[Path]:
     """Video files under the usual places, newest first, so the most recent match is the default."""
-    roots = [REPO_ROOT / "data" / "videos", Path("/srv/storage/home_video/Xbot")]
     found: list[Path] = []
-    for root in roots:
+    for root in video_roots():
         if not root.exists():
             continue
         found += list(root.rglob("*.MP4")) + list(root.rglob("*.mp4"))
@@ -1001,7 +1014,8 @@ with st.container(border=True):
     with footage_col:
         video_options = discover_videos()
         if not video_options:
-            st.error("No video files found under data/videos or /srv/storage/home_video/Xbot.")
+            searched = ", ".join(str(root) for root in video_roots())
+            st.error(f"No video files found under {searched}.")
             st.stop()
 
         # Selecting an archive has to bring back the footage it was recorded from, or it cannot be reopened: the
