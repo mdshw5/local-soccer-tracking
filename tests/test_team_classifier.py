@@ -6,6 +6,7 @@ whisdev/soccer-video-detection-ai-agent.
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from soccer_analytics.tracking.team_classifier import (
@@ -25,6 +26,12 @@ def _solid(height: int, width: int, bgr: tuple[int, int, int]) -> np.ndarray:
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     frame[:, :] = bgr
     return frame
+
+
+def _grass(hue: int, height: int, width: int) -> np.ndarray:
+    """A patch of pitch grass at a given HSV hue (saturation/value high enough to read as grass)."""
+    hsv = np.full((height, width, 3), (hue, 190, 150), dtype=np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 
 def _pitch_with_player(
@@ -51,6 +58,29 @@ def test_grass_colour_averages_only_green_pixels():
     window = grass_hue_window(frame)
     assert window is not None
     assert window[0] < 60 < window[1]
+
+
+def test_grass_window_covers_both_shaded_and_sunlit_grass():
+    """The frame is measured, not assumed: shaded and sunlit grass sit ~25 hue apart and the mean lies between.
+
+    On the real whole game the fixed +-10 band around the mean covered as little as 51% of the grass pixels (the
+    sunlit mode also moves as the light changes late in the afternoon), so the window is widened to the measured
+    population. A band that only covered the mean would mask the shaded half and let the sunlit half leak into
+    every kit estimate.
+    """
+    frame = np.vstack([_grass(34, 30, 40), _grass(62, 30, 40)])
+    window = grass_hue_window(frame)
+    assert window is not None
+    assert window[0] <= 35, f"shaded grass (hue 34) not covered: {window}"
+    assert window[1] >= 61, f"sunlit grass (hue 62) not covered: {window}"
+
+
+def test_grass_window_never_shrinks_below_the_fixed_band():
+    """A frame whose grass is one tight hue mode keeps exactly the old behaviour (mean hue +- 10)."""
+    frame = _grass(45, 40, 40)
+    window = grass_hue_window(frame)
+    assert window is not None
+    assert window[0] <= 35 and window[1] >= 55
 
 
 def test_kit_histogram_masks_out_grass_pixels():

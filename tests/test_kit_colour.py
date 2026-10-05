@@ -7,6 +7,7 @@ team could go by - the anchor every view of a match (table, chart, replay, event
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import pytest
 
@@ -17,6 +18,7 @@ from soccer_analytics.analysis.kit import (
     kit_rgb,
     suggest_team_name,
 )
+from soccer_analytics.tracking.team_classifier import grass_hue_window
 
 
 def _shirt(bgr: tuple[int, int, int], size: int = 40) -> np.ndarray:
@@ -46,6 +48,35 @@ def test_a_descriptor_reads_back_as_the_colour_it_was_taken_from() -> None:
         # The mean of a flat crop is the crop's own colour, give or take Lab rounding.
         assert back == pytest.approx(rgb, abs=14), f"{rgb} read back as RGB {back}"
         assert colour_name(back) == expected, f"{rgb} was called {colour_name(back)!r}"
+
+
+def _grass(hue: int, height: int, width: int) -> np.ndarray:
+    """Pitch grass at a given HSV hue (shaded ~34, sunlit ~62 on the real games)."""
+    hsv = np.full((height, width, 3), (hue, 190, 150), dtype=np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
+def test_a_sunlit_pitch_does_not_taint_the_described_colour() -> None:
+    """The bimodal-grass case measured on the real game: the mean hue sits in the gap between the shaded and
+    sunlit modes, so a fixed band around it leaves one mode to mix into every kit colour.
+
+    A red kit block standing where the grass below it is shaded on one side (hue 34) and sunlit on the other
+    (hue 62): with the measured window the grass is masked and the descriptor reads the kit; with a band around
+    the mean, part of the crop is grass and the colour shifts towards it.
+    """
+    frame = np.zeros((60, 60, 3), dtype=np.uint8)
+    frame[:, :30] = _grass(34, 60, 30)
+    frame[:, 30:] = _grass(62, 60, 30)
+    frame[12:26, 14:46] = (30, 30, 200)  # the shirt, as RGB (200, 30, 30) - the same red as the round-trip case
+    window = grass_hue_window(frame)
+    assert window is not None
+
+    descriptor = kit_descriptor(frame, (10, 10, 50, 50), window)
+
+    assert descriptor[0] < 1.0, "the crop contains grass, so some must have been masked out"
+    back = kit_rgb(descriptor)
+    assert back is not None
+    assert back == pytest.approx((200, 30, 30), abs=14), f"grass tainted the kit colour: {back}"
 
 
 def test_a_descriptor_without_a_kit_has_no_colour() -> None:

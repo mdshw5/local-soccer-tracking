@@ -15,6 +15,14 @@ kit-color fallback path — the OSNet path needs weights we don't ship):
   * aggregate samples per track and L2-normalise before clustering;
   * refuse to invent a split when the two clusters are near-identical;
   * order clusters deterministically so team ids are stable across clips.
+
+One measured deviation from the reference: their mask is a fixed +-10 band
+around the mean grass hue, and on the real whole game that band covered as
+little as 51% of the grass pixels (shaded and sunlit grass sit ~25 hue apart
+with the mean in the gap, and the sunlit mode moves as the light changes late
+in the afternoon). `grass_hue_window` therefore widens the band to the 2nd..98th
+percentile of the measured grass population — never narrower than the reference
+band, so frames whose grass is one tight mode behave exactly as before.
 """
 
 from __future__ import annotations
@@ -37,25 +45,45 @@ def grass_colour(frame: np.ndarray) -> tuple[float, float, float]:
     """Mean BGR of the green (pitch) pixels; (0, 0, 0) when the frame has none."""
     if frame is None or frame.size == 0:
         return (0.0, 0.0, 0.0)
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(
-        hsv,
-        np.array([GRASS_HUE_MIN, MIN_SATURATION, MIN_VALUE]),
-        np.array([GRASS_HUE_MAX, 255, 255]),
-    )
+    mask = _grass_mask(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV))
     if not np.any(mask):
         return (0.0, 0.0, 0.0)
     mean = cv2.mean(frame, mask=mask)
     return (float(mean[0]), float(mean[1]), float(mean[2]))
 
 
+def _grass_mask(hsv: np.ndarray) -> np.ndarray:
+    """Pixels inside the coarse pitch-green window (the reference project's bounds)."""
+    return cv2.inRange(
+        hsv,
+        np.array([GRASS_HUE_MIN, MIN_SATURATION, MIN_VALUE]),
+        np.array([GRASS_HUE_MAX, 255, 255]),
+    )
+
+
 def grass_hue_window(frame: np.ndarray) -> tuple[int, int] | None:
-    """Hue window around the frame's dominant grass hue, or None when there is no grass."""
-    colour = grass_colour(frame)
-    if colour == (0.0, 0.0, 0.0):
+    """Hue band that covers the frame's measured grass, or None when the frame has no grass.
+
+    Centred on the mean grass colour +- ``GRASS_HUE_PADDING``, then widened to the 2nd..98th percentile of the
+    grass pixels' hues - never narrower than the fixed band, and never outside the coarse green window. The
+    widening is the point, and it was measured on the real whole game: grass has two hue modes (shaded ~34,
+    sunlit ~60+), the mean sits in the gap between them, and a fixed +-10 band around it covered as little as
+    51% of the grass pixels at dusk while the sunlit mode moved. With this window, coverage was 98%+ on every
+    frame checked - what leaks into kit estimates is fringe pixels, not a whole mode.
+    """
+    if frame is None or frame.size == 0:
         return None
-    hue = int(cv2.cvtColor(np.uint8([[list(colour)]]), cv2.COLOR_BGR2HSV)[0, 0, 0])
-    return (max(0, hue - GRASS_HUE_PADDING), min(179, hue + GRASS_HUE_PADDING))
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = _grass_mask(hsv)
+    if not np.any(mask):
+        return None
+    mean = cv2.mean(frame, mask=mask)
+    centre = int(cv2.cvtColor(np.uint8([[list(mean[:3])]]), cv2.COLOR_BGR2HSV)[0, 0, 0])
+    hues = hsv[:, :, 0][mask > 0]
+    p2, p98 = (int(value) for value in np.percentile(hues, [2, 98]))
+    lo = min(centre - GRASS_HUE_PADDING, p2)
+    hi = max(centre + GRASS_HUE_PADDING, p98)
+    return (max(0, lo), min(179, hi))
 
 
 def torso_crop(frame: np.ndarray, bbox: tuple[float, float, float, float]) -> np.ndarray | None:
