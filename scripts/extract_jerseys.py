@@ -139,7 +139,16 @@ def main() -> int:
             library.save_jerseys(args.match, {"candidates": [], "suggestions": {}, "meta": {"crops": 0}})
             return 0
 
-        import easyocr  # heavy import: only needed when there is actually work to do
+        try:
+            import easyocr  # heavy import: only needed when there is actually work to do
+        except ImportError:
+            # The scan is the only thing that needs OCR, so the import is deferred to here - and a missing
+            # install must say what to do rather than dying with a bare ModuleNotFoundError in the status file.
+            status.update(
+                state="error",
+                message="easyocr is not installed in this environment - install it with `pip install easyocr`",
+            )
+            return 1
 
         reader = easyocr.Reader(["en"], gpu=args.device == "cuda", verbose=False)
 
