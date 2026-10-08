@@ -82,7 +82,10 @@ class TeamMetrics:
 class MatchReport:
     teams: list[TeamMetrics]
     players: list[PlayerTrack]
-    momentum: dict  # minute -> {"team_0": float, "team_1": float, "action_x": float}
+    # Minute of the recording -> {"team_0": float, "team_1": float, "action_x": float}. The minute is the source
+    # video's own clock - the clock the events and the highlight clips use; the dashboard shifts the buckets onto
+    # the analysed window's clock when it draws the timeline strip.
+    momentum: dict
     pitch_length_m: float
     pitch_width_m: float
     frames_analysed: int
@@ -249,6 +252,9 @@ KIT_SIZE_MAX_HEIGHT = 200.0  # px at 1920 width: above this the box is a near-si
 KIT_SIZE_QUANTILE = 0.75  # per track, only its largest quartile of observations is trusted for colour
 TEAM_MIN_KIT_FRACTION = 0.55  # a track whose crops are mostly grass is not a kit reading at all
 TEAM_MIN_EVIDENCE = 6.0  # sqrt of player-sized observations: below this a track's colour is a guess
+TEAM_LABEL_MAX_DISTANCE = 2.5  # standardised descriptor units: further than this from every centre, no team colour
+TEAM_LABEL_MIN_MARGIN = 0.35  # how far the winning centre must beat the runner-up before the label is trusted
+TEAM_LABEL_MIN_HEIGHT = 32.0  # px at 1920: the propagation tier may read these crops; the voting tier may not
 
 
 def _team_min_evidence(frames: int) -> float:
@@ -282,15 +288,23 @@ def _track_kit_descriptor(detections: PitchDetections, rows: np.ndarray) -> np.n
     return np.median(detections.kit[chosen, 1:6], axis=0)
 
 
-def _track_kit_rows(detections: PitchDetections, rows: np.ndarray) -> np.ndarray | None:
-    """The observations a track's kit colour is read from (player-sized band, largest quartile), or None."""
+def _track_kit_rows(
+    detections: PitchDetections, rows: np.ndarray, *, min_height: float = KIT_SIZE_MIN_HEIGHT
+) -> np.ndarray | None:
+    """The observations a track's kit colour is read from (player-sized band, largest quartile), or None.
+
+    ``min_height`` is the floor of that band. The voting tier keeps the measured 60 px: below it a crop is a few
+    pixels and reads grey, and a grey median inside the cluster centres poisons who is team 0. The propagation
+    tier - which only decides which already-fixed centre a track belongs to, and where a wrong guess costs one
+    fragment's frames while no guess costs whole minutes of possession - may lower it to ``TEAM_LABEL_MIN_HEIGHT``.
+    """
     usable = rows[detections.kit[rows, 0] > MIN_KIT_FOR_COST]
     if len(usable) < MIN_KIT_OBSERVATIONS:
         return None
     # abs(): the synthetic simulator emits inverted boxes (top below foot in image coords), and a box's size
     # is still meaningful there. Real detections are never inverted; this only keeps the band honest.
     heights = np.abs(detections.height_px[usable])
-    in_band = (heights >= KIT_SIZE_MIN_HEIGHT) & (heights <= KIT_SIZE_MAX_HEIGHT)
+    in_band = (heights >= min_height) & (heights <= KIT_SIZE_MAX_HEIGHT)
     band = usable[in_band]
     if len(band) < MIN_KIT_OBSERVATIONS:
         return None
@@ -299,12 +313,15 @@ def _track_kit_rows(detections: PitchDetections, rows: np.ndarray) -> np.ndarray
     return big if len(big) >= MIN_KIT_OBSERVATIONS else band
 
 
-def _track_kit_evidence(detections: PitchDetections, rows: np.ndarray) -> tuple[np.ndarray, float] | None:
+def _track_kit_evidence(
+    detections: PitchDetections, rows: np.ndarray, *, min_height: float = KIT_SIZE_MIN_HEIGHT
+) -> tuple[np.ndarray, float] | None:
     """Full colour evidence for a track: the 11-float descriptor (L a b sat val + 6 hue bins) and how much of it
     there is - the number of player-sized observations the colour was medianed over, square-rooted so a handful of
     long-lived tracks cannot shout down everyone else. Team clustering weights tracks by this; stitching keeps the
-    plain 5-float descriptor because hue bins would double-count what L/a/b already say."""
-    chosen = _track_kit_rows(detections, rows)
+    plain 5-float descriptor because hue bins would double-count what L/a/b already say. ``min_height`` is passed
+    through to :func:`_track_kit_rows` - see there for why the propagation tier reads smaller crops."""
+    chosen = _track_kit_rows(detections, rows, min_height=min_height)
     if chosen is None:
         return None
     return np.median(detections.kit[chosen, 1:12], axis=0), float(np.sqrt(len(chosen)))
@@ -408,6 +425,13 @@ def _team_assignment(
     * a third cluster is only believed when there are enough tracks, and it is only treated as "other" when it is
       clearly smaller than the two team clusters - that is the referee or a stray track, who would otherwise be
       counted as a team member and would inflate that team's numbers (a referee follows the ball everywhere).
+    The bullets above decide the cluster centres; every other track that has colour evidence afterwards joins the
+    nearest centre, if it is close enough and clearly nearest. That is what gives MOST tracks a label rather than
+    the voting few - possession and the momentum curve read the label of whichever player is nearest the ball, and
+    they need the label on the player in frame, not only on the player who once stood still enough to vote. This
+    second tier reads colour from smaller crops than the voters do (``TEAM_LABEL_MIN_HEIGHT``): measured on the
+    real game the voting bar alone left ~90% of on-pitch detections unlabelled, while the kits stayed plainly
+    separable by eye down to ~30 px.
     Separation is a between/within ratio, so identical kits cannot score as a confident split.
     """
     from sklearn.cluster import KMeans
@@ -439,7 +463,9 @@ def _team_assignment(
     ids = sorted(strong)
     features = np.stack([strong[tid][0] for tid in ids])
     weights = np.array([strong[tid][1] for tid in ids])
-    features = (features - features.mean(0)) / (features.std(0) + 1e-6)
+    feature_mean = features.mean(0)
+    feature_std = features.std(0) + 1e-6
+    features = (features - feature_mean) / feature_std
     clusters = 3 if len(ids) >= 3 * num_teams else num_teams
 
     # Seed from the a-axis extremes: the reddest and the least-red strong track (plus the least saturated as the
@@ -487,6 +513,39 @@ def _team_assignment(
     remap = {int(cluster): team for team, cluster in enumerate(team_clusters)}
     teams = {tid: remap.get(int(label), -1) for tid, label in zip(ids, labels)}
 
+    # The voters fix the cluster centres; every OTHER track with colour evidence is then labelled by where its own
+    # descriptor falls. Without this the rest of the pipeline can only see the few dozen tracks that cleared the
+    # voting bar - measured on the real game, that left possession and the momentum curve with no labelled
+    # teammates visible in most minutes, and most one-minute buckets were dropped entirely. The propagation tier
+    # reads colour from smaller crops than the voters (``TEAM_LABEL_MIN_HEIGHT``): the goal is coverage, and a
+    # wrong guess costs a fragment's frames while no guess costs whole minutes of possession. The nearest centre
+    # is only trusted within a radius and with a margin over the runner-up, so a grey blur - or the referee, once
+    # there is no third cluster to say so - stays unlabelled instead of being forced onto a team.
+    evidence_by_tid: dict[int, np.ndarray] = {tid: evidence[0] for tid, evidence in per_track.items()}
+    weak_ids: list[int] = []
+    weak_features: list[np.ndarray] = []
+    for tid, rows in assignment.tracks.items():
+        if tid in strong:
+            continue
+        evidence = per_track.get(tid)
+        if evidence is None:
+            evidence = _track_kit_evidence(detections, rows, min_height=TEAM_LABEL_MIN_HEIGHT)
+        if evidence is not None:
+            evidence_by_tid[tid] = evidence[0]
+            weak_ids.append(tid)
+            weak_features.append(evidence[0])
+    if weak_ids:
+        weak = (np.stack(weak_features) - feature_mean) / feature_std
+        distances = np.linalg.norm(weak[:, None, :] - centres[None, :, :], axis=2)
+        nearest = distances.argmin(axis=1)
+        best = distances[np.arange(len(weak_ids)), nearest]
+        runner_up = np.partition(distances, 1, axis=1)[:, 1]
+        for tid, cluster, close, clear in zip(
+            weak_ids, nearest, best <= TEAM_LABEL_MAX_DISTANCE, runner_up - best >= TEAM_LABEL_MIN_MARGIN
+        ):
+            if close and clear:
+                teams[tid] = remap.get(int(cluster), -1)
+
     # Each team's colour, medianed over the kit descriptors of the tracks that wear it (not the cluster centre,
     # which lives in standardised space and no longer means a colour). The median, not a saturation-weighted
     # mean: weighting by saturation amplifies whatever is most garish, and the most garish members of a cluster
@@ -496,8 +555,8 @@ def _team_assignment(
     # 5-float vector read a/b/sat as L/a/b and reported a red team as "light grey".
     members: dict[int, list[np.ndarray]] = {}
     for tid, team in teams.items():
-        if team >= 0:
-            members.setdefault(team, []).append(per_track[tid][0][:5])
+        if team >= 0 and tid in evidence_by_tid:
+            members.setdefault(team, []).append(evidence_by_tid[tid][:5])
     colours: dict[int, np.ndarray] = {}
     for team, rows in members.items():
         padded = np.zeros(DESCRIPTOR_SIZE, dtype=np.float64)
@@ -574,6 +633,13 @@ def _momentum(
     Possession is decided by *proximity to the ball proxy*, not by counting players: the gimbal aims at the ball, so
     the pitch point it is aimed at each frame is the best available ball position. Whoever has the nearest player to
     that point is treated as being on the ball, and the team share is the fraction of frames won.
+
+    Only players with a team label take part: a track the clustering could not place - the referee above all - is
+    not allowed to win frames, but unlike before, *every* labelled player can, not only the few tracks that were
+    strong enough to vote on the colours.
+
+    Buckets are keyed by the minute of the *recording* (``detections.time`` is the source video's own clock - the
+    same clock the event clips cut with). The dashboard shifts them onto the analysed window's clock for the strip.
 
     Counting detections instead would let the referee decide the result: a referee follows the ball all match long, so
     they are the single nearest person very often, and exposure to them depends on how the kit clustering fell - this

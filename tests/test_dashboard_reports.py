@@ -12,6 +12,7 @@ import json
 from soccer_analytics.dashboard.reports import (
     colours_were_recorded,
     is_default_team_name,
+    momentum_on_window_clock,
     report_from_library,
     team_colours,
     team_name,
@@ -57,6 +58,20 @@ def test_missing_report_and_missing_match_are_not_errors() -> None:
 def test_report_without_momentum_still_loads() -> None:
     loaded = report_from_library(FakeLibrary({"players": [{"track_id": 1}]}), "match-1")
     assert loaded is not None and loaded["momentum"] == {} and loaded["players"] == [{"track_id": 1}]
+
+
+def test_momentum_minutes_shift_onto_the_window_clock() -> None:
+    """The strip draws everything on the analysed window's clock; Stage B's buckets are on the recording's.
+
+    On the real game the window starts at 9:00, so without the shift the curve sat nine minutes to the right of
+    the events it belongs beside. Minute keys stay numeric after the shift - the window boundary can sit
+    mid-minute - and the buckets themselves are untouched.
+    """
+    buckets = {9: {"team_0": 0.5, "team_1": 0.5}, 70: {"team_0": 0.6, "team_1": 0.4}}
+    shifted = momentum_on_window_clock(buckets, window_start_s=540.0)
+    assert sorted(shifted) == [0.0, 61.0]
+    assert shifted[0.0] is buckets[9], "the bucket must be passed through, not copied"
+    assert momentum_on_window_clock(None, window_start_s=540.0) == {}
 
 
 def test_a_team_is_called_by_its_name_else_by_its_number() -> None:

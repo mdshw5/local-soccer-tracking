@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from soccer_analytics.analysis.library import MatchLibrary
 
@@ -76,3 +76,19 @@ def report_from_library(library: MatchLibrary, match_id: str | None) -> dict | N
             continue
     payload["momentum"] = momentum
     return payload
+
+
+def momentum_on_window_clock(momentum: Mapping[int, dict] | None, window_start_s: float) -> dict[float, dict]:
+    """Re-key Stage B's momentum buckets from the recording's minutes onto the analysed window's clock.
+
+    Stage B keys its buckets by the minute of the recording - the clock its events and the highlight clips use.
+    Everything on the timeline strip is drawn on the window's own clock, where the window's first frame is 0.
+    On the real game the window starts at 9:00, so without this shift the curve sat nine minutes to the right of
+    the events it belongs beside. Keys stay numeric rather than being rounded back to integers: the window
+    boundary can sit mid-minute, and the strip positions a bucket at its minute's midpoint anyway. The buckets
+    themselves are returned untouched.
+    """
+    return {
+        round(float(minute) - float(window_start_s) / 60.0, 4): bucket
+        for minute, bucket in (momentum or {}).items()
+    }

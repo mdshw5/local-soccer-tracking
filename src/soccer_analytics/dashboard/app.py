@@ -18,6 +18,7 @@ beyond what the footage (and the scans built on it) can honestly support, the pa
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -38,6 +39,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from soccer_analytics.analysis import game as game_lib
+from soccer_analytics.analysis import identity as identity_lib
 from soccer_analytics.analysis import stage_a, stage_b
 from soccer_analytics.analysis import event_detection
 from soccer_analytics.analysis.event_detection import detect_events
@@ -55,6 +57,7 @@ from soccer_analytics.analysis.highlights import (
     build_moments,
     clamp_moment,
     export_moment,
+    export_player_clip,
     export_reel,
     moment_for_event,
     preview_clip_name,
@@ -97,6 +100,7 @@ from soccer_analytics.dashboard.reports import (
     DEFAULT_TEAM_NAMES,
     colours_were_recorded,
     is_default_team_name,
+    momentum_on_window_clock,
     report_from_library,
     team_colours,
     team_name,
@@ -349,8 +353,9 @@ def replay_view(
     """Draw the animated pitch view; playback lives entirely in the browser.
 
     ``events`` and ``momentum`` are the timeline strip's data: the tagged and detected events (as JSON dicts) and
-    the per-minute momentum buckets. They travel as component arguments rather than in the replay payload because
-    they are small and change without the replay being rebuilt - a new tag shows up on the strip on the next rerun.
+    the per-minute momentum buckets. Both arrive already on the strip's own (window-relative) clock. They travel
+    as component arguments rather than in the replay payload because they are small and change without the replay
+    being rebuilt - a new tag shows up on the strip on the next rerun.
 
     ``clip_url`` is the generated clip shown beside the pitch, with ``clip_start_s``/``clip_end_s`` giving its
     window on the strip's own clock so the component can hold the two in step.
@@ -362,7 +367,9 @@ def replay_view(
         team_names=list(team_names),
         events=list(events or []),
         momentum=[
-            {"minute": int(minute), **bucket} for minute, bucket in sorted((momentum or {}).items())
+            # Minutes travel as floats: the window's start can sit mid-minute, and the strip positions a bucket
+            # at its minute's midpoint of the window's own clock.
+            {"minute": float(minute), **bucket} for minute, bucket in sorted((momentum or {}).items())
         ],
         half_minute=half_minute,
         clip_url=clip_url,
@@ -981,6 +988,297 @@ def _ball_scan_status(segment_dir: Path, watch_key: str) -> None:
         st.rerun()
 
 
+@st.cache_data(show_spinner=False)
+def _load_identities_cached(path: str, mtime_ns: int) -> tuple[dict, dict]:
+    """The identity scan's arrays and its metadata, read once per file version.
+
+    The arrays travel in an ``npz`` (512-float embeddings per track would make a JSON file of tens of megabytes)
+    and the metadata beside it as JSON; both are small enough to hold in the cache, and the page reads them on
+    every rerun otherwise.
+    """
+    del mtime_ns
+    with np.load(path) as data:
+        arrays = {key: data[key] for key in data.files}
+    meta_path = Path(path).with_suffix(".json")
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    return arrays, meta
+
+
+@st.cache_data(show_spinner=False)
+def _identities_cached(path: str, mtime_ns: int, body_threshold: float, face_threshold: float):  # noqa: ANN201
+    """Decode the scan and cluster it into players, once per file version and threshold pair.
+
+    The clustering is pure arithmetic over a few hundred tracks, but it is a quadratic similarity matrix, so it is
+    not repeated on every rerun - a rerun happens on every widget gesture.
+    """
+    arrays, meta = _load_identities_cached(path, mtime_ns)
+    tracks = identity_lib.decode_scan(arrays)
+    identities, members = identity_lib.cluster_identities(
+        tracks, body_threshold=body_threshold, face_threshold=face_threshold
+    )
+    return tracks, identities, members, meta
+
+
+@st.fragment(run_every=POLL_SECONDS)
+def _identity_scan_status(library: MatchLibrary, match_id: str, watch_key: str) -> None:
+    """Live progress of the background identity scan; the panel picks the tracks up when it lands."""
+    status = library.load_identity_status(match_id)
+    state = status.get("state")
+    previous = st.session_state.get(watch_key)
+    st.session_state[watch_key] = state
+    if not status:
+        st.caption(
+            "Not scanned yet. The scan measures each tracked player's *appearance* - a CLIP embedding of their own "
+            "crop, plus a face embedding on the rare frames where a face is big enough to read - so appearances of "
+            "one player can be merged into one person. It rebuilds the tracks (a couple of minutes) and then "
+            "decodes the footage once, which is the expensive part: roughly an hour for a whole game, like the ball "
+            "scan, and it runs in the background."
+        )
+    elif state == "running":
+        done, total = int(status.get("crops_done", 0)), int(status.get("crops_total", 0))
+        stage_text = str(status.get("message") or "Working...")
+        if total:
+            st.progress(min(1.0, done / max(1, total)), text=f"{stage_text} - {done}/{total} crops")
+        else:
+            st.progress(0.0, text=stage_text)
+        st.caption("Running in the background - this bar updates by itself.")
+    elif state == "error":
+        st.error(f"The scan failed: {status.get('message')}")
+    else:
+        faces = int(status.get("faces_read", 0))
+        found = int(status.get("faces_found", 0))
+        face_note = (
+            f" {found} face(s) were found inside player boxes and {faces} were big enough to read - the rest were "
+            "too small, which is the normal case on this footage."
+            if found
+            else ""
+        )
+        st.caption(f"Last scan: {status.get('message') or 'finished'}.{face_note}")
+    if previous == "running" and state != "running":
+        st.rerun()
+
+
+def _centred_clip_name(track_id: int, start_s: float, duration_s: float) -> str:
+    """A stable name for a centred clip, so re-cutting the same window reuses the file instead of re-encoding."""
+    key = f"{track_id}|{start_s:.2f}|{duration_s:.2f}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    return f"player_{track_id}_{digest}.mp4"
+
+
+def identity_section(
+    library: MatchLibrary,
+    match_id: str,
+    segment_dir: Path,
+    numbers: dict[int, dict],
+) -> None:
+    """Unique players: merge each player's appearances, and cut a clip centred on one of them.
+
+    Everything the panel shows is a measurement with its evidence attached: how many crops went into each identity,
+    how many face readings it has, and - when the scan finished - how well the embeddings separated players on this
+    footage at all. The merge thresholds are deliberately conservative, so the honest presentation is "these are
+    the appearances it is confident about", not "this is the full list of players".
+    """
+    identity_path = library.path(match_id) / "identities.npz"
+    with st.expander("Unique players - and a clip centred on one of them", expanded=identity_path.exists()):
+        _identity_scan_status(library, match_id, watch_key=f"identity_watch::{match_id}")
+
+        full_resolution = st.checkbox(
+            "Decode at full resolution (lets the face channel read anything at all - about twice as slow)",
+            value=False,
+            key=f"identity_fullres::{match_id}",
+            help=(
+                "Faces on this footage are 9-40 px wide at 1920 because the camera keeps the far side of the pitch "
+                "in frame, and SFace needs about 48 px. Decoding at the source width is what gives the rare "
+                "close-up face a chance to be read."
+            ),
+        )
+
+        def _start_scan() -> None:
+            command = [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "run_identity_scan.py"),
+                "--match", match_id,
+                "--segment", str(segment_dir),
+                "--width", "3840" if full_resolution else "1920",
+            ]
+            status_path = library.path(match_id) / "identity_scan.json"
+            try:
+                status_path.write_text(
+                    json.dumps({"state": "running", "message": "Starting...", "updated": time.time()})
+                )
+            except OSError:
+                pass  # an unwritable match directory fails the child too, and its error lands in its own status
+            subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            st.session_state["identity_flash"] = ("success", "Identity scan started in the background.")
+
+        st.button(
+            "Measure player appearances (background)",
+            on_click=_start_scan,
+            key=f"scan_identity::{match_id}",
+            help="Runs scripts/run_identity_scan.py against this segment; the panel fills in when it finishes.",
+        )
+
+        if not identity_path.exists():
+            show_flash("identity_flash")
+            return
+        tracks, identities, _members, meta = _identities_cached(
+            str(identity_path),
+            identity_path.stat().st_mtime_ns,
+            identity_lib.DEFAULT_BODY_THRESHOLD,
+            identity_lib.DEFAULT_FACE_THRESHOLD,
+        )
+        if not identities:
+            st.caption(
+                "The scan found no track with enough appearance evidence to merge. Shirt numbers and the roster "
+                "below still work; identities need a few clear crops of a player."
+            )
+            show_flash("identity_flash")
+            return
+        labelled = identity_lib.label_identities(identities, numbers)
+        by_id = {identity.identity_id: identity for identity in labelled}
+
+        separation = meta.get("separation") or {}
+        if separation:
+            overlap = float(separation.get("between_p95", 0.0)) >= identity_lib.DEFAULT_BODY_THRESHOLD
+            st.caption(
+                f"Measured on this footage: {separation.get('tracks_measured', 0)} tracks embedded; the same "
+                f"player's crops agree at {float(separation.get('within_p05', 0.0)):.2f} (5th percentile) while "
+                f"different tracks agree at {float(separation.get('between_p95', 0.0)):.2f} (95th) - the merge floor "
+                f"is {identity_lib.DEFAULT_BODY_THRESHOLD:.2f}. "
+                + (
+                    "The two distributions overlap, so some appearances will be left as separate identities rather "
+                    "than merged on a guess."
+                    if overlap
+                    else "No pair of different tracks reaches the merge floor, so a merge is a strong claim here."
+                )
+            )
+        face_evidence = int(meta.get("faces_read") or 0)
+        st.caption(
+            f"{len(identities)} identity(ies) from {int(meta.get('tracks') or 0)} measured tracks; "
+            f"{int(meta.get('crops') or 0)} appearance crops"
+            + (f" and {face_evidence} readable face(s)" if face_evidence else " and no readable faces")
+            + ". An identity is a set of appearances the measurements say are one person - conservative on purpose: "
+            "an appearance it is unsure about stays its own identity."
+        )
+
+        rows = identity_lib.identity_rows(
+            labelled,
+            tracks,
+            lambda team: team_name(team, library.load(match_id).team_names),
+        )
+        frame = pd.DataFrame(rows)
+        if not frame.empty:
+            frame["first"] = frame["first_t"].map(_clock)
+            frame["last"] = frame["last_t"].map(_clock)
+            frame["tracks"] = frame["tracks"].map(lambda ids: ", ".join(str(track) for track in ids))
+            frame = frame[
+                ["player", "team", "appearances", "first", "last", "seen_s", "crops", "faces", "merged_by", "tracks"]
+            ].rename(columns={"seen_s": "seen (s)", "merged_by": "merged by"})
+        st.dataframe(frame, hide_index=True, use_container_width=True)
+
+        team_names = library.load(match_id).team_names
+        choice = st.selectbox(
+            "Player to cut a clip around",
+            [identity.identity_id for identity in labelled],
+            format_func=lambda identity_id: (
+                f"{by_id[identity_id].label} "
+                f"({team_name(by_id[identity_id].team, team_names)}, "
+                f"{len(by_id[identity_id].members)} appearance(s), "
+                f"{_clock(by_id[identity_id].first_t)}-{_clock(by_id[identity_id].last_t)})"
+            ),
+            key=f"identity_choice::{match_id}",
+        )
+        identity = by_id[choice]
+        appearances = [tracks[track_id] for track_id in identity.members if track_id in tracks]
+        appearances.sort(key=lambda track: track.first_t)
+
+        # The crops behind the merge, so "is this one person?" can be looked at rather than taken on trust.
+        identity_dir = library.identities_dir(match_id)
+        thumbs = [
+            identity_dir / track.thumbnail
+            for track in appearances[:8]
+            if track.thumbnail and (identity_dir / track.thumbnail).exists()
+        ]
+        if thumbs:
+            st.caption("The best crop of each appearance in this identity - what the merge was based on:")
+            columns = st.columns(len(thumbs))
+            for column, thumb, track in zip(columns, thumbs, appearances[:8]):
+                with column:
+                    st.image(str(thumb), caption=f"track {track.track_id}", use_container_width=True)
+
+        if not appearances:
+            st.caption("This identity has no appearance with a stored trajectory, so no clip can be cut.")
+            show_flash("identity_flash")
+            return
+        appearance = st.selectbox(
+            "Which appearance to cut",
+            list(range(len(appearances))),
+            format_func=lambda index: (
+                f"{_clock(appearances[index].first_t)}-{_clock(appearances[index].last_t)} "
+                f"({appearances[index].span_s:.0f} s, track {appearances[index].track_id})"
+            ),
+            key=f"identity_appearance::{match_id}",
+        )
+        chosen = appearances[appearance]
+        duration = st.slider(
+            "Clip length (s)",
+            min_value=5.0,
+            max_value=60.0,
+            value=min(24.0, max(5.0, round(chosen.span_s))),
+            step=1.0,
+            key=f"identity_duration::{match_id}",
+        )
+        source = Path(str(segment.meta.get("video") or ""))
+        if not source.exists():
+            st.caption(f"`{source}` is not available on this machine, so the clip cannot be cut.")
+            show_flash("identity_flash")
+            return
+        cut = st.button(
+            "Cut the clip, centred on this player",
+            key=f"identity_cut::{match_id}",
+            help=(
+                "The clip is cut from the analysed video with a moving crop that follows this appearance, sized to "
+                "the player's own height; where the appearance has a gap the clip stops rather than panning across "
+                "a stretch nobody saw."
+            ),
+        )
+        target = library.highlights_dir(match_id) / "centred" / _centred_clip_name(
+            chosen.track_id, chosen.first_t, duration
+        )
+        if cut and not target.exists():
+            bar = st.progress(0.0, text="Cutting the clip...")
+            reporter = progress_reporter(bar, "Cutting the clip...")
+            try:
+                export_player_clip(
+                    source,
+                    chosen.traj_t,
+                    chosen.traj_box,
+                    target,
+                    start_s=chosen.first_t,
+                    duration_s=duration,
+                    source_size=(probe_cached(str(source)).width, probe_cached(str(source)).height),
+                    width=1280,
+                    use_gpu=True,
+                    progress=reporter,
+                )
+                reporter(1.0, "Clip ready")
+            except Exception as exc:  # a failed cut must not take the page down
+                st.error(f"Could not cut the clip: {exc}")
+                show_flash("identity_flash")
+                return
+        if target.exists():
+            url = _served_video_url(target, f"centred::{target.name}")
+            if url:
+                st.video(url)
+            st.caption(
+                f"`{target.name}` - {_clock(chosen.first_t)} to {_clock(chosen.first_t + duration)}, "
+                "cropped to follow this player."
+            )
+        else:
+            st.caption("Press **Cut the clip** to produce a clip cropped around this player.")
+        show_flash("identity_flash")
+
+
 def replay_section(
     library: MatchLibrary, match_id: str, segment, segment_dir: Path, video: str, calibration
 ) -> None:
@@ -1032,8 +1330,10 @@ def replay_section(
     #   a single camera file for a whistle. The analysed window starts at ``segment.meta["start_s"]`` of *its own*
     #   video, so a candidate from another recording is mapped through that file's own clock, or clipped off the
     #   strip when it does not lie inside the window at all.
-    # * the momentum buckets are keyed by *minutes of the analysed window* (Stage B keys on the window's own
-    #   seconds), so they are already on the strip's clock.
+    # * the momentum buckets are keyed by minutes of the *recording* (Stage B's own clock, the same one the
+    #   highlight clips cut with), so they are shifted onto the window's clock like an event from this recording
+    #   is - on the real game the window starts at 9:00, and without the shift the curve sat nine minutes to the
+    #   right of the events it belongs beside.
     # * the half-time mark is a game-clock time, so it is mapped the same way as an event.
     event_log = library.events(match_id)
     report_payload = st.session_state.get("report") or report_from_library(library, match_id) or {}
@@ -1082,7 +1382,7 @@ def replay_section(
         team_names,
         key=f"replay::{match_id}",
         events=strip_events,
-        momentum=report_payload.get("momentum") or {},
+        momentum=momentum_on_window_clock(report_payload.get("momentum") or {}, window_start),
         half_minute=None if strip_half_minute is None else strip_half_minute / 60.0,
         clip_url=clip_url,
         clip_start_s=clip_start_s,
@@ -1125,6 +1425,8 @@ def replay_section(
     if only_major:
         table = table[table["seen (s)"] >= 6.0]
     st.dataframe(table, hide_index=True, use_container_width=True)
+
+    identity_section(library, match_id, segment_dir, numbers)
 
     with st.expander("Shirt numbers and names (per track)"):
         st.caption(
