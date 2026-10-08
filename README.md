@@ -27,6 +27,11 @@ The Quadro P2200 is sm_61, so install torch from the cu126 index
 `ffmpeg` must be present with NVDEC and NVENC support. OpenCV decoding is only ~1x realtime on 4K/60 HEVC, which is
 why `ingest/ffmpeg_reader.py` exists.
 
+`easyocr` (the shirt-number scan's OCR) is a declared dependency, so `uv pip install -e ".[dev]"` brings it in. It
+pulls its own torch/torchvision, so on a CUDA box install it after the cu126 torch above or it will drag in the CPU
+wheel. The scan is the only thing that imports it, and it does so lazily - a missing install reports
+`easyocr is not installed in this environment` in the scan's status rather than failing the page.
+
 ## Running it
 
 ```bash
