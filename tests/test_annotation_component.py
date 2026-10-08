@@ -39,11 +39,23 @@ def test_an_aiming_gesture_carries_the_frame() -> None:
 
 
 def test_the_marker_picker_tags_the_next_click() -> None:
-    """A landmark can be named before it is placed, from a picker left of the zoom controls."""
+    """A landmark is named at the click, in a popover that appears where the click was made."""
     html = COMPONENT.read_text()
-    assert 'id="marker-kind"' in html
-    assert "label: markerKind.value" in html, "the pick is what the click is tagged with"
-    assert html.index('id="marker-kind"') < html.index('id="zoom-out"'), "the picker belongs left of the zoom controls"
+    assert 'id="marker-popover"' in html
+    assert "function openPopover(" in html, "the picker appears at the click, not in a toolbar"
+    assert "commitPoint(x, y, name)" in html, "the pick is what the click is tagged with"
+    assert "openPopover(x, y)" in html, "a click on the magnified view opens the picker"
+
+
+def test_a_click_commits_immediately_without_an_apply_button() -> None:
+    """The click is its own commit: there is no Apply step to forget."""
+    html = COMPONENT.read_text()
+    assert 'id="apply-btn"' not in html, "the Apply button is gone"
+    assert "sendValue('apply')" in html, "the commit still reports as an apply"
+    commit = html.split("function commitPoint")[1].split("function addPoint")[0]
+    assert "sendValue('apply')" in commit, "committing a click sends it to Python at once"
+    drag = html.split("function endDrag")[1].split("canvas.addEventListener('mouseup'")[0]
+    assert "sendValue('apply')" in drag, "a finished drag commits the same way"
 
 
 def test_markers_are_only_drawn_on_the_exact_crop_frame() -> None:
@@ -85,9 +97,62 @@ def test_a_placed_marker_can_be_dragged_onto_the_marking_it_stands_for() -> None
 
 
 def test_a_dragged_marker_survives_an_unrelated_rerun() -> None:
-    """Python's copy of a marker only changes on Apply, so aiming the view must not yank a drag back."""
+    """Python's copy of a marker only changes on a commit, so aiming the view must not yank a drag back."""
     html = COMPONENT.read_text()
     assert "feature.dirty = true;" in html
     assert "moved.get(feature.id)" in html, "the pending drag is matched to Python's copy by id"
-    apply_block = html.split("applyBtn.addEventListener('click'")[1].split("sendValue('apply')")[0]
-    assert "feature.dirty = false" in apply_block, "an Apply makes Python's positions the canonical ones"
+    end_drag = html.split("function endDrag")[1].split("canvas.addEventListener('mouseup'")[0]
+    assert "feature.dirty = false" in end_drag, "a finished drag makes Python's positions the canonical ones"
+
+
+def test_clear_is_scoped_to_the_frame_being_viewed() -> None:
+    """Clear removes the applied points in the frame of reference, and Python does the same to the stored clicks."""
+    html = COMPONENT.read_text()
+    clear = html.split("clearBtn.addEventListener('click'")[1].split("});")[0]
+    assert "sendValue('clear')" in html, "Clear reports as its own action"
+    assert "savedFeatures = [];" in clear, "the component empties its own copy"
+
+
+def test_a_gesture_carries_its_identity_so_the_sticky_value_can_be_ignored() -> None:
+    """With no Apply button to re-key the component, Python dedupes on the sequence number instead."""
+    html = COMPONENT.read_text()
+    assert "seq: seq," in html and "mount: typeof args.mount_nonce" in html
+    assert "seq += 1;" in html, "every reported gesture is a new one"
+
+
+def test_the_pitch_overlay_follows_the_timeline_in_the_browser() -> None:
+    """Scrubbing and playing must redraw the pitch overlay without a round trip per frame.
+
+    Python sends sampled pitch->pixel homographies plus the markings; the component interpolates between the two
+    samples bracketing the frame it is showing and projects the markings itself. That is also what makes a refit
+    redraw immediately: the samples arrive as arguments, so the next render carries the new calibration.
+    """
+    html = COMPONENT.read_text()
+    assert "function overlayMatrix(frame)" in html, "the samples are interpolated for the frame being shown"
+    assert "function drawPitchOverlay()" in html
+    assert "drawPitchOverlay();" in html.split("function drawOverview")[1].split("function drawImage")[0], (
+        "the overlay is drawn with the rest of the whole-frame view"
+    )
+    assert "args.overlay_homographies" in html and "args.overlay_polylines" in html
+    # The two projections must never stack: the exact still already carries Python's own overlay, so the browser's
+    # interpolated copy is only drawn when the still is not up. Drawing both put one geometry above the other.
+    overview = html.split("function drawOverview")[1].split("function drawImage")[0]
+    branches = overview.split("const stillUp = exact && overviewImage;")[1]
+    still_branch, live_branch = branches.split("} else {")
+    assert "overviewCtx.drawImage(overviewImage" in still_branch, "the exact still is drawn when it is up"
+    assert "drawPitchOverlay();" in live_branch, "the browser projection is drawn only while the still is away"
+    # The overlay's y must scale by the canvas/frame *height* ratio: v is width-normalised, and dividing by the
+    # width squashed the geometry to 9/16 of its height - the pitch hovered far above the field.
+    draw = html.split("function drawPitchOverlay")[1].split("function drawOverview")[0]
+    assert "overview.height / frameHeight" in draw
+    assert "overview.height / frameWidth" not in draw
+    # While playing, redraws ride the video's presented frames (their media time), not the coarse `currentTime`
+    # readout - the presented-frame clock is what keeps the geometry sitting exactly on the picture.
+    assert "requestVideoFrameCallback" in html
+    assert "metadata.mediaTime" in html
+    frame_of = html.split("function overlayFrame()")[1].split("function drawPitchOverlay")[0]
+    assert "presentedMediaTime" in frame_of, "playing uses the presented frame's time"
+    assert "overviewVideo.currentTime" in frame_of, "the rAF fallback still reads the video clock"
+    assert "!overviewVideo.paused" in frame_of
+    assert "clampFrame(Number(scrub.value))" in frame_of
+    assert "overlayFrame()" in draw

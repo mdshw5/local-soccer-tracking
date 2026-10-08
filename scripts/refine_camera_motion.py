@@ -40,6 +40,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from soccer_analytics.analysis.stage_a import chunk_path, completed_chunks, load_segment  # noqa: E402
 from soccer_analytics.geometry.camera_motion import (  # noqa: E402
     DEFAULT_FOCAL,
+    FOCAL_RANGE,
     CameraMotionTracker,
     MotionStep,
     _unit,
@@ -60,6 +61,7 @@ LARGE_MOTION_DEG = 1.5
 # A step is only accepted with this much support, matching the tracker's own gates.
 MIN_INLIERS = 25
 MIN_INLIER_RATIO = 0.30
+# How far a step may be from an exact rotation+zoom before it is rejected, matching the tracker's own gate.
 MAX_SPREAD = 0.12
 
 
@@ -93,6 +95,23 @@ def choose_step(
     if _usable(lk):
         return lk, "lk"
     return None, "lost"
+
+
+def validate_step(normalised: np.ndarray, focal: float, aspect: float):
+    """Decompose a candidate step, or return ``None`` when it is not a rotation+zoom a real lens could produce.
+
+    This is the tracker's own gate (``CameraMotionTracker._try_step``) and it is not optional: a step that is not a
+    valid rotation+zoom - a shear, or a focal outside the plausible range - is a bad fit, and accepting it lets the
+    error accumulate over thousands of frames. Skipping this check is what made the first full refinement diverge
+    (the chain walked 10.8 deg off and the landmark reprojection got *worse*, 545 -> 741 px).
+    """
+    try:
+        rotation = decompose_step(normalised, focal, aspect)
+    except Exception:
+        return None
+    if rotation.spread > MAX_SPREAD or not (FOCAL_RANGE[0] <= rotation.focal <= FOCAL_RANGE[1]):
+        return None
+    return rotation
 
 
 def refine_steps(
@@ -155,19 +174,27 @@ def refine_steps(
 
         if chosen is None:
             steps.append(None)
-        else:
-            normalised = _unit(norm @ chosen.homography @ norm_inv)
-            if not step_is_plausible(normalised):
-                steps.append(None)
-                report["lost"] += 1
-            else:
-                steps.append(normalised)
-                good_gray = gray
-                # Track the focal so the large-motion test uses a current value.
-                try:
-                    focal = decompose_step(normalised, focal, aspect).focal
-                except Exception:
-                    pass
+            report["lost"] += 1
+            continue
+
+        normalised = _unit(norm @ chosen.homography @ norm_inv)
+        if not step_is_plausible(normalised):
+            steps.append(None)
+            report["lost"] += 1
+            continue
+
+        # The same validation the tracker applies: the step must decompose to a rotation+zoom a real lens could
+        # produce. Skipping this is what let the first full run diverge - a step that is not a valid rotation+zoom
+        # was accepted, and the error accumulated over thousands of frames.
+        rotation = validate_step(normalised, focal, aspect)
+        if rotation is None:
+            steps.append(None)
+            report["lost"] += 1
+            continue
+
+        steps.append(normalised)
+        good_gray = gray
+        focal = rotation.focal  # keep the large-motion test and the next decomposition current
 
         if on_progress is not None and (index % 200 == 0 or index == limit - 1):
             on_progress((index + 1) / max(1, limit))

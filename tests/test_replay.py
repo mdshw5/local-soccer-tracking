@@ -46,6 +46,7 @@ def replay_case(simulated_match_case):
         detections.aim_xy,
         report.players,
         ["Team A", "Team B"],
+        camera_xy=detections.camera_xy,
     )
     return replay, report, segment, detections
 
@@ -58,12 +59,58 @@ def ball_case(simulated_match_case):
 
 def test_every_reported_track_is_in_the_replay(replay_case) -> None:
     replay, report, segment, _ = replay_case
-    assert len(replay["players"]) == len(report.players)
+    assert len(replay["players"]) <= len(report.players)
     ids = {player["track_id"] for player in replay["players"]}
-    assert ids == {player.track_id for player in report.players}
+    assert ids <= {player.track_id for player in report.players}
     assert replay["pitch"] == [PITCH_LENGTH, PITCH_WIDTH]
     assert replay["fps"] == float(segment.meta["fps"])
     assert replay["duration_s"] > 0
+
+
+def test_bystanders_are_excluded_from_the_field_of_play() -> None:
+    """The detector tracks everyone in frame - coaches, photographers, spectators - and the pitch animation
+    must not draw them on the field of play.
+
+    A synthetic spectator stands still all match, so their track spans a metre or two and never moves; a player
+    covers ground. The payload keeps the players and drops the spectators, and says how many it dropped.
+    """
+    from soccer_analytics.analysis.projection import on_pitch_mask
+
+    segment, truth = simulate_match(frames=400, seed=5)
+    q, focal = segment_poses(segment, focal0=float(truth.focal[0]))
+    calibration = PitchCalibration(
+        truth.calibration.position,
+        truth.calibration.base_rotation @ truth.q[0],
+        truth.calibration.focal_scale,
+        truth.calibration.aspect,
+        0.0,
+        (),
+    )
+    detections = project_segment(segment, calibration, poses=(q, focal))
+    report, _ = stage_b.build_report(
+        detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH, match_frames=len(segment.time)
+    )
+    replay = build_replay(
+        (PITCH_LENGTH, PITCH_WIDTH),
+        float(segment.meta["fps"]),
+        len(segment.time),
+        detections.aim_xy,
+        report.players,
+        ["Team A", "Team B"],
+        camera_xy=detections.camera_xy,
+    )
+    kept_ids = {player["track_id"] for player in replay["players"]}
+    assert replay["bystanders_excluded"] == len(report.players) - len(replay["players"])
+    # No team-labelled player may be dropped as a bystander: the rule is for people off the field of play.
+    for player in report.players:
+        if player.team in (0, 1):
+            assert player.track_id in kept_ids, f"team player {player.track_id} was dropped as a bystander"
+    # Every dropped track must actually look like a bystander: small extent, barely moving.
+    from soccer_analytics.dashboard.replay import _is_bystander
+
+    for player in report.players:
+        if player.track_id not in kept_ids:
+            assert _is_bystander(player), f"track {player.track_id} was dropped but does not look like a bystander"
 
 
 def test_observations_are_ordered_and_complete(replay_case) -> None:
@@ -94,6 +141,26 @@ def test_the_aim_trail_has_one_entry_per_frame(replay_case) -> None:
     assert any(entry is not None for entry in replay["aim"]), "the camera looked at the pitch at least sometimes"
     # The ball layer is absent, not empty, when no scan has run: the component draws it only when it exists.
     assert replay["ball"] is None
+
+
+def test_the_payload_carries_the_camera_position(replay_case) -> None:
+    """The direction line is drawn from the camera's own ground position, so it must ride in the payload.
+
+    It is a single fixed point (the tripod does not move), rounded like every other coordinate, and absent when the
+    caller has no calibration to give one - the component then draws no line rather than a line from the origin.
+    """
+    replay, _, _, detections = replay_case
+    assert replay["camera"] == [round(float(detections.camera_xy[0]), 1), round(float(detections.camera_xy[1]), 1)]
+
+    without = build_replay(
+        (PITCH_LENGTH, PITCH_WIDTH),
+        float(replay["fps"]),
+        replay["frame_count"],
+        np.full((replay["frame_count"], 2), np.nan),
+        [],
+        ["Team A", "Team B"],
+    )
+    assert without["camera"] is None, "no calibration: no camera position to draw from"
 
 
 def test_a_ball_record_projects_back_onto_the_pitch(ball_case) -> None:

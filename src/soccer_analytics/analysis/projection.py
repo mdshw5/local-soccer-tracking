@@ -15,6 +15,7 @@ import numpy as np
 
 from soccer_analytics.analysis.stage_a import SegmentData
 from soccer_analytics.geometry.camera_motion import integrate_poses
+from soccer_analytics.geometry.gimbal_motion import log_poses_for_segment
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration, pixels_to_pitch
 
 # Typical foot-point localisation error of a YOLO box bottom edge, in pixels at 1920 wide. Players' feet are not
@@ -35,11 +36,18 @@ class PitchDetections:
     height_px: np.ndarray  # (D,) box height, pixels at 1920 wide
     conf: np.ndarray  # (D,)
     kit: np.ndarray  # (D, K)
+    # (D,) Stage A's BoT-SORT identity per detection, -1 where the tracker had none (v1 chunks, or a detection
+    # below the tracker's own threshold). A hint for Stage B's association, never the authority: the pitch-space
+    # gate decides whether a continuation is physically possible.
+    det_track: np.ndarray
     det_index: np.ndarray  # (D,) index into the segment's detection arrays (for provenance)
     # (F, 2) pitch position the camera was aimed at each frame. The gimbal follows the ball, so this is a good
     # ball proxy where the ball's own scan (analysis.ball) has not been run - and it is a *measurement* either way,
     # not a guess about which pixel is the ball.
     aim_xy: np.ndarray
+    # (2,) the camera's own ground position (its X/Y, ignoring height). Fixed for the segment; the replay draws a
+    # line from here to the aim point so the direction the camera is pointing is visible on the pitch.
+    camera_xy: np.ndarray
 
 
 def segment_poses(segment: SegmentData, focal0: float | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -49,12 +57,22 @@ def segment_poses(segment: SegmentData, focal0: float | None = None) -> tuple[np
     lengths are reused and the per-step focal search is skipped - same chain, one SVD per frame instead of a bounded
     minimisation of many. On a whole-game segment (21k frames) that is 41 s of every dashboard rerun turned into
     under a second.
+
+    When the footage has a gimbal log (``geometry.gimbal_motion``), the *orientation* is taken from the log instead
+    of the chain: the log records the yaw the camera actually commanded, so it does not accumulate the drift the
+    chain does. The focal still comes from the chain, because the log's zoom step has no published mapping to focal
+    length and the calibration solves a focal scale from the clicks anyway. A segment with no log keeps the chain.
     """
     default_focal = float(segment.meta["default_focal"])
     focal0 = default_focal if focal0 is None else focal0
     steps = [None if (not ok or i == 0) else step for i, (ok, step) in enumerate(zip(segment.ok, segment.step))]
     known = np.asarray(segment.focal, dtype=np.float64) if abs(float(focal0) - default_focal) < 1e-9 else None
-    return integrate_poses(steps, focal0, segment.aspect, known_focals=known)
+    q, focal = integrate_poses(steps, focal0, segment.aspect, known_focals=known)
+    if abs(float(focal0) - default_focal) < 1e-9:
+        logged = log_poses_for_segment(segment, q, focal)
+        if logged is not None:
+            q = logged[0]
+    return q, focal
 
 
 def project_segment(
@@ -105,8 +123,10 @@ def project_segment(
         height_px=(boxes[:, 3] - boxes[:, 1]) * 1920.0,
         conf=segment.det_conf,
         kit=segment.det_kit,
+        det_track=getattr(segment, "det_track", np.full(n, -1, dtype=np.int32)),
         det_index=np.arange(n, dtype=np.int64),
         aim_xy=_aim_points(calibration, q, focal, segment.aspect, len(segment.time)),
+        camera_xy=np.asarray(calibration.position[:2], dtype=np.float64),
     )
 
 

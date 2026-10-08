@@ -16,7 +16,6 @@ from soccer_analytics.dashboard.pitch_clicks import (
     canvas_scale,
     canvas_to_frame,
     clamp01,
-    default_labels,
     frame_change,
     frame_points,
     frame_to_canvas,
@@ -26,8 +25,8 @@ from soccer_analytics.dashboard.pitch_clicks import (
     marker_feature,
     merge_clicked,
     order_clicks,
+    overlay_homographies,
     parse_result,
-    per_anchor_labels,
     pitch_landmark_order,
     pitch_marking_polylines,
     pitch_overlay,
@@ -36,6 +35,7 @@ from soccer_analytics.dashboard.pitch_clicks import (
     projected_landmarks,
     repeated_labels_within_a_frame,
     restored_points,
+    split_duplicate_clicks,
     zoom_box,
 )
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration, pitch_to_pixels
@@ -165,7 +165,7 @@ def test_points_in_crop_only_returns_visible_ones() -> None:
 
 
 def test_a_click_can_carry_the_landmark_it_was_tagged_with() -> None:
-    """The marker picker names a landmark *before* the click; that tag becomes the point's default label."""
+    """The popover names a landmark at the click; that tag becomes the point's label."""
     box = zoom_box(FRAME_W, FRAME_H, 8.0, 0.5, 0.5)
     scale = canvas_scale(box[2])
     x, y = click_in_crop(box, scale, 0.5, 0.5)
@@ -173,7 +173,7 @@ def test_a_click_can_carry_the_landmark_it_was_tagged_with() -> None:
     stored, next_pid = merge_clicked([], [(x, y, "corner far-left")], 0, box, scale, FRAME_W, 0)
     assert stored[0]["label"] == "corner far-left"
 
-    # Re-applying with the picker back on automatic must not strip the tag off the point.
+    # Re-committing the same crop must not strip the tag off the point.
     stored, next_pid = merge_clicked(stored, [(x, y, "")], 0, box, scale, FRAME_W, next_pid)
     assert stored[0]["label"] == "corner far-left"
     assert stored[0]["pid"] == 0, "the identity the label hangs off has to survive too"
@@ -182,7 +182,7 @@ def test_a_click_can_carry_the_landmark_it_was_tagged_with() -> None:
     stored, next_pid = merge_clicked(stored, [(x, y, "centre spot")], 0, box, scale, FRAME_W, next_pid)
     assert stored[0]["label"] == "centre spot"
 
-    # An untagged click carries no label at all, so the click-order suggestion is what the page opens on.
+    # An untagged click carries no label at all, so the dropdown opens on the first landmark.
     stored, next_pid = merge_clicked([], [(x, y)], 0, box, scale, FRAME_W, 0)
     assert "label" not in stored[0]
 
@@ -191,10 +191,10 @@ def test_points_in_crop_carries_the_landmark_tag_back_into_the_component() -> No
     """The tag is handed back with the click, so re-committing a crop cannot lose it."""
     box = zoom_box(FRAME_W, FRAME_H, 8.0, 0.5, 0.5)
     scale = canvas_scale(box[2])
-    tagged = {"pid": 0, "frame": 0, "u": 0.5, "v": 0.5 * FRAME_H / FRAME_W, "label": "goal centre left"}
+    tagged = {"pid": 0, "frame": 0, "u": 0.5, "v": 0.5 * FRAME_H / FRAME_W, "label": "goal post left-near"}
     untagged = {"pid": 1, "frame": 0, "u": 0.5, "v": 0.5 * FRAME_H / FRAME_W}
     features = points_in_crop([tagged, untagged], 0, box, scale, FRAME_W)
-    assert features[0].get("label") == "goal centre left"
+    assert features[0].get("label") == "goal post left-near"
     assert "label" not in features[1]
 
 
@@ -214,20 +214,6 @@ def test_landmarks_carry_the_frame_they_were_clicked_on() -> None:
     assert landmarks[0].u == 0.10 and landmarks[0].v == 0.20
 
 
-def test_default_labels_follow_the_click_order_and_repeat_at_the_end() -> None:
-    labels = default_labels(4, 60.0, 40.0)
-    assert labels == ["corner near-left", "corner near-right", "corner far-right", "corner far-left"]
-    # More clicks than landmarks: the last landmark repeats rather than raising, and the duplicate is flagged in the UI.
-    assert len(default_labels(9, 60.0, 40.0)) == 9
-
-
-def test_per_anchor_labels_restart_at_every_new_frame() -> None:
-    """Each moment is a fresh registration, so its suggestions start from the top of the click order again."""
-    order = pitch_landmark_order(100.0, 64.0)
-    frames = [299, 299, 299, 11184, 11184]
-    assert per_anchor_labels(frames, 100.0, 64.0) == [order[0], order[1], order[2], order[0], order[1]]
-
-
 def test_repeated_labels_within_a_frame_flags_only_same_frame_duplicates() -> None:
     """Re-clicking a landmark on a later frame is the drift-anchoring workflow; twice on one frame is the mistake."""
     pairs = [
@@ -239,6 +225,22 @@ def test_repeated_labels_within_a_frame_flags_only_same_frame_duplicates() -> No
     assert repeated_labels_within_a_frame(pairs) == ["corner near-left"]
     assert repeated_labels_within_a_frame([(299, "corner near-left"), (1040, "corner near-left")]) == []
     assert repeated_labels_within_a_frame([]) == []
+
+
+def test_split_duplicate_clicks_keeps_the_newest_of_each_same_frame_pair() -> None:
+    """The newest click is the user's latest word: a re-click, or a re-label that collides, replaces the old one."""
+    entries = [
+        (5, "corner near-left", 3),
+        (5, "corner near-left", 7),  # the re-click that supersedes pid 3
+        (5, "centre spot", 4),  # a different landmark on the same frame is not a duplicate
+        (90, "corner near-left", 5),  # a later frame is the drift-anchoring workflow, not a duplicate
+    ]
+    kept, dropped = split_duplicate_clicks(entries)
+    assert kept == [(5, "corner near-left", 7), (5, "centre spot", 4), (90, "corner near-left", 5)]
+    assert dropped == [(5, "corner near-left", 3)]
+    # Nothing to do on an empty or duplicate-free set.
+    assert split_duplicate_clicks([]) == ([], [])
+    assert split_duplicate_clicks([(1, "centre spot", 0)]) == ([(1, "centre spot", 0)], [])
 
 
 def test_projected_landmarks_put_each_landmark_where_the_fit_projects_it() -> None:
@@ -288,14 +290,14 @@ def test_saved_clicks_come_back_after_a_refresh_only_on_their_own_segment() -> N
     a whole-game click at frame 11,184 of a five-minute clip would be a measurement of nothing.
     """
     saved = [
-        {"frame": 299, "u": 0.2, "v": 0.1, "label": "goal centre right"},
+        {"frame": 299, "u": 0.2, "v": 0.1, "label": "goal post right-far"},
         {"frame": 11184, "u": 0.6, "v": 0.3, "label": "corner far-left"},
     ]
     points = restored_points(saved, 21552)
     assert points is not None
     assert [p["frame"] for p in points] == [299, 11184]
     assert [p["pid"] for p in points] == [0, 1]
-    assert points[0]["label"] == "goal centre right"
+    assert points[0]["label"] == "goal post right-far"
     assert restored_points(saved, 1500) is None, "clicks from another segment are not this segment's clicks"
     assert restored_points([], 10) is None
     assert restored_points([{"frame": 1, "u": 0.5}], 10) is None, "a malformed set is refused whole"
@@ -313,24 +315,27 @@ def test_every_landmark_has_help_text_and_a_pitch_position() -> None:
     assert np.isfinite(list(table.values())).all()
 
 
-def test_goal_centres_sit_midway_along_their_own_goal_line() -> None:
-    """The goal centres are the stand-ins for corners that are out of frame, so they must be on the goal lines.
+def test_goal_posts_sit_on_their_own_goal_line_either_side_of_the_goal_centre() -> None:
+    """The posts are the stand-ins for corners that are out of frame, so they must be where the laws put them.
 
-    They are only useful because the middle of the goal mouth is easy to see and its real position is fixed by the
-    laws of the game - if it drifted off the goal line, every fit built on it would be skewed.
+    They are only useful because a post is a hard edge that can be clicked to a pixel and its real position is fixed
+    by the laws of the game - if a post drifted off the goal line, or the pair were not 7.32 m apart, every fit built
+    on them would be skewed.
     """
     table = landmark_table(60.0, 40.0)
-    assert table["goal centre left"] == (0.0, 20.0)
-    assert table["goal centre right"] == (60.0, 20.0)
-    for centre_name, corner_a, corner_b in (
-        ("goal centre left", "corner near-left", "corner far-left"),
-        ("goal centre right", "corner near-right", "corner far-right"),
+    assert table["goal post left-near"] == (0.0, 20.0 - 3.66)
+    assert table["goal post left-far"] == (0.0, 20.0 + 3.66)
+    assert table["goal post right-near"] == (60.0, 20.0 - 3.66)
+    assert table["goal post right-far"] == (60.0, 20.0 + 3.66)
+    for near, far, corner_a, corner_b in (
+        ("goal post left-near", "goal post left-far", "corner near-left", "corner far-left"),
+        ("goal post right-near", "goal post right-far", "corner near-right", "corner far-right"),
     ):
-        ax, ay = table[corner_a]
-        bx, by = table[corner_b]
-        assert table[centre_name] == pytest.approx(((ax + bx) / 2, (ay + by) / 2))
-        # Which is to say: on the goal line itself, not in front of it.
-        assert ax == bx == table[centre_name][0]
+        # On the goal line itself, not in front of it, and straddling the goal centre.
+        assert table[near][0] == table[far][0] == table[corner_a][0] == table[corner_b][0]
+        assert table[near][1] < table[far][1]
+        assert table[far][1] - table[near][1] == pytest.approx(7.32), "the posts are 7.32 m apart"
+        assert (table[near][1] + table[far][1]) / 2 == pytest.approx((table[corner_a][1] + table[corner_b][1]) / 2)
 
     # And the whole set must not be collinear, since a straight line cannot fix a camera.
     points = np.array(list(table.values()))
@@ -338,30 +343,28 @@ def test_goal_centres_sit_midway_along_their_own_goal_line() -> None:
     assert len({label for label in table}) == len(table), "duplicate landmark names would break the dropdowns"
 
 
-def test_box_and_circle_landmarks_sit_on_the_standard_markings() -> None:
+def test_the_boxes_are_not_clickable() -> None:
+    """The boxes are the markings the clicks cannot place accurately, so they must not be offered.
+
+    The six-yard box is small and lost against the netting and the goal frame; an eighteen-yard corner is a bare
+    junction of two lines with nothing to focus on. A click a metre out is a metre of error in the fit, so the
+    posts carry that end of the pitch instead and the penalty spots pin the box's depth.
+    """
+    table = landmark_table(100.0, 64.0)
+    assert not [name for name in table if "box" in name]
+    assert not [name for name in LANDMARK_HELP if "box" in name]
+
+
+def test_spot_and_circle_landmarks_sit_on_the_standard_markings() -> None:
     """The extra landmarks are only useful if they are where the laws of the game put them.
 
-    The goal box, penalty box, penalty spots and centre-circle cardinals are the markings that are usually visible
-    when the corners are not, so a click on any of them is a measurement of the pitch - but only if the pitch
-    position is right. These are the standard dimensions, the same for every format.
+    The penalty spots and centre-circle cardinals are the markings that are usually visible when the corners are
+    not, so a click on any of them is a measurement of the pitch - but only if the pitch position is right. These
+    are the standard dimensions, the same for every format.
     """
     length_m, width_m = 100.0, 64.0
     table = landmark_table(length_m, width_m)
     half_width = width_m / 2
-
-    # Goal box (six-yard): 5.5 m out from the goal line, 9.16 m either side of the goal centre. The half-width is
-    # 3.66 (half the 7.32 m goal) + 5.5 (the box's own depth), which is what the laws of the game specify - using
-    # 5.5 here drew a goal box narrower than the real one.
-    assert table["goal box near-left"] == (0.0, half_width - 9.16)
-    assert table["goal box near-right"] == (0.0, half_width + 9.16)
-    assert table["goal box far-left"] == (length_m, half_width - 9.16)
-    assert table["goal box far-right"] == (length_m, half_width + 9.16)
-
-    # Penalty box (18-yard): 16.5 m out, 20.16 m either side of the goal centre.
-    assert table["penalty box near-left"] == (0.0, half_width - 20.16)
-    assert table["penalty box near-right"] == (0.0, half_width + 20.16)
-    assert table["penalty box far-left"] == (length_m, half_width - 20.16)
-    assert table["penalty box far-right"] == (length_m, half_width + 20.16)
 
     # Penalty spots: 11 m out from the goal line, on the goal centre line.
     assert table["penalty spot left"] == (11.0, half_width)
@@ -373,13 +376,59 @@ def test_box_and_circle_landmarks_sit_on_the_standard_markings() -> None:
     assert table["centre circle left"] == (length_m / 2 - 9.15, half_width)
     assert table["centre circle right"] == (length_m / 2 + 9.15, half_width)
 
-    # The box corners must be on the goal lines, and the box must be wider than the goal box.
-    for name in ("goal box near-left", "goal box near-right", "penalty box near-left", "penalty box near-right"):
-        assert table[name][0] == 0.0
-    for name in ("goal box far-left", "goal box far-right", "penalty box far-left", "penalty box far-right"):
-        assert table[name][0] == length_m
-    assert table["penalty box near-left"][1] < table["goal box near-left"][1]
-    assert table["penalty box near-right"][1] > table["goal box near-right"][1]
+
+def test_overlay_homographies_reproduce_the_projection() -> None:
+    """The browser draws the overlay from these samples, so each must be the calibration's own projection.
+
+    The check is against a point the fit never saw (the far corner, behind the camera in this scene): the ground
+    plane's projection is a homography, so H fitted on the visible markings must map the hidden ones too - that is
+    the whole reason the browser can draw the overlay on frames Python never renders.
+    """
+    from test_pitch_calibration import (
+        ASPECT,
+        F_CHAIN,
+        R_BASE,
+        TRUE_FOCAL_SCALE,
+        TRUE_POSITION,
+        _q_for_pan,
+    )
+
+    calibration = PitchCalibration(TRUE_POSITION, R_BASE, TRUE_FOCAL_SCALE, ASPECT, 0.0, ())
+    frame_count = 301
+    q = np.stack([_q_for_pan(pan) for pan in np.linspace(-40, 40, frame_count)])
+    focal = np.full(frame_count, F_CHAIN)
+    samples = overlay_homographies(calibration, q, focal, 100.0, 64.0, frame_count, samples=7)
+    assert len(samples) == 7
+    assert [s["frame"] for s in samples] == sorted(s["frame"] for s in samples)
+    assert all(len(s["h"]) == 9 for s in samples)
+
+    for sample in samples:
+        matrix = np.array(sample["h"]).reshape(3, 3)
+        for probe_xy in ([30.0, 20.0], [0.0, 64.0], [100.0, 0.0]):
+            projected = matrix @ np.array([*probe_xy, 1.0])
+            uv_h = projected[:2] / projected[2]
+            uv_p, front = pitch_to_pixels(
+                calibration,
+                np.array([probe_xy]),
+                q[sample["frame"]],
+                F_CHAIN,
+            )
+            if not front[0]:
+                # Behind the camera the direct projection is undefined; the homography still maps the ground
+                # plane (that is what lets the browser draw the far side), but there is nothing to compare.
+                continue
+            assert np.allclose(uv_h, uv_p[0], atol=1e-9), f"{probe_xy} at frame {sample['frame']}"
+
+
+def test_overlay_homographies_skip_frames_without_camera_state() -> None:
+    """A chain that does not cover every frame must not be indexed past its end."""
+    from test_pitch_calibration import ASPECT, F_CHAIN, R_BASE, TRUE_FOCAL_SCALE, TRUE_POSITION, _q_for_pan
+
+    calibration = PitchCalibration(TRUE_POSITION, R_BASE, TRUE_FOCAL_SCALE, ASPECT, 0.0, ())
+    q = np.stack([_q_for_pan(0.0)] * 3)
+    focal = np.full(3, F_CHAIN)
+    assert overlay_homographies(calibration, q, focal, 100.0, 64.0, 1000) != []
+    assert overlay_homographies(calibration, q, focal, 100.0, 64.0, 0) == []
 
 
 def test_pitch_marking_polylines_cover_the_standard_markings() -> None:
@@ -528,12 +577,18 @@ def test_parse_result_reads_the_component_wire_format() -> None:
         "zoom": 4.5,
         "action": "apply",
         "frame": 120,
+        "seq": 7,
+        "mount": 2,
     }
     result = parse_result(raw)
     assert result.action == "apply" and result.frame == 120
     assert result.centre == pytest.approx((0.35, 0.62)) and result.zoom == pytest.approx(4.5)
-    # Only well-formed point features become clicks, and the marker picker's tag rides on the click.
+    # Only well-formed point features become clicks, and the popover's tag rides on the click.
     assert result.points == [(12.5, 40.0, "corner far-left"), (3.0, 4.0, "")]
+    # The gesture identity rides along too: it is what lets the page ignore the sticky value on later reruns.
+    assert (result.seq, result.mount) == (7, 2)
+    bare = parse_result({"features": [], "action": "navigate"})
+    assert (bare.seq, bare.mount) == (0, 0), "an older component value without identity reads as gesture zero"
 
     # Anything that is not a component value reads as "nothing happened" rather than raising.
     for nothing in (None, "nonsense", 7):

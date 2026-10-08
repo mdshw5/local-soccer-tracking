@@ -17,6 +17,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from soccer_analytics.analysis.stage_a import SegmentConfig, analyse_segment, load_segment
 from soccer_analytics.geometry.camera_motion import MotionStep
@@ -67,6 +68,27 @@ def test_choose_step_reports_lost_when_neither_is_usable() -> None:
     module = _script()
     chosen, source = module.choose_step(_step(5, 0.05), _step(5, 0.05, "sift"), lk_deg=8.0, large_motion_deg=1.5)
     assert chosen is None and source == "lost"
+
+
+def test_validate_step_rejects_a_step_that_is_not_a_rotation() -> None:
+    """A shear is not something a pan/tilt/zoom lens can produce, and accepting it lets the chain diverge.
+
+    This is the bug that made the first full refinement worse than the chain it replaced: the loop skipped the
+    tracker's spread/focal gate, so invalid steps were accepted and the error accumulated over thousands of frames.
+    """
+    module = _script()
+    aspect = 9 / 16
+    shear = np.array([[1.0, 0.4, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    assert module.validate_step(shear, 0.82, aspect) is None
+
+
+def test_validate_step_accepts_a_pure_rotation() -> None:
+    module = _script()
+    aspect = 9 / 16
+    rotation = np.eye(3)
+    result = module.validate_step(rotation, 0.82, aspect)
+    assert result is not None
+    assert result.focal == pytest.approx(0.82, rel=1e-6)
 
 
 def _segment(tmp_path: Path):  # noqa: ANN202

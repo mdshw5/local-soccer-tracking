@@ -45,19 +45,22 @@ The dashboard walks through four steps in order, and every step stores its resul
    choose a start offset and length, and press *Run analysis* to launch the heavy pass in the background. Progress,
    analysed frames per second and lost frames come from `status.json` in the segment directory. Re-running resumes
    from the last completed chunk.
-2. **Register the pitch.** Click pitch landmarks on any frame (the four corners first, then the goal centres, halfway
+2. **Register the pitch.** Click pitch landmarks on any frame (the four corners first, then the goalposts, halfway
    line and centre spot). The magnified view you click in and the whole frame sit **side by side**: **click a point on
    the whole frame** to bring it into the middle of the magnified view, and **scroll** (or use +/-) to zoom. The
-   yellow box on the whole frame shows what the magnified view covers. Click landmarks on the magnified view
-   (**Point** mode) and press **Apply**, because nothing reaches the app until you do. Landmarks clicked on different
-   frames are combined, so a corner that is out of view in one frame can be clicked in another.
+   yellow box on the whole frame shows what the magnified view covers. Click a landmark on the magnified view and
+   pick which one it is in the list that appears at the click - the click is committed the moment you pick, and the
+   calibration refits itself automatically from the clicks so far. Landmarks clicked on different frames are
+   combined, so a corner that is out of view in one frame can be clicked in another.
 
-   **If a corner is not in shot, use the goal centre** (`goal centre left` / `goal centre right`) - the middle of the
-   goal line says as much about that end of the pitch as the corner flag does, and the goal mouth is far easier to
-   pick out. The **goal box, penalty box, penalty spots and the four cardinals of the centre circle** are usually
-   visible too, and they are the same standard markings for every format: they sit at a range of distances from the
-   camera, which is exactly the spread the fit is short of when the near corners are out of shot. What you cannot
-   substitute is *spread*: landmark clicks are the only thing tying the video to the pitch, and a set that is all far
+   **If a corner is not in shot, use the goalposts** (`goal post left-near` / `goal post left-far`, and the `right`
+   pair) - the base of a post is a hard, high-contrast edge that can be clicked to a pixel, and the two posts of a
+   goal are 7.32 m apart, so together they say as much about that end of the pitch as the corner flag does. The
+   **penalty spots and the four cardinals of the centre circle** are usually visible too, and they are the same
+   standard markings for every format: they sit at a range of distances from the camera, which is exactly the
+   spread the fit is short of when the near corners are out of shot. The boxes are deliberately not clickable -
+   the six-yard box is small and lost against the netting, and an eighteen-yard corner is a bare junction of two
+   lines with nothing to focus on. What you cannot substitute is *spread*: landmark clicks are the only thing tying the video to the pitch, and a set that is all far
    away or all along one line leaves the fit badly undetermined. Measured against a simulated match with 4 px of
    click noise, four distant landmarks were out by more than 50 m; eight spread across the frame were within 2.4 m
    every time. Six is usually enough, four is the bare minimum.
@@ -80,8 +83,45 @@ The dashboard walks through four steps in order, and every step stores its resul
    their kit colours, and compute distances, speeds, territory and a momentum chart. This step takes seconds, so you
    can re-run it after re-clicking landmarks without touching the video again.
 4. **Tag events and cut highlights.** Whistles are detected in the audio track and offered as candidates; goals,
-   shots, saves and blocks are tagged by hand. Reels are then cut in three tiers: `clip` (15-30 s), `goals`
-   (1-2 min) and `match` (up to 5 min).
+   shots, corners, penalties, clearances and tackles are inferred from the ball scan and the player tracks (press
+   *Detect events* once the report and the ball scan exist); saves and blocks are tagged by hand. Reels are then cut
+   in three tiers: `clip` (15-30 s), `goals` (1-2 min) and `match` (up to 5 min).
+
+   The event detectors are conservative and every one of them says in its note what it measured, because a wrong
+   event on the timeline is worse than a missing one. A **goal** needs the ball to reach a goal mouth moving in
+   *and* to be reset to the centre spot within a minute - the reset is what separates a goal from a shot into the
+   side netting, and it has to be a *measured* position, not the tracker's forecast across a missed frame (the scan
+   loses the ball against the net, so the crossing itself may be a forecast; only a sighting can confirm a restart).
+   A **shot** is a hard kick aimed at a goal that travels toward it and did not produce a reset; a save and a shot
+   wide look the same to a ball track, so both are reported as a shot and the note says where it was aimed. A
+   **corner** is a ball at rest near a corner flag that is then kicked (or a fresh detection entering from a
+   corner). A **penalty** is a whistle, then the ball still on the penalty spot, then a hard kick - without the
+   whistle the same geometry is left to the shot detector. A **clearance** is a hard, long kick away from the goal
+   the team is defending, from its own defensive third; which goal that is comes from the per-half orientation
+   below. A **tackle** is a player who was moving coming to a near stop right beside the ball as the ball's own
+   velocity changes - a *motion* proxy, not pose, and the note says so.
+
+   Measuring the ball's motion is the hard part, and the numbers come from the real whole-game scan. A per-frame
+   difference of the projected positions reads 57 m/s at p90 and 96,000 m/s at worst: the projection turns a pixel
+   of jitter into metres when the ball is far away or near the horizon, and one bad frame then looks like a 200 m/s
+   kick. So positions more than 3 m off the pitch are dropped (18% of the scan's finite positions), a position far
+   from its neighbours' median is dropped as a spike, and the speed is the net displacement over a short *look-back*
+   window paired with a straightness ratio - jitter is fast but not straight, a struck ball is both. That brings the
+   real scan to a p50 of 2.4 m/s and a p90 of 15 m/s, and the physically impossible readings are gone (nothing on
+   this pitch travels faster than ~45 m/s). On the reference game the detectors report 8 events in 72 minutes: five
+   challenges, a clearance, a goal and a shot.
+
+   Which end each team defends is read per half from where its players spend the half (a team defends the goal its
+   players are nearer to), which is also the team's attack vector. It is what tells a clearance from a shot: the
+   same fast kick is one or the other depending on which goal it is heading away from. The detected events are
+   review candidates exactly like the whistle scan's - the same verdict buttons and the same *discard detected*
+   button apply - and each one names the player it is attributed to (track id and shirt number) when a player was
+   near enough to the ball to be named.
+
+   The animated pitch replay carries a **timeline strip** above it: the momentum curve (each team's share of
+   contested frames, drawn above and below the centre line) with every tagged and detected event marked on it -
+   filled dots for manual tags, hollow rings for detected candidates, one colour per event type. Clicking the strip
+   seeks the replay to that moment, so the timeline doubles as the animation's scrubber.
 
    Whistle detection is deliberately strict, and the strictness is adjustable. A referee's whistle is a loud,
    sustained, tonal blast, and that is all three things the detector requires: a narrow band peak that dominates the
@@ -107,7 +147,7 @@ data/segments/       # per-segment Stage A output (one directory per video + siz
 data/matches/        # the archive: match.json, calibration.json, report.json, events.json, highlights/
 src/soccer_analytics/
     ingest/          # GPU-accelerated frame and audio I/O (ffmpeg)
-    geometry/        # camera motion recovery, pitch calibration
+    geometry/        # camera motion recovery (estimated chain + gimbal log), pitch calibration
     analysis/        # staged analysis (see below)
     dashboard/       # Streamlit app
 tests/               # including a synthetic-match oracle with known ground truth
@@ -145,6 +185,33 @@ Focal length is self-calibrated (`DEFAULT_FOCAL = 0.82` frame widths, measured f
 the zoom deadband, `0.0006`, is set from the measured per-step noise (σ = 0.00008 on static steps) rather than
 guessed. Logo and clock overlays are masked before estimation.
 
+## The gimbal's own log (ground-truth camera motion)
+
+The camera writes a text log beside each clip recording the tracking loop: the **yaw and pitch it commanded** every
+frame, its **zoom step**, and its **ball-lock state** (`Lock:a/b`, the ball's image position and velocity). This is a
+*hardware measurement* of where the camera pointed, not an estimate from the picture, and it does not drift.
+
+`geometry/gimbal_log.py` parses the log (tolerant of the camera's habit of splitting a line mid-token) and
+`geometry/gimbal_motion.py` turns it into a camera pose. The gimbal pans about the **world vertical**, so the pan
+axis is the world-up direction in the camera's frame - an angle of `90 - tilt` from the optical axis (78.4° on this
+footage, where the tilt is held at 11.6°). The yaw *scale* is fitted from the estimated chain's large per-step
+rotations, which are accurate even though the chain's accumulated orientation is not.
+
+`analysis/projection.py` prefers the log-backed orientation wherever a log exists and falls back to the estimated
+chain otherwise. Measured on the whole 2026-10-03 game: a model fitted on the first minutes predicts landmark clicks
+40 minutes later to a **median 16 m, against 48 m for the chain** - the drift the chain accumulates over a game is
+exactly what the log removes. Re-fitting the existing clicks against the log-backed motion drops the calibration RMS
+from 2.55 m (25 clicks rejected as outliers) to **1.14 m (2 rejected)**, because the late-game clicks the chain had
+drifted away from now fit.
+
+A calibration is fitted against one motion source's reference frame, so it records which one (`pose_source`); the
+dashboard warns when a saved fit was built against the other and asks for a refit rather than projecting through a
+stale pose.
+
+`analysis/ball_lock.py` uses the hardware lock for two things that need no homography at all: **ball in play** (a
+sustained lock is live play; a long gap is a stoppage) and **image-space possession** (the nearest player to the
+ball *in the picture*, which survives a bad calibration).
+
 ## What the footage supports, and what it does not
 
 Honest limits, because the report is only useful if its numbers can be trusted:
@@ -164,16 +231,42 @@ Honest limits, because the report is only useful if its numbers can be trusted:
   pixels on the real game: grass has two hue modes, shaded and sunlit, with the mean in the gap between them.
   Masking the measured 2nd-98th percentile span instead covers 98%+, and halved the green contamination in the
   large, camera-followed torsos.
-- **…but the reported team colour is still washed out, and the reason is size, not masking.** The descriptors
-  themselves are good — a near player's torso crop reads as pure saturated red or blue. What the clustering is
-  fed is dominated by *tiny* far-side and touchline figures (median box height 2.2% of the frame width, ~85 px),
-  where a torso crop is a handful of pixels and no kit colour is recoverable; those average to grey. Measured over
-  the whole game, only a fifth of the usable descriptors are clearly red-ish or blue-ish, and the split is
-  strongly time-skewed. So the swatch and suggested team name are a *weak* signal on this footage, and the page
-  says the colours are measured rather than claiming them as ground truth.
+- **Team colour is read from player-sized, well-evidenced tracks only.** Three measured failure modes shaped the
+  rule, and all three were found on the real 2026-10-03 game:
+  1. *The largest boxes are not players.* Boxes over ~200 px at 1920 width are near-sideline bystanders — coaches,
+     photographers, spectators — whose random clothing lands in whichever cluster is nearest. The trusted band is
+     60–200 px: big enough for a torso crop to carry colour, small enough to be a player on the pitch.
+  2. *Most tracks have no colour evidence at all.* Of ~2,800 stitched tracks, half have no player-sized
+     observation and their grey medians would outvote the real kits. Only tracks with enough player-sized
+     observations (scaled to segment length) and crops that were mostly kit rather than grass may vote — that
+     cuts the electorate to ~150 tracks, and the red/blue split becomes clean.
+  3. *The colour vector was decoded one field off.* The team colour is stored as `[L, a, b, sat, val]` but
+     `kit_rgb` expects the full 12-float descriptor layout starting with `kit_fraction`; passing the bare
+     5-float vector read `a/b/sat` as `L/a/b` and reported a red team as "light grey". With the layout fixed and
+     the electorate fixed, the same game reads team 0 = red (172,102,117), team 1 = blue (103,140,198) — matching
+     what is visible in the footage.
+- **Jersey numbers were read from the wrong frames.** `scripts/extract_jerseys.py` converted the reader's source
+  timestamps with `round(time_s * fps)`, ignoring the segment's `start_s` — on the whole game every crop came from
+  ~2,704 frames (9 minutes) after the one analysed, which is why 5,455 crops yielded 27 readings and 0 suggestions.
+  The index is now `(time_s - start_s) * fps`. Crop selection also stays inside the player band (130–200 px) and
+  rejects motion-blurred torsos (variance of Laplacian) before spending OCR on them.
 - **Possession is a proximity estimate.** Possession is attributed to the team whose player is nearest the camera's
   aim point. Counting detections per team instead lets the referee decide possession (they follow the ball all
   match); measured as a 10-point swing, which is why the aim proxy is used.
+- **A pan-locked apparent field rotation exists, but it is not a fixable pose error.** The user's insight — that a
+  camera pan should not make every player's direction change coherently — was tested directly: during active pans
+  (|dyaw| > 0.5 deg/frame) the projected field rotates about the camera by ~0.0022 rad per deg/frame of pan
+  (bootstrap 95% CI 0.0016-0.0021 on the median ratio, zero-lag peak, still-frame control ~0.000, and the rotation
+  accumulates over a pan burst rather than cancelling). Three checks say it is not a correctable camera-pose error:
+  (1) it grows with range (near band -0.0009, mid +0.0017, far +0.0035 rad/deg) instead of being uniform, which a
+  yaw-scale error cannot do; (2) applying the implied yaw-scale correction (effective scale 0.86 vs the fitted
+  0.70) zeroes the field-rotation slope but *worsens* the landmark-click residuals (rms 6.4 -> 8.6 m) and shortens
+  tracks; (3) subtracting the rotation from the displacements does not reduce the pan-speed inflation (5.4 -> 5.5
+  km/h), so the inflation mostly comes from elsewhere (detection lag during fast image motion, not projection).
+  The signal is real and pan-locked, but it is a small (sub-metre) image-row-dependent artifact of fast pans, not
+  a homography error the pipeline can correct; the honest use of the user's fact is as a *diagnostic* — the
+  collective-motion check is implemented in the analysis scripts and can flag segments whose pans are fast enough
+  to distrust.
 - **Partial pitch coverage.** The camera follows play, so only part of the pitch is visible at any moment. Team shape
   and full-team formation cannot be measured, and the report does not claim them.
 - **Far-side landmarks are uncertain.** At 40-90 m, four pixels of click noise costs 0.6-5 m of ground error in the

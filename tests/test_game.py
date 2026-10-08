@@ -14,10 +14,13 @@ from soccer_analytics.analysis.game import (
     Clip,
     GameRecord,
     build_game,
+    clip_offset_for,
     compatibility_problem,
     concat_list_text,
     find_for_video,
+    game_time,
     half_labels_for,
+    half_labels_for_events,
     locations,
     plan,
 )
@@ -111,6 +114,61 @@ def test_halves_and_windows_come_from_the_marks() -> None:
     assert game.window_label(WINDOW_FIRST) == "first_half_120_3000"
     # The labels a table of events is annotated with: outside the game is not given a half.
     assert half_labels_for(game, [60.0, 1500.0, 3000.0, 5990.0]) == ["-", "1st half", "2nd half", "-"]
+
+
+def test_a_clip_time_is_translated_onto_the_game_clock() -> None:
+    """A moment's seconds are seconds of its own recording; the game's clock is the combined video's.
+
+    This is the bug that put every whistle candidate in the wrong half: a blast at 5 s of the second camera clip is
+    30 minutes into the match, and asking ``half_of(5.0)`` about it answers a question about a different moment.
+    """
+    game = _record()
+    game.set_mark("start", 120.0)
+    game.set_mark("half", 3000.0)
+    game.set_mark("end", 5900.0)
+    game.clips = [
+        Clip(path="/tmp/clip_a.mp4", start_s=0.0, duration_s=1800.0, bytes=1),
+        Clip(path="/tmp/clip_b.mp4", start_s=1800.0, duration_s=1800.0, bytes=1),
+    ]
+
+    assert clip_offset_for(game, "/tmp/clip_a.mp4") == 0.0
+    assert clip_offset_for(game, "/tmp/clip_b.mp4") == 1800.0
+    assert clip_offset_for(game, "/tmp/not_in_this_game.mp4") is None
+    # The combined video is the game's own clock, so it maps to zero.
+    assert clip_offset_for(game, game.output) == 0.0
+
+    # 5 s of clip B is 1805 s of the game - the first half, not "before kick-off".
+    assert game_time(game, 5.0, "/tmp/clip_b.mp4") == 1805.0
+    assert game.half_of(game_time(game, 5.0, "/tmp/clip_b.mp4")) == 1
+    # 1500 s of clip B is 3300 s of the game: the second half.
+    assert game.half_of(game_time(game, 1500.0, "/tmp/clip_b.mp4")) == 2
+    # A recording that is not part of the game has no game time at all.
+    assert game_time(game, 5.0, "/tmp/not_in_this_game.mp4") is None
+
+
+def test_event_half_labels_translate_each_event_out_of_its_own_recording() -> None:
+    """The table's half column has to translate per event, because events come from different recordings."""
+    game = _record()
+    game.set_mark("start", 120.0)
+    game.set_mark("half", 3000.0)
+    game.set_mark("end", 5900.0)
+    game.clips = [
+        Clip(path="/tmp/clip_a.mp4", start_s=0.0, duration_s=1800.0, bytes=1),
+        Clip(path="/tmp/clip_b.mp4", start_s=1800.0, duration_s=1800.0, bytes=1),
+    ]
+
+    class _Event:
+        def __init__(self, time_s: float, video: str) -> None:
+            self.time_s = time_s
+            self.video = video
+
+    events = [
+        _Event(5.0, "/tmp/clip_b.mp4"),  # 1805 s of the game -> 1st half
+        _Event(1500.0, "/tmp/clip_b.mp4"),  # 3300 s -> 2nd half
+        _Event(2000.0, game.output),  # already on the game clock -> 1st half
+        _Event(5.0, "/tmp/not_in_this_game.mp4"),  # not part of the game -> "-"
+    ]
+    assert half_labels_for_events(game, events) == ["1st half", "2nd half", "1st half", "-"]
 
 
 def test_a_mark_is_clamped_into_the_video() -> None:

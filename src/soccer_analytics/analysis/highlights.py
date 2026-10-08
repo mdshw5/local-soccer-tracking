@@ -67,6 +67,11 @@ class Moment:
     event_type: str = "other"
     team: int = -1
     video: str = ""  # the recording the seconds refer to; empty means "whatever source the caller passes"
+    # Seconds on *that* recording's clock. When the moment is cut from a different file than its own ``video``, the
+    # window is mapped through the game manifest: ``start_s``/``end_s`` stay on the moment's own recording and are
+    # translated at cut time.
+    clip_start_s: float | None = None
+    clip_end_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -86,8 +91,14 @@ def moment_for_event(event: Event) -> Moment:
     weight = MANUAL_WEIGHT if event.source == "manual" else AUDIO_WEIGHT
     if event.type == "goal":
         weight *= 3.0
+    elif event.type == "penalty":
+        weight *= 2.5
     elif event.type in ("shot", "save", "block"):
         weight *= 1.6
+    elif event.type == "corner":
+        weight *= 1.3
+    elif event.type in ("clearance", "tackle"):
+        weight *= 1.2
     return Moment(
         time_s=event.time_s,
         start_s=max(0.0, event.time_s - LEAD_S),
@@ -97,6 +108,38 @@ def moment_for_event(event: Event) -> Moment:
         event_type=event.type,
         team=event.team,
         video=event.video,
+    )
+
+
+def moment_on_source(
+    moment: Moment,
+    source: str | Path,
+    *,
+    clip_offsets: dict[str, float] | None = None,
+) -> Moment:
+    """The moment's window mapped onto the file it will actually be cut from.
+
+    A moment's seconds are seconds of its own recording (``video``), but a reel is cut from one file - usually the
+    selected video. When the two differ, the window is translated through ``clip_offsets`` (a clip path -> its start
+    in the combined game, from the game manifest) so the clip shows the moment and not the same *number* of seconds
+    of a different part of the match. A moment whose own recording is the source, or that has no video (a manual tag
+    or a momentum swing, which belong to whatever the caller passes), comes back as it stands.
+
+    Returns the moment with ``clip_start_s``/``clip_end_s`` set; the original window is untouched so the preview and
+    the manifest still describe the moment in its own recording's terms.
+    """
+    own = Path(moment.video) if moment.video else None
+    if own is None or own.resolve() == Path(source).resolve():
+        return moment
+    offsets = clip_offsets or {}
+    offset = offsets.get(str(own.resolve()))
+    if offset is None:
+        return moment
+    shift = offset  # the moment's recording starts this far into the combined game
+    return replace(
+        moment,
+        clip_start_s=max(0.0, moment.start_s + shift),
+        clip_end_s=moment.end_s + shift,
     )
 
 
@@ -177,7 +220,7 @@ def select_reel(
     if tier not in TIER_SECONDS:
         raise ValueError(f"unknown tier {tier!r}; expected one of {tuple(TIER_SECONDS)}")
     if tier == "goals":
-        candidates = [m for m in moments if m.event_type == "goal"]
+        candidates = [m for m in moments if m.event_type in ("goal", "penalty")]
         if not candidates:
             candidates = [m for m in moments if m.event_type in ("shot", "save", "block")]
     else:
@@ -247,11 +290,15 @@ def _encode_clip(
     attempts = [(codec, False) for codec in audio_codecs] if audio_only else [
         (codec, gpu) for codec in audio_codecs for gpu in ([True, False] if use_gpu else [False])
     ]
+    # The moment's window is on its own recording's clock; when it is being cut from a *different* file the mapped
+    # ``clip_start_s``/``clip_end_s`` (set by :func:`moment_on_source`) are the seconds to cut.
+    cut_start = moment.clip_start_s if moment.clip_start_s is not None else moment.start_s
+    cut_end = moment.clip_end_s if moment.clip_end_s is not None else moment.end_s
     for codec, gpu in attempts:
         if output_path.exists():
             output_path.unlink()
         command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
-        command += ["-ss", f"{moment.start_s:.3f}"]
+        command += ["-ss", f"{cut_start:.3f}"]
         if skip_frame:
             command += ["-skip_frame", skip_frame]  # an input option: it has to precede -i
         command += ["-i", str(source), "-t", f"{duration_s:.3f}"]
@@ -275,7 +322,7 @@ def _encode_clip(
     last_error = output or f"ffmpeg exited with {returncode}"
     if output_path.exists():
         output_path.unlink()
-    raise RuntimeError(f"ffmpeg failed cutting the clip at {moment.start_s:.1f}s: {last_error}")
+    raise RuntimeError(f"ffmpeg failed cutting the clip at {cut_start:.1f}s: {last_error}")
 
 
 def export_reel(
@@ -286,12 +333,17 @@ def export_reel(
     width: int = 1920,
     use_gpu: bool = True,
     progress=None,
+    clip_offsets: dict[str, float] | None = None,
 ) -> Path:
     """Cuts the reel's moments out of ``source`` and joins them into one file.
 
     Each moment is re-encoded (not stream-copied) so the cut lands exactly where intended instead of at the nearest
     keyframe, and every part is normalised to the same size/rate before concatenation. ``progress`` covers the
     whole reel: the clips dominate, the join is the final few percent.
+
+    ``clip_offsets`` maps a recording's path to where it starts inside ``source`` (from the game manifest). A moment
+    found in another recording - a whistle scanned on a single camera file, say - is translated through it, so the
+    reel cut from the combined game shows the moment rather than the same *number* of seconds of the wrong part.
     """
     source, output_path = Path(source), Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,11 +356,12 @@ def export_reel(
         clip_share = 0.97 / len(reel.moments)
         for index, moment in enumerate(reel.moments):
             part = tmp_dir / f"part_{index:03d}.mp4"
+            on_source = moment_on_source(moment, source, clip_offsets=clip_offsets)
             _encode_clip(
                 _moment_source(moment, source),
-                moment,
+                on_source,
                 part,
-                duration_s=max(MIN_CLIP_S, moment.end_s - moment.start_s),
+                duration_s=max(MIN_CLIP_S, on_source.end_s - on_source.start_s),
                 width=width,
                 use_gpu=use_gpu,
                 progress=(
@@ -362,6 +415,7 @@ def export_moment(
     width: int | None = None,
     use_gpu: bool = True,
     progress=None,
+    clip_offsets: dict[str, float] | None = None,
 ) -> Path:
     """Cut a single moment out of ``source`` for inline preview in the dashboard.
 
@@ -369,6 +423,9 @@ def export_moment(
     moment describes, scaled down so it loads and seeks quickly in the browser. When the moment carries its own
     video (every detected candidate does), that file is the one cut from; ``source`` is only the fallback for tags
     and momentum moments, which belong to whatever the page has selected.
+
+    ``clip_offsets`` maps a recording's path to where it starts inside ``source``, for the same reason as
+    :func:`export_reel`.
 
     ``mode`` is one of :data:`PREVIEW_SETTINGS` and is the whole cost trade: ``"audio"`` writes an MP3 of the
     window (no video decode at all), ``"quick"`` a low-rate flipbook of the camera's own keyframes, ``"full"`` the
@@ -378,10 +435,11 @@ def export_moment(
     settings = PREVIEW_SETTINGS.get(mode)
     if settings is None:
         raise ValueError(f"unknown preview mode {mode!r}; expected one of {tuple(PREVIEW_SETTINGS)}")
-    duration_s = max(1.0, moment.end_s - moment.start_s)
+    on_source = moment_on_source(moment, source, clip_offsets=clip_offsets)
+    duration_s = max(1.0, on_source.end_s - on_source.start_s)
     return _encode_clip(
         _moment_source(moment, source),
-        moment,
+        on_source,
         Path(output_path),
         duration_s=duration_s,
         width=int(width if width is not None else settings["width"]),

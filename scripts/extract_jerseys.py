@@ -34,6 +34,11 @@ from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader
 
 MIN_CONFIDENCE = 0.55  # detections below this are not worth cropping
 UPSAMPLE_TARGET_PX = 96.0  # torso crops smaller than this are upscaled before OCR
+# The very largest boxes are near-sideline bystanders (coaches, spectators), not players - measured on the real
+# game, boxes over 200 px at 1920 width are overwhelmingly off-pitch people. Numbers are read from player-sized
+# boxes only, and the sharpest crops win: motion blur kills OCR on small digits.
+PLAYER_MAX_HEIGHT_PX = 200.0
+BLUR_REJECT_LAPLACIAN = 12.0  # variance of Laplacian below this is too blurred to read
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,14 +95,17 @@ def main() -> int:
         for track_id, rows in assignment.tracks.items():
             track_of_row[rows] = track_id
 
-        # Per track, the clearest crops across the whole segment: biggest boxes first, then spread over time.
+        # Per track, the clearest crops across the whole segment: player-sized boxes first (the very largest are
+        # near-sideline bystanders, not players), then sharpest, then spread over time so all lights appear.
         heights = detections.height_px
         selected: dict[int, list[int]] = {}
         for track_id, rows in assignment.tracks.items():
             usable = [
                 int(row)
                 for row in rows
-                if keep[row] and heights[row] >= args.min_height_px and detections.conf[row] >= MIN_CONFIDENCE
+                if keep[row]
+                and args.min_height_px <= heights[row] <= PLAYER_MAX_HEIGHT_PX
+                and detections.conf[row] >= MIN_CONFIDENCE
             ]
             usable.sort(key=lambda row: -(heights[row] * detections.conf[row]))
             if len(usable) > args.max_per_track:
@@ -116,9 +124,13 @@ def main() -> int:
                 rows_by_frame.setdefault(int(detections.frame[row]), []).append((track_id, row))
         total = sum(len(v) for v in rows_by_frame.values())
         if total > args.max_crops:
-            # thin evenly rather than truncating: later frames matter as much as early ones
+            # Thin evenly rather than truncating: later frames matter as much as early ones. Per-frame strides
+            # barely bite when most frames hold only one or two crops (measured: 8,764 crops across 6,000 frames
+            # thinned to 8,700), so the budget is enforced across the whole frame list - every stride-th frame
+            # keeps its crops, the rest are dropped whole.
             stride = int(np.ceil(total / args.max_crops))
-            rows_by_frame = {frame: rows[::stride] for frame, rows in sorted(rows_by_frame.items())}
+            frames_sorted = sorted(rows_by_frame)
+            rows_by_frame = {frame: rows_by_frame[frame] for frame in frames_sorted[::stride]}
             total = sum(len(v) for v in rows_by_frame.values())
         status.update(crops_total=total)
         print(f"[jerseys] {len(selected)} tracks, {total} crops from {len(rows_by_frame)} frames", flush=True)
@@ -135,22 +147,32 @@ def main() -> int:
         per_track_readings: dict[int, list[JerseyCandidate]] = {}
         done = 0
         wanted_frames = sorted(rows_by_frame)
-        start_s = float(segment.time[wanted_frames[0]])
-        end_s = float(segment.time[wanted_frames[-1]])
+        decode_start_s = float(segment.time[wanted_frames[0]])
+        decode_end_s = float(segment.time[wanted_frames[-1]])
         # det boxes in segment order, looked up through the detections' provenance index
         boxes = segment.det_box[detections.det_index]
         video_reader = FFmpegFrameReader(
-            args.video, fps=float(segment.meta["fps"]), width=args.width, start_s=start_s, duration_s=end_s - start_s + 1.0
+            args.video, fps=float(segment.meta["fps"]), width=args.width, start_s=decode_start_s, duration_s=decode_end_s - decode_start_s + 1.0
         )
         wanted = set(wanted_frames)
+        fps = float(segment.meta["fps"])
+        # The reader yields SOURCE timestamps (segment.time is source seconds, offset by the segment's start in
+        # the source video), so the analysis frame index is (time - start) * fps - not time * fps. Getting this
+        # wrong reads every crop from the wrong frame: measured on the real game, 5455 crops yielded 27 readings
+        # and 0 suggestions because the OCR was looking at grass.
+        segment_start_s = float(segment.meta.get("start_s", 0.0))
         for time_s, frame in video_reader.frames():
-            # segment times are exactly k / fps, so the frame index is exact too
-            index = int(round(time_s * float(segment.meta["fps"])))
+            index = int(round((time_s - segment_start_s) * fps))
             if index not in wanted:
                 continue
             for track_id, row in rows_by_frame[index]:
                 crop = crop_torso(frame, tuple(boxes[row]))
                 if crop is None:
+                    continue
+                # Motion blur makes small digits unreadable; a blurred crop wastes OCR time and produces
+                # confident nonsense. The variance of the Laplacian is the standard sharpness proxy.
+                grey = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                if cv2.Laplacian(grey, cv2.CV_64F).var() < BLUR_REJECT_LAPLACIAN:
                     continue
                 scale = min(4.0, max(1.0, UPSAMPLE_TARGET_PX / max(1, crop.shape[0])))
                 if scale > 1.05:

@@ -328,6 +328,49 @@ def half_labels_for(record: GameRecord, times: Iterable[float]) -> list[str]:
     return [HALF_LABELS.get(record.half_of(float(time_s)), "-") for time_s in times]
 
 
+def clip_offset_for(record: GameRecord, video: str | Path) -> float | None:
+    """Where ``video`` starts inside the game's combined recording, or ``None`` when it is not one of its clips.
+
+    A moment's seconds are seconds of the recording it was found in, and the game's clock is the combined video's.
+    A whistle scanned on ``16:58:38.391.MP4`` reports 5.3 s, which is 1805.5 s of the game - the two clocks differ
+    by this offset, and anything that asks a question about the game (which half, where on the timeline) has to
+    translate first. The combined video itself maps to 0.
+    """
+    target = Path(video).resolve()
+    if Path(record.output).resolve() == target:
+        return 0.0
+    for clip in record.clips:
+        if Path(clip.path).resolve() == target:
+            return float(clip.start_s)
+    return None
+
+
+def game_time(record: GameRecord, time_s: float, video: str | Path) -> float | None:
+    """``time_s`` of ``video`` expressed on the game's own clock, or ``None`` when the recording is not part of it.
+
+    The one place the translation lives, so the event table, the timeline strip and the half labels cannot disagree
+    about when something happened.
+    """
+    offset = clip_offset_for(record, video)
+    return None if offset is None else float(time_s) + offset
+
+
+def half_labels_for_events(record: GameRecord, events: Iterable) -> list[str]:
+    """The half each event belongs to, translating each one out of its own recording's clock first.
+
+    An event carries the recording it was found in (``Event.video``); a whistle candidate's seconds are seconds of
+    a single camera file while the game's marks are on the combined video's clock. Labelling without translating
+    put every audio candidate in the first half - or outside the game entirely - because 5 s of a clip is not 5 s
+    of the match.
+    """
+    labels: list[str] = []
+    for event in events:
+        video = getattr(event, "video", "") or record.output
+        on_game = game_time(record, float(event.time_s), video)
+        labels.append("-" if on_game is None else HALF_LABELS.get(record.half_of(on_game), "-"))
+    return labels
+
+
 def find_for_video(video: str | Path, root: str | Path = GAMES_ROOT) -> GameRecord | None:
     """The game record whose combined video is ``video``, if it was made by this app.
 

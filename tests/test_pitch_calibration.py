@@ -62,8 +62,10 @@ LANDMARKS_XY = {
     "box_b": (16.5, 50.2),
     "box_c": (83.5, 13.8),
     "box_d": (83.5, 50.2),
-    "goal_a": (0.0, 32.0),
-    "goal_b": (100.0, 32.0),
+    "goal_post_a": (0.0, 32.0 - 3.66),
+    "goal_post_b": (0.0, 32.0 + 3.66),
+    "goal_post_c": (100.0, 32.0 - 3.66),
+    "goal_post_d": (100.0, 32.0 + 3.66),
 }
 
 
@@ -115,6 +117,22 @@ def test_calibration_recovers_known_camera_from_two_pan_positions() -> None:
     assert np.allclose(cal.position, TRUE_POSITION, atol=0.3)
     assert cal.focal_scale == pytest.approx(TRUE_FOCAL_SCALE, rel=0.02)
     assert np.allclose(cal.base_rotation, R_BASE, atol=0.02)
+
+
+def test_a_known_camera_height_is_pinned_exactly_and_keeps_the_fit_healthy() -> None:
+    """The dashboard pins the rig's known height (a fixed pole): the solve works in the remaining six parameters.
+
+    Regression test for the degenerate-bounds failure: expressing the pin as equal lower/upper bounds made scipy
+    refuse every start ("each lower bound must be strictly less than each upper bound"), so *every* pinned fit
+    failed with "solver failed to start" and the dashboard reported "the clicks do not determine a camera".
+    """
+    landmarks, chain = _clicks({0: 0.0, 1: 35.0}, noise_px=0.0)
+    cal = calibrate(landmarks, chain, ASPECT, fixed_height_m=4.0)
+    assert cal.position[2] == pytest.approx(4.0)  # exact by construction, not merely recovered
+    assert cal.rms_error_m < 0.05
+    assert np.allclose(cal.position[:2], TRUE_POSITION[:2], atol=0.3)
+    # The pinned coordinate must not read as a singular direction: the conditioning check runs on the free ones.
+    assert not cal.ill_conditioned
 
 
 def test_calibration_tolerates_realistic_click_noise() -> None:
@@ -186,20 +204,20 @@ def test_rejects_too_few_and_collinear_landmarks() -> None:
         calibrate(line, {0: chain[0]}, ASPECT)
 
 
-def test_goal_centres_stand_in_for_corners_that_are_never_in_frame() -> None:
-    """The realistic case: the near corners are not visible, so the goal centres carry that end of the pitch.
+def test_goal_posts_stand_in_for_corners_that_are_never_in_frame() -> None:
+    """The realistic case: the near corners are not visible, so the goalposts carry that end of the pitch.
 
     Measured over the seeds below (4 px of click noise), this set is right to within ~2.5 m every time. It is the
     set the landmark instructions point at, so it is worth holding to that.
     """
-    names = ["corner_c", "corner_d", "goal_a", "goal_b", "halfway_far", "centre"]
+    names = ["corner_c", "corner_d", "goal_post_a", "goal_post_b", "halfway_far", "centre"]
     errors = []
     for seed in range(1, 5):
         landmarks, chain = _clicks({0: 0.0, 1: 35.0, 2: -35.0}, noise_px=4.0, seed=seed, names=names)
         assert len(landmarks) >= 6
         calibration = calibrate(landmarks, chain, ASPECT)
         errors.append(float(np.linalg.norm(calibration.position - TRUE_POSITION)))
-    assert max(errors) < 5.0, f"goal-centre set was off by {max(errors):.1f} m: {errors}"
+    assert max(errors) < 5.0, f"goal-post set was off by {max(errors):.1f} m: {errors}"
 
 
 def test_a_wrong_camera_is_never_reported_with_a_small_rms() -> None:
@@ -212,7 +230,7 @@ def test_a_wrong_camera_is_never_reported_with_a_small_rms() -> None:
     """
     from soccer_analytics.geometry.pitch_calibration import suspect_fit_reason
 
-    names = ["corner_c", "corner_d", "goal_a", "goal_b"]
+    names = ["corner_c", "corner_d", "goal_post_a", "goal_post_b"]
     saw_a_bad_fit = False
     for seed in range(1, 9):
         landmarks, chain = _clicks({0: 0.0, 1: 35.0, 2: -35.0}, noise_px=4.0, seed=seed, names=names)
@@ -404,6 +422,19 @@ def test_calibration_round_trips_through_json() -> None:
     assert np.allclose(again.base_rotation, cal.base_rotation)
     assert again.focal_scale == cal.focal_scale
     assert again.residuals_m == cal.residuals_m
+
+
+def test_calibration_records_its_pose_source() -> None:
+    landmarks, chain = _clicks({0: 0.0, 1: 35.0})
+    assert calibrate(landmarks, chain, ASPECT).pose_source == "chain"
+    logged = calibrate(landmarks, chain, ASPECT, pose_source="log")
+    assert logged.pose_source == "log"
+    # The source survives a round trip, so a saved calibration can be checked against the segment's current motion.
+    assert PitchCalibration.from_json(logged.to_json()).pose_source == "log"
+    # An older calibration with no field reads as the chain, which is what it was fitted against.
+    payload = logged.to_json()
+    del payload["pose_source"]
+    assert PitchCalibration.from_json(payload).pose_source == "chain"
 
 
 # --------------------------------------------------------------------------------------------------------------

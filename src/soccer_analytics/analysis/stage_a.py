@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,9 +42,42 @@ DETECT_WIDTH = 1920
 CHUNK_FRAMES = 300  # 60 s at 5 fps
 MIN_PERSON_HEIGHT_PX = 14  # at 1920 wide; smaller boxes are far-side noise
 PERSON_CONF = 0.25
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2 adds det_track (BoT-SORT identity per detection)
 REPO_ROOT = Path(__file__).resolve().parents[3]  # src/soccer_analytics/analysis/stage_a.py -> repo root
 MODELS_DIR = REPO_ROOT / "data" / "models"  # where a locally-supplied checkpoint is looked for
+
+# BoT-SORT with appearance re-identification. The camera whips between the ends of the pitch and players cross
+# constantly, so IoU/motion association alone mixes identities; the ReID encoder's appearance embedding is what
+# keeps a label on the same shirt through a crossing or a short occlusion. The buffer is sized to the analysis
+# rate: 30 frames is 6 s at 5 fps, the same window Stage B's stitcher uses, so the two layers agree on how long
+# a player may vanish and still be the same person.
+TRACKER_CONFIG = {
+    "tracker_type": "botsort",
+    "track_high_thresh": 0.25,
+    "track_low_thresh": 0.1,
+    "new_track_thresh": 0.25,
+    "track_buffer": 30,
+    "match_thresh": 0.8,
+    "fuse_score": True,
+    "gmc_method": "sparseOptFlow",
+    "proximity_thresh": 0.5,
+    "appearance_thresh": 0.8,
+    "with_reid": True,
+    "model": "auto",
+}
+
+
+def tracker_config_path() -> str:
+    """The BoT-SORT config as a file Ultralytics' tracker loader accepts, written once per process.
+
+    ``model.track(tracker=...)`` takes a YAML path (or a built-in name); the ReID switches are not predict
+    arguments, so the config has to travel as a file. A temp file per process keeps the repo read-only-friendly,
+    and JSON is valid YAML for a flat mapping, so the same atomic writer the chunks use serves here.
+    """
+    path = Path(tempfile.gettempdir()) / f"soccer_botsort_{os.getpid()}.yaml"
+    if not path.exists():
+        _write_json_atomic(path, TRACKER_CONFIG)
+    return str(path)
 
 
 @dataclass(frozen=True)
@@ -151,7 +185,10 @@ def _save_chunk(directory: Path, index: int, rows: dict) -> None:
 
 
 def _empty_rows() -> dict[str, list]:
-    return {k: [] for k in ("time", "ok", "inlier", "step", "focal", "det_frame", "det_box", "det_conf", "det_kit")}
+    return {
+        k: []
+        for k in ("time", "ok", "inlier", "step", "focal", "det_frame", "det_box", "det_conf", "det_kit", "det_track")
+    }
 
 
 def _pack_rows(rows: dict[str, list]) -> dict[str, np.ndarray]:
@@ -166,6 +203,7 @@ def _pack_rows(rows: dict[str, list]) -> dict[str, np.ndarray]:
         "det_box": np.asarray(rows["det_box"], dtype=np.float32).reshape(n_det, 4),
         "det_conf": np.asarray(rows["det_conf"], dtype=np.float32),
         "det_kit": np.asarray(rows["det_kit"], dtype=np.float32).reshape(n_det, DESCRIPTOR_SIZE),
+        "det_track": np.asarray(rows["det_track"], dtype=np.int32),
     }
 
 
@@ -185,6 +223,43 @@ def detect_people(model, frame: np.ndarray, config: SegmentConfig, ignore: np.nd
         if ignore[foot_y, foot_x] == 0:  # the box's foot sits on the logo/clock overlay
             continue
         out.append((x1 / width, y1 / width, x2 / width, y2 / width, float(conf)))  # normalised by frame width
+    return out
+
+
+def track_people(model, frame: np.ndarray, config: SegmentConfig, ignore: np.ndarray) -> list[tuple]:
+    """Tracked person boxes ``(x1, y1, x2, y2, conf, track_id)``; the identity is BoT-SORT's, not the caller's.
+
+    Tracking runs on the same frame the detector sees, so the boxes are the detector's own - the tracker only
+    attaches identities to them. ``track_id`` is ``-1`` for a detection the tracker did not carry over (the first
+    frame of a stream, or a detection below the tracker's own threshold), and Stage B treats those as fresh
+    observations rather than continuations.
+
+    The tracker is stateful and must persist across frames of one segment (``persist=True``); it is created on the
+    first call and reused, which is what makes an identity survive a chunk boundary.
+    """
+    result = model.track(
+        frame,
+        persist=True,
+        tracker=tracker_config_path(),
+        imgsz=config.detect_width,
+        conf=config.confidence,
+        classes=[0],
+        device=config.device,
+        verbose=False,
+    )[0]
+    boxes = result.boxes.xyxy.cpu().numpy()
+    confs = result.boxes.conf.cpu().numpy()
+    ids = result.boxes.id
+    ids = ids.cpu().numpy() if ids is not None else np.full(len(boxes), -1.0)
+    out = []
+    height, width = frame.shape[:2]
+    for (x1, y1, x2, y2), conf, tid in zip(boxes, confs, ids):
+        if y2 - y1 < MIN_PERSON_HEIGHT_PX * width / DETECT_WIDTH:
+            continue
+        foot_x, foot_y = int(np.clip((x1 + x2) / 2, 0, width - 1)), int(np.clip(y2 - 1, 0, height - 1))
+        if ignore[foot_y, foot_x] == 0:  # the box's foot sits on the logo/clock overlay
+            continue
+        out.append((x1 / width, y1 / width, x2 / width, y2 / width, float(conf), int(tid)))
     return out
 
 
@@ -300,11 +375,12 @@ def analyse_segment(
             rows["focal"].append(state.focal)
 
             grass = frame_grass_window(frame)
-            for x1, y1, x2, y2, conf in detect_people(model, frame, config, ignore_mask):
+            for x1, y1, x2, y2, conf, tid in track_people(model, frame, config, ignore_mask):
                 width = frame.shape[1]
                 rows["det_frame"].append(frame_idx)
                 rows["det_box"].append((x1, y1, x2, y2))
                 rows["det_conf"].append(conf)
+                rows["det_track"].append(tid)
                 rows["det_kit"].append(kit_descriptor(frame, (x1 * width, y1 * width, x2 * width, y2 * width), grass))
 
             frames_in_chunk += 1
@@ -361,6 +437,7 @@ class SegmentData:
     det_box: np.ndarray  # (D, 4) x1,y1,x2,y2 normalised by frame width
     det_conf: np.ndarray  # (D,)
     det_kit: np.ndarray  # (D, DESCRIPTOR_SIZE)
+    det_track: np.ndarray  # (D,) BoT-SORT identity, -1 where the tracker had none (v1 chunks, or a fresh track)
 
     @property
     def aspect(self) -> float:
@@ -373,11 +450,17 @@ def load_segment(directory: str | Path) -> SegmentData:
     chunks = completed_chunks(directory)
     if chunks == 0:
         raise FileNotFoundError(f"no completed chunks in {directory}")
-    parts: dict[str, list] = {k: [] for k in ("time", "ok", "inlier", "step", "focal", "det_frame", "det_box", "det_conf", "det_kit")}
+    keys = ("time", "ok", "inlier", "step", "focal", "det_frame", "det_box", "det_conf", "det_kit", "det_track")
+    parts: dict[str, list] = {k: [] for k in keys}
     offset = 0
     for index in range(chunks):
         with np.load(chunk_path(directory, index)) as data:
-            for key in parts:
+            for key in keys:
+                if key not in data.files:
+                    # A v1 chunk predates the tracker column: every detection was its own identity then, which is
+                    # exactly what Stage B's online pass would have concluded anyway.
+                    parts[key].append(np.full(len(data["det_frame"]), -1, dtype=np.int32))
+                    continue
                 value = data[key]
                 parts[key].append(value + offset if key == "det_frame" else value)
             offset += len(data["time"])

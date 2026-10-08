@@ -48,7 +48,15 @@ from soccer_analytics.geometry.drift import DriftCorrection, fit_drift
 
 @dataclass(frozen=True)
 class Landmark:
-    """A clicked pitch feature: pixel ``(u, v)`` (normalised by frame width) in frame ``frame`` and its pitch XY."""
+    """A clicked pitch feature: pixel ``(u, v)`` (normalised by frame width) in frame ``frame`` and its pitch XY.
+
+    ``direction`` turns the landmark into a *line observation*: the pitch point sits on a pitch marking whose
+    image tangent is known, so the measurement constrains only the offset *perpendicular* to the line - sliding
+    along the line is free. This is what automatic line detection supplies (it can say "the touchline passes
+    through here" but not "this exact spot is the touchline's 23rd metre"), while a user's click pins both
+    coordinates. ``direction`` is the image-space unit normal of the line, and the residual is that perpendicular
+    offset converted to ground metres at the point's range, so it shares the solver's metre scale with clicks.
+    """
 
     frame: int
     u: float
@@ -56,6 +64,7 @@ class Landmark:
     pitch_x: float
     pitch_y: float
     label: str = ""
+    direction: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,12 @@ class PitchCalibration:
     # Time-varying correction of the motion chain (see geometry/drift.py). None when the clicks all sit on one
     # frame - a constant correction there is just the base rotation, and drift is a function of time.
     drift: DriftCorrection | None = None
+    # Which camera-motion source this calibration was fitted against: "chain" (the estimated rotation chain) or
+    # "log" (the gimbal's own telemetry). The two produce different reference frames, so a calibration fitted
+    # against one is *stale* under the other - measured on the real game, a chain-fit calibration applied to log
+    # poses is 24 m off at the median. The field lets the app notice the mismatch and refit rather than project
+    # through a stale pose.
+    pose_source: str = "chain"
 
     def to_json(self) -> dict:
         payload = {
@@ -84,6 +99,7 @@ class PitchCalibration:
             "excluded": list(self.excluded),
             "ambiguous": self.ambiguous,
             "ill_conditioned": self.ill_conditioned,
+            "pose_source": self.pose_source,
         }
         if self.drift is not None:
             payload["drift"] = self.drift.to_json()
@@ -102,6 +118,7 @@ class PitchCalibration:
             bool(data.get("ambiguous", False)),
             bool(data.get("ill_conditioned", False)),
             DriftCorrection.from_json(data["drift"]) if data.get("drift") else None,
+            str(data.get("pose_source", "chain")),
         )
 
     def corrected_chain(self, q: np.ndarray) -> np.ndarray:
@@ -208,12 +225,66 @@ def _plausible_registration(params: np.ndarray) -> bool:
     return HEIGHT_RANGE[0] + 1e-3 < float(params[2]) < HEIGHT_RANGE[1] - 1e-3
 
 
+def _project_pitch_point(
+    pitch_xy: tuple[float, float],
+    position: np.ndarray,
+    rotation: np.ndarray,
+    q: np.ndarray,
+    focal: float,
+    focal_scale: float,
+    aspect: float,
+) -> tuple[np.ndarray, bool]:
+    """Project one pitch point to normalised pixels for a *parametric* pose (solver state, not a calibration).
+
+    The same projection :func:`pitch_to_pixels` performs for a fitted calibration, expressed with the pieces the
+    residual functions have in hand - a rotation matrix, a focal scale - so line observations and clicks can be
+    residualised in one pass. Returns ``(uv, in_front)``.
+    """
+    world = np.array([pitch_xy[0] - position[0], pitch_xy[1] - position[1], -position[2]])
+    cam = world @ (rotation @ q)
+    k = intrinsics(focal * focal_scale, aspect)
+    projected = cam @ k.T
+    if projected[2] <= 1e-9:
+        return np.array([np.nan, np.nan]), False
+    return projected[:2] / projected[2], True
+
+
+def _perpendicular_error_metres(
+    uv: np.ndarray,
+    observed: tuple[float, float],
+    direction: tuple[float, float],
+    pitch_xy: tuple[float, float],
+    position: np.ndarray,
+    focal: float,
+) -> float:
+    """A line observation's perpendicular pixel offset, converted to the ground metres the solver speaks.
+
+    A pixel offset ``du`` at ground range ``r`` with normalised focal ``f`` corresponds to a ground offset of
+    ``du * r / f`` - the same relation that makes far markings insensitive to a pixel of click noise. Working in
+    metres keeps line observations and clicks on one scale, so one robust loss and one outlier threshold serve both.
+    """
+    perp = (float(uv[0]) - observed[0]) * direction[0] + (float(uv[1]) - observed[1]) * direction[1]
+    r = float(np.hypot(pitch_xy[0] - position[0], pitch_xy[1] - position[1]))
+    return perp * r / max(focal, 1e-6)
+
+
 def _residuals(params: np.ndarray, landmarks: list[Landmark], chain: dict[int, tuple[np.ndarray, float]], aspect: float):
     position, rvec, focal_scale = params[:3], params[3:6], params[6]
     base = _rodrigues(rvec)
     out = []
     for lm in landmarks:
         q, focal = chain[lm.frame]
+        if lm.direction is not None:
+            # A line observation: project the pitch point and keep only the offset across the line. Sliding along
+            # the line is unmeasured by construction, so it must not enter the residual.
+            uv, in_front = _project_pitch_point(
+                (lm.pitch_x, lm.pitch_y), position, base, q, focal, focal_scale, aspect
+            )
+            if not in_front:
+                out.append(50.0)  # same flat penalty the ground path uses for a ray at the sky
+            else:
+                out.append(_perpendicular_error_metres(uv, (lm.u, lm.v), lm.direction, (lm.pitch_x, lm.pitch_y), position, focal * focal_scale))
+            continue
         ray = pixel_rays(np.array([[lm.u, lm.v]]), q, focal, aspect, base, focal_scale)
         hit, valid = intersect_ground(position, ray)
         if not valid[0]:
@@ -248,16 +319,26 @@ ILL_CONDITIONED_SIGMA = 0.2
 
 
 def _jacobian_conditioning(
-    params: np.ndarray, landmarks: list[Landmark], chain: dict[int, tuple[np.ndarray, float]], aspect: float
+    params: np.ndarray,
+    landmarks: list[Landmark],
+    chain: dict[int, tuple[np.ndarray, float]],
+    aspect: float,
+    fixed_height_m: float | None = None,
 ) -> float | None:
-    """Smallest singular value of the residual Jacobian at a solution; None when it cannot be evaluated stably."""
+    """Smallest singular value of the residual Jacobian at a solution, over the *free* coordinates.
+
+    When the height is pinned it is not a coordinate the clicks constrain (see ``calibrate``): its Jacobian
+    column is zero by construction, and counting it would report every pinned fit as singular. The remaining
+    coordinates are the honest test, exactly as the free solve's seven were before.
+    """
     r0 = _residuals(params, landmarks, chain, aspect)
-    jacobian = np.zeros((len(r0), len(params)))
-    for j in range(len(params)):
+    free = [j for j in range(len(params)) if not (fixed_height_m is not None and j == 2)]
+    jacobian = np.zeros((len(r0), len(free)))
+    for column, j in enumerate(free):
         step = 1e-5 * max(abs(params[j]), 1e-2)
         delta = np.zeros(len(params))
         delta[j] = step
-        jacobian[:, j] = (_residuals(params + delta, landmarks, chain, aspect) - r0) / step
+        jacobian[:, column] = (_residuals(params + delta, landmarks, chain, aspect) - r0) / step
     if not np.all(np.isfinite(jacobian)):
         return None
     singular = np.linalg.svd(jacobian, compute_uv=False)
@@ -318,11 +399,13 @@ def _frame_starts(
     return starts
 
 
-def _grid_starts(landmarks: list[Landmark], initial_position: tuple[float, float, float] | None) -> list[np.ndarray]:
+def _grid_starts(
+    landmarks: list[Landmark], initial_position: tuple[float, float, float] | None, fixed_height_m: float | None = None
+) -> list[np.ndarray]:
     """Fallback when no single frame has four landmarks: positions around the pitch with several headings."""
     pts = np.array([[lm.pitch_x, lm.pitch_y] for lm in landmarks])
     centre = pts.mean(0)
-    z0 = initial_position[2] if initial_position else 3.0
+    z0 = fixed_height_m if fixed_height_m is not None else (initial_position[2] if initial_position else 3.0)
     xy0 = np.array(initial_position[:2]) if initial_position else None
     spread = max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1]), 10.0)
     starts = []
@@ -340,7 +423,10 @@ def _grid_starts(landmarks: list[Landmark], initial_position: tuple[float, float
 
 
 def _ray_starts(
-    landmarks: list[Landmark], chain: dict[int, tuple[np.ndarray, float]], aspect: float
+    landmarks: list[Landmark],
+    chain: dict[int, tuple[np.ndarray, float]],
+    aspect: float,
+    fixed_height_m: float | None = None,
 ) -> list[np.ndarray]:
     """Starts that guess only the camera *position*, and derive the rotation from the data in closed form.
 
@@ -378,7 +464,7 @@ def _ray_starts(
         ]
 
     for px, py in positions:
-        for height in (2.5, 6.0):
+        for height in ([fixed_height_m] if fixed_height_m is not None else (2.5, 6.0)):
             position = np.array([px, py, height])
             to_landmark = pts - position[:2]
             distance = np.linalg.norm(to_landmark, axis=1)
@@ -394,35 +480,71 @@ def _ray_starts(
     return starts
 
 
+@dataclass
+class _Solution:
+    """The solver's answer: the full seven-parameter vector and its robust cost.
+
+    ``x`` has the same shape whatever the solve did. When the height was pinned the solver worked in the six
+    remaining parameters, and the fixed value is substituted back here, so callers read ``x`` exactly as before.
+    """
+
+    x: np.ndarray
+    cost: float
+
+
 def _solve(
     landmarks: list[Landmark],
     chain: dict[int, tuple[np.ndarray, float]],
     aspect: float,
     initial_position: tuple[float, float, float] | None,
     robust: bool,
-):
-    starts = _frame_starts(landmarks, chain, aspect) + _ray_starts(landmarks, chain, aspect)
+    fixed_height_m: float | None = None,
+) -> tuple[_Solution, bool]:
+    starts = _frame_starts(landmarks, chain, aspect) + _ray_starts(landmarks, chain, aspect, fixed_height_m)
     if initial_position is not None:
         # A caller-supplied position (e.g. the previous solution) is tried first; the rest are the fallback.
-        starts = _grid_starts(landmarks, initial_position)[:4] + starts
+        starts = _grid_starts(landmarks, initial_position, fixed_height_m)[:4] + starts
     if not starts:
-        starts = _grid_starts(landmarks, None)
+        starts = _grid_starts(landmarks, None, fixed_height_m)
 
     lower = np.array([-500, -500, HEIGHT_RANGE[0], -np.pi * 2, -np.pi * 2, -np.pi * 2, FOCAL_SCALE_RANGE[0]])
     upper = np.array([500, 500, HEIGHT_RANGE[1], np.pi * 2, np.pi * 2, np.pi * 2, FOCAL_SCALE_RANGE[1]])
+    # The known height, when there is one, is *not* expressed as bounds: the solver refuses a degenerate pair
+    # ("each lower bound must be strictly less than each upper bound"), and a pinned parameter's Jacobian column is
+    # zero by construction, which the conditioning check would read as a singular fit. The height therefore leaves
+    # the parameter vector while solving - six free parameters - and is substituted back in for every residual
+    # evaluation, so the solution carries exactly the given height and the clicks never spend a degree of freedom
+    # on it.
+    free = [0, 1, 3, 4, 5, 6] if fixed_height_m is not None else list(range(7))
+    lower, upper = lower[free], upper[free]
+
+    def full(x: np.ndarray) -> np.ndarray:
+        """Solver parameters -> the full seven-parameter vector every other function speaks."""
+        if fixed_height_m is None:
+            return x
+        out = np.empty(7)
+        out[0], out[1] = x[0], x[1]
+        out[2] = float(fixed_height_m)
+        out[3], out[4], out[5] = x[2], x[3], x[4]
+        out[6] = x[5]
+        return out
+
+    def residual(x: np.ndarray):
+        return _residuals(full(x), landmarks, chain, aspect)
+
     loss = "soft_l1" if robust else "linear"
 
     def run(x0: np.ndarray, iterations: int):
         return least_squares(
-            _residuals,
+            residual,
             np.clip(x0, lower + 1e-9, upper - 1e-9),
-            args=(landmarks, chain, aspect),
             bounds=(lower, upper),
             loss=loss,
             f_scale=1.5,
             max_nfev=iterations,
         )
 
+    starts = [np.asarray(x0, dtype=np.float64)[free] for x0 in starts]
     coarse: list[tuple[float, np.ndarray]] = []
     for x0 in starts:
         try:
@@ -435,7 +557,6 @@ def _solve(
         raise CalibrationError("solver failed to start")
     coarse.sort(key=lambda item: item[0])
 
-    best: least_squares | None = None
     refined: list[tuple[float, np.ndarray]] = []
     for _cost, x0 in coarse[:MAX_STARTS]:
         try:
@@ -445,23 +566,30 @@ def _solve(
         if not np.isfinite(fit.cost):
             continue
         refined.append((float(fit.cost), fit.x))
-        if best is None or fit.cost < best.cost:
-            best = fit
-    if best is None:
+    if not refined:
         raise CalibrationError("solver failed to refine any starting guess")
     refined.sort(key=lambda item: item[0])
-    best_x = refined[0][1]
+    best_cost, best_x = refined[0]
     # A very different camera fitting the clicks almost as well is the honest answer to an under-constrained set
     # (e.g. every landmark far away): the residual alone cannot tell the two apart, so say so.
     ambiguous = any(
-        cost <= refined[0][0] * AMBIGUOUS_COST_FACTOR + 1e-9 and np.linalg.norm(x[:3] - best_x[:3]) > AMBIGUOUS_POSITION_M
+        cost <= best_cost * AMBIGUOUS_COST_FACTOR + 1e-9
+        and np.linalg.norm(full(x)[:3] - full(best_x)[:3]) > AMBIGUOUS_POSITION_M
         for cost, x in refined[1:]
     )
-    return best, ambiguous
+    return _Solution(x=full(best_x), cost=best_cost), ambiguous
 
 
 def _errors(params: np.ndarray, landmarks: list[Landmark], chain: dict, aspect: float) -> np.ndarray:
-    return np.linalg.norm(_residuals(params, landmarks, chain, aspect).reshape(-1, 2), axis=1)
+    """Per-landmark error: the norm of that landmark's residuals - two numbers for a click (both coordinates),
+    one for a line observation (the perpendicular offset)."""
+    res = _residuals(params, landmarks, chain, aspect)
+    out, i = [], 0
+    for lm in landmarks:
+        n = 1 if lm.direction is not None else 2
+        out.append(float(np.linalg.norm(res[i : i + n])))
+        i += n
+    return np.asarray(out)
 
 
 # A click counts as agreeing with the fit when it is within this of the best-fitting click. Note this is anchored on
@@ -569,12 +697,19 @@ def calibrate(
     robust: bool = True,
     reject_outliers: bool = True,
     correct_drift: bool = True,
+    pose_source: str = "chain",
+    fixed_height_m: float | None = None,
 ) -> PitchCalibration:
     """Solves camera position, base orientation and focal scale from landmark clicks.
 
     ``chain[frame] = (Q, focal)`` is the camera-motion state of every frame that has a click, where ``Q`` maps
     frame rays to reference-frame rays. Gross outliers (a mis-clicked or mislabelled landmark) are dropped and the
     fit repeated without them; they stay in ``residuals_m`` and are listed in ``excluded`` so a UI can point at them.
+
+    ``fixed_height_m`` pins the camera height when the rig's height is known (the tripod does not move between
+    matches): the height stops being an unknown, which is one fewer degree of freedom for the clicks to pin down -
+    measured on the simulated match, it roughly halves the position error of a four-click fit. The height is still
+    recorded on the calibration, so the projection and every diagnostic are unchanged in shape.
 
     When the clicks sit on more than one frame, a time-varying drift correction is fitted as well (see
     ``geometry.drift``) and everything after that - the outlier pass, the residuals, the conditioning check - runs
@@ -602,12 +737,12 @@ def calibrate(
     # its clicks by a pose pooled from everywhere else would be circular, and would drop the very clicks that make
     # the frame a reference.
     reference = _reference_anchor(landmarks) if correct_drift else None
-    fit: least_squares | None = None
+    fit: _Solution | None = None
     ambiguous = False
     if reference is not None:
         frame, group = reference
         try:
-            fit, ambiguous = _solve(group, {frame: chain[frame]}, aspect, initial_position, robust)
+            fit, ambiguous = _solve(group, {frame: chain[frame]}, aspect, initial_position, robust, fixed_height_m)
         except CalibrationError:
             fit = None  # a degenerate run of clicks on one frame; fall back to pooling every click
         if fit is not None:
@@ -616,18 +751,28 @@ def calibrate(
             # carry the pose by itself - and a registration against a height bound is a solve that tolerated its
             # worst click, not a camera. Both cases fall back to pooling every click, the older behaviour.
             kept = _agreeing_per_anchor(group, list(_errors(fit.x, group, chain, aspect)))
+            sigma = _jacobian_conditioning(fit.x, group, {frame: chain[frame]}, aspect, fixed_height_m)
             if len(kept) < MIN_REFERENCE_CLICKS or not _plausible_registration(fit.x):
+                fit = None
+            elif sigma is not None and sigma < ILL_CONDITIONED_SIGMA:
+                # A click-rich frame can still be a geometrically narrow one: with the goalposts clickable, one
+                # frame often carries a corner, both posts and two box corners - three of them on a single goal
+                # line - and the count rule then hands the registration to exactly that frame. Measured on the
+                # simulated match: registering there costs 4-7 m of camera error at the median over the pooled
+                # solve's 0.8 m, because the narrow cluster leaves the depth direction barely constrained. The
+                # app's own ill-conditioning bar is the honest screen: a registration that fails it is not a
+                # camera, so fall back to pooling every click.
                 fit = None
             elif len(kept) < len(group):
                 try:
-                    refit, refit_ambiguous = _solve(kept, {frame: chain[frame]}, aspect, initial_position, robust)
+                    refit, refit_ambiguous = _solve(kept, {frame: chain[frame]}, aspect, initial_position, robust, fixed_height_m)
                 except CalibrationError:
                     fit = None
                 else:
                     fit = refit if _plausible_registration(refit.x) else None
                     ambiguous = refit_ambiguous
     if fit is None:
-        fit, ambiguous = _solve(landmarks, chain, aspect, initial_position, robust)
+        fit, ambiguous = _solve(landmarks, chain, aspect, initial_position, robust, fixed_height_m)
     drift: DriftCorrection | None = None
     if correct_drift:
         # The correction is fitted once, against the single registered pose, and the chain handed to the rest of the
@@ -667,12 +812,12 @@ def calibrate(
         kept_pts = pts[keep] if keep else pts
         if bad and len(keep) >= MIN_LANDMARKS_AFTER_REJECTION and np.linalg.matrix_rank(kept_pts - kept_pts.mean(0), tol=0.5) >= 2:
             final_landmarks = [landmarks[i] for i in keep]
-            refit, ambiguous = _solve(final_landmarks, chain, aspect, initial_position, robust)
+            refit, ambiguous = _solve(final_landmarks, chain, aspect, initial_position, robust, fixed_height_m)
             fit, excluded = refit, bad
 
     errors = _errors(fit.x, landmarks, chain, aspect)  # every landmark, including excluded ones
     inliers = [e for i, e in enumerate(errors) if i not in excluded]
-    sigma_min = _jacobian_conditioning(fit.x, final_landmarks, chain, aspect)
+    sigma_min = _jacobian_conditioning(fit.x, final_landmarks, chain, aspect, fixed_height_m)
     ill_conditioned = sigma_min is None or sigma_min < ILL_CONDITIONED_SIGMA
     return PitchCalibration(
         position=fit.x[:3].copy(),
@@ -685,6 +830,7 @@ def calibrate(
         ambiguous=ambiguous,
         ill_conditioned=ill_conditioned,
         drift=drift,
+        pose_source=pose_source,
     )
 
 

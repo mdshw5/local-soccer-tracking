@@ -174,8 +174,10 @@ def fit_drift(
     ridge: float = RIDGE,
     robust_scale: float = ROBUST_SCALE,
     initial: "DriftCorrection | None" = None,
+    max_rotation: float = MAX_ROTATION_RAD,
+    max_scale: float = MAX_SCALE,
 ) -> DriftCorrection | None:
-    """Solves the smooth rotation and focal correction that puts this calibration on its clicks, everywhere.
+    """Solves the smooth rotation and focal correction that puts this calibration on its landmarks, everywhere.
 
     One anchor per distinct clicked frame. Each anchor is fitted to its own clicks - two equations per click for
     the three rotation unknowns and the focal scale - and the smoothness term decides the directions the clicks
@@ -184,12 +186,20 @@ def fit_drift(
     click from bending the trajectory towards itself; gross outliers are still caught by the caller's own outlier
     pass, which runs on the corrected poses.
 
+    Landmarks carrying a ``direction`` (automatic line observations) contribute one residual each - the offset
+    *across* the line, in the same normalised-pixel units as a click's two - so sliding along the line is free and
+    only the registration the line actually measures is fitted.
+
+    ``max_rotation`` and ``max_scale`` bound each anchor's correction. The defaults are sized for whole-game click
+    drift; the automatic line re-anchor passes tighter ones, because a fit that wants more than a degree or two
+    per anchor has misdetected a line, not corrected a camera.
+
     ``initial`` warm-starts the solver from a previous correction (same anchors). A cold start against a pose that
     has since moved can settle into a completely different basin - measured: a second round of fitting reached 131
     degrees of rotation from a zero start - and a warm start keeps a refinement a refinement.
 
-    Returns ``None`` when the clicks all sit on one frame: a constant correction there would be indistinguishable
-    from the fit's own base rotation, and the drift this exists for is a function of time.
+    Returns ``None`` when the landmarks all sit on one frame: a constant correction there would be
+    indistinguishable from the fit's own base rotation, and the drift this exists for is a function of time.
 
     The import of ``pitch_calibration`` is local because that module imports this one.
     """
@@ -199,6 +209,30 @@ def fit_drift(
     if len(frames) < 2:
         return None
     index = {frame: k for k, frame in enumerate(frames)}
+
+    # The Jacobian is block-sparse: a landmark's residual depends only on its own anchor's four parameters, and
+    # the smoothness terms only on each anchor and its two neighbours. Declaring that (jac_sparsity) lets the
+    # trust-region solver factor a banded system instead of a dense one - with two click anchors it changes
+    # nothing, but with the automatic line re-anchor's dozens of anchors it is the difference between seconds
+    # and minutes per iteration.
+    n_params = 4 * len(frames)
+    landmark_rows: list[tuple[int, int]] = []  # (anchor index, first residual row) per landmark
+    row = 0
+    for lm in landmarks:
+        width = 1 if lm.direction is not None else 2
+        landmark_rows.append((index[lm.frame], row, width))
+        row += width
+    n_landmark_rows = row
+    n_smooth_rows = 4 * max(len(frames) - 2, 0)  # 3 rotation + 1 scale per interior anchor
+    sparsity = np.zeros((n_landmark_rows + n_smooth_rows + n_params, n_params), dtype=int)
+    for anchor, r, width in landmark_rows:
+        sparsity[r : r + width, 4 * anchor : 4 * anchor + 4] = 1
+    if len(frames) > 2:
+        for k in range(1, len(frames) - 1):
+            base_row = n_landmark_rows + 4 * (k - 1)
+            for anchor in (k - 1, k, k + 1):
+                sparsity[base_row : base_row + 4, 4 * anchor : 4 * anchor + 4] = 1
+    sparsity[n_landmark_rows + n_smooth_rows :, :] = 1  # the ridge touches every parameter
 
     def unpack(params: np.ndarray) -> tuple[list[np.ndarray], list[float]]:
         rotations = [_exp(params[4 * k : 4 * k + 3]) for k in range(len(frames))]
@@ -217,12 +251,17 @@ def fit_drift(
                 rotations[k] @ q,
                 focal * scales[k],
             )
-            if in_front[0]:
-                out.extend((float(uv[0, 0] - lm.u), float(uv[0, 1] - lm.v)))
-            else:
+            if not in_front[0]:
                 # A correction that swings a landmark behind the camera is nonsense; a flat penalty walks the
                 # solver back towards poses that project it.
-                out.extend((0.5, 0.5))
+                out.extend((0.5, 0.5) if lm.direction is None else (0.5,))
+            elif lm.direction is not None:
+                # A line observation: only the offset across the line is measured, so only it is residualised.
+                # Same normalised-pixel units as a click's coordinates, so one robust loss serves both.
+                perp = (float(uv[0, 0]) - lm.u) * lm.direction[0] + (float(uv[0, 1]) - lm.v) * lm.direction[1]
+                out.append(perp)
+            else:
+                out.extend((float(uv[0, 0] - lm.u), float(uv[0, 1] - lm.v)))
         if len(rotations) > 2:
             for k in range(1, len(rotations) - 1):
                 previous = params[4 * (k - 1) : 4 * (k - 1) + 4]
@@ -241,12 +280,17 @@ def fit_drift(
         for k, (rotation, scale) in enumerate(zip(initial.rotations, initial.scales or [1.0] * len(frames))):
             start[4 * k : 4 * k + 3] = _log(rotation)
             start[4 * k + 3] = float(scale) - 1.0
+    # The tolerances and the iteration budget scale with the anchor count. The click fit's 1e-12 / 400-per-anchor
+    # budget is right for a handful of knots, but the automatic line re-anchor produces hundreds - at that size
+    # the same settings grind for hours on changes far below any pixel. 1e-6 is ~1e-4 px of pointing; the budget
+    # is 40 sweeps per anchor, which the click fits never came close to needing.
     result = least_squares(
         residuals,
         start,
+        jac_sparsity=sparsity,
         bounds=(
-            np.tile([-MAX_ROTATION_RAD, -MAX_ROTATION_RAD, -MAX_ROTATION_RAD, MIN_SCALE - 1.0], len(frames)),
-            np.tile([MAX_ROTATION_RAD, MAX_ROTATION_RAD, MAX_ROTATION_RAD, MAX_SCALE - 1.0], len(frames)),
+            np.tile([-max_rotation, -max_rotation, -max_rotation, MIN_SCALE - 1.0], len(frames)),
+            np.tile([max_rotation, max_rotation, max_rotation, max_scale - 1.0], len(frames)),
         ),
         loss="soft_l1",
         f_scale=robust_scale,
@@ -254,10 +298,10 @@ def fit_drift(
         # long before the residual is gone - so the default stopping rules quit early and leave drifts of a dozen
         # pixels on the anchors that a few more steps would take out. The screen and the bounds carry the
         # robustness; the tolerances are loosened so the fit actually finishes.
-        ftol=1e-12,
-        xtol=1e-12,
-        gtol=1e-12,
-        max_nfev=400 * len(frames),
+        ftol=1e-6,
+        xtol=1e-6,
+        gtol=1e-6,
+        max_nfev=40 * len(frames),
     )
     rotations, scales = unpack(result.x)
     return DriftCorrection(tuple(frames), tuple(rotations), tuple(scales))

@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 
 from soccer_analytics.analysis.events import (
+    DETECTED_EVENT_TYPES,
+    EVENT_TYPES,
     LOW_GAIN_MAX,
     VERDICT_FALSE,
     VERDICT_TRUE,
@@ -29,6 +31,7 @@ from soccer_analytics.analysis.highlights import (
     export_moment,
     export_reel,
     moment_for_event,
+    moment_on_source,
     preview_clip_name,
     reel_manifest,
     select_reel,
@@ -289,6 +292,42 @@ def test_event_log_round_trips_and_validates() -> None:
         log.add(Event(time_s=1.0, type="touchdown"))
 
 
+def test_the_detected_event_types_are_all_in_the_vocabulary() -> None:
+    """The detectors' output has to be storable: every type they emit must be a known event type."""
+    assert set(DETECTED_EVENT_TYPES) <= set(EVENT_TYPES)
+    for event_type in DETECTED_EVENT_TYPES:
+        EventLog().add(Event(time_s=1.0, type=event_type, source="ball"))
+
+
+def test_player_attribution_survives_the_json_round_trip() -> None:
+    """A detected event names the player it is attributed to; the number is optional and stays optional."""
+    event = Event(time_s=12.0, type="tackle", team=0, source="ball", player_track=7, player_number=9)
+    restored = Event.from_json(event.to_json())
+    assert restored.player_track == 7 and restored.player_number == 9
+
+    anonymous = Event.from_json(Event(time_s=1.0, type="shot", source="ball").to_json())
+    assert anonymous.player_track is None and anonymous.player_number is None
+
+
+def test_a_penalty_outranks_a_shot_and_a_goal_outranks_both() -> None:
+    """The new types have to be ranked, or the reels would treat a penalty like any other moment."""
+    goal = moment_for_event(Event(time_s=10.0, type="goal", source="ball"))
+    penalty = moment_for_event(Event(time_s=10.0, type="penalty", source="ball"))
+    shot = moment_for_event(Event(time_s=10.0, type="shot", source="ball"))
+    corner = moment_for_event(Event(time_s=10.0, type="corner", source="ball"))
+    tackle = moment_for_event(Event(time_s=10.0, type="tackle", source="ball"))
+    assert goal.weight > penalty.weight > shot.weight > corner.weight > tackle.weight
+
+
+def test_the_goals_reel_uses_penalties_when_there_are_no_goals() -> None:
+    moments = [
+        moment_for_event(Event(time_s=10.0, type="penalty", source="ball")),
+        moment_for_event(Event(time_s=100.0, type="shot", source="ball")),
+    ]
+    reel = select_reel("goals", moments)
+    assert [m.event_type for m in reel.moments] == ["penalty"]
+
+
 def test_rescanning_does_not_duplicate_detected_events() -> None:
     """The scan is deterministic, so a second pass must not append a second copy of every candidate."""
     log = EventLog()
@@ -496,6 +535,28 @@ def test_rescanning_prunes_candidates_the_detector_no_longer_reports() -> None:
     # Running it again changes nothing: the list now matches the detector exactly.
     assert log.reconcile_detected(fresh) == (0, 0)
     assert [e.time_s for e in log.events] == [5.0, 100.0, 300.0, 500.0]
+
+
+def test_reconciling_one_detector_leaves_the_other_detectors_rows_alone() -> None:
+    """The whistle scan and the ball detectors share one review queue, so neither may sweep the other's rows.
+
+    This is what a corrected time base looks like from the queue's point of view: the ball rows move by the
+    kick-off offset, so the old rows are nowhere near the new ones and only a source-scoped sweep removes them.
+    Without the scope, re-running the ball detectors would delete every whistle candidate as a side effect.
+    """
+    log = EventLog()
+    log.add(Event(time_s=100.0, type="other", source="audio"))   # whistle candidate: not this detector's business
+    log.add(Event(time_s=131.6, type="tackle", source="ball"))   # stale: written before the offset fix
+    log.add(Event(time_s=166.2, type="tackle", source="ball"))   # stale too
+
+    fresh = [Event(time_s=672.4, type="tackle", source="ball"), Event(time_s=707.0, type="tackle", source="ball")]
+    added, dropped = log.reconcile_detected(fresh, source="ball")
+    assert (added, dropped) == (2, 2)
+    assert [e.time_s for e in log.events] == [100.0, 672.4, 707.0]
+    assert log.events[0].source == "audio", "the whistle candidate survived a ball re-scan"
+    # And the reverse: a whistle re-scan must not touch the ball rows.
+    assert log.reconcile_detected([Event(time_s=100.0, type="other", source="audio")], source="audio") == (0, 0)
+    assert [e.time_s for e in log.events] == [100.0, 672.4, 707.0]
 
 
 def test_a_rejected_candidate_is_left_out_of_the_reels() -> None:
@@ -898,3 +959,53 @@ def test_creating_the_same_match_twice_never_resets_it(tmp_path: Path) -> None:
     assert again.pitch_length_m == 60.0 and again.pitch_width_m == 40.0
     assert again.segments == ["/segments/match_123"]
     assert len(library.list_ids()) == 1
+
+
+# --------------------------------------------------------------------------------------------------------------
+# Clocks: a moment's seconds are seconds of its own recording, and a reel is cut from one file.
+# --------------------------------------------------------------------------------------------------------------
+def test_a_moment_from_another_recording_is_mapped_onto_the_source() -> None:
+    """A whistle scanned on a camera clip is a time on that clip's clock.
+
+    Reels are cut from one file - usually the selected video. When a moment's own recording is a different file
+    (a camera clip combined into a game), its window has to be translated through the clip's offset or the reel
+    shows the same *number* of seconds of the wrong part of the match.
+    """
+    moment = moment_for_event(
+        Event(time_s=5.0, type="other", source="audio", video="/srv/x/clip2.mp4")
+    )
+    # clip2 starts 1800 s into the combined game.
+    offsets = {"/srv/x/clip2.mp4": 1800.0}
+    game = "/srv/x/game.mp4"
+    mapped = moment_on_source(moment, game, clip_offsets=offsets)
+    assert mapped.clip_start_s == moment.start_s + 1800.0
+    assert mapped.clip_end_s == moment.end_s + 1800.0
+    # The original window is untouched: the manifest still describes the moment in its own recording's terms.
+    assert mapped.start_s == moment.start_s and mapped.end_s == moment.end_s
+
+
+def test_a_moment_cut_from_its_own_recording_is_not_mapped() -> None:
+    """A candidate previewed against the file it was found in needs no translation."""
+    moment = moment_for_event(Event(time_s=100.0, type="goal", source="ball", video="/srv/x/game.mp4"))
+    mapped = moment_on_source(moment, "/srv/x/game.mp4", clip_offsets={"/srv/x/game.mp4": 0.0})
+    assert mapped is moment, "a moment cut from its own recording must come back untouched"
+
+
+def test_a_manual_tag_with_no_recording_is_not_mapped() -> None:
+    """Manual tags and momentum swings belong to whatever the caller passes; there is nothing to translate."""
+    moment = moment_for_event(Event(time_s=42.0, type="goal", team=0, note="header"))
+    assert moment.video == ""
+    mapped = moment_on_source(moment, "/srv/x/game.mp4", clip_offsets={"/srv/x/other.mp4": 60.0})
+    assert mapped is moment
+
+
+def test_a_moment_whose_recording_is_unknown_cut_is_left_alone() -> None:
+    """No offset for the moment's recording: leave the window alone rather than inventing one.
+
+    The caller (the preview) already refuses a moment past the end of the file it is cutting from; silently
+    shifting a window by a guessed offset would be worse than leaving it and saying so.
+    """
+    moment = moment_for_event(Event(time_s=5.0, type="other", source="audio", video="/srv/x/clip9.mp4"))
+    mapped = moment_on_source(moment, "/srv/x/game.mp4", clip_offsets={"/srv/x/clip2.mp4": 1800.0})
+    assert mapped.clip_start_s is None and mapped.clip_end_s is None
+    assert mapped.start_s == moment.start_s

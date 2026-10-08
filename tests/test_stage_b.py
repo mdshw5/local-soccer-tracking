@@ -96,6 +96,12 @@ def test_each_clustered_team_carries_the_colour_it_wears() -> None:
     red, blue = kit_rgb(colours[0]), kit_rgb(colours[1])
     assert red is not None and blue is not None, "a team's colour did not read back as RGB"
     assert red != blue, "the two kits are separable, so they cannot be reported as the same colour"
+    # The colour vector is [L, a, b, sat, val] padded into the 12-float descriptor layout. Measured on the real
+    # game, passing the bare 5-float vector read a/b/sat as L/a/b and turned a red kit into "light grey" - the
+    # swatch must decode the L/a/b the clustering actually clustered on.
+    for colour in colours.values():
+        assert len(colour) == 12, f"expected a full 12-float descriptor, got {len(colour)}"
+        assert colour[0] > 0, "kit_fraction must be set or kit_rgb refuses to decode the colour"
 
 
 def test_the_report_records_the_colour_of_each_team_s_kit() -> None:

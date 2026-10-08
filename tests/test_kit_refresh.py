@@ -66,6 +66,11 @@ class _FakeModel:
         boxes = [(0.0, 0.0, 10.0 * width / 1920, 40.0 * width / 1920)]
         return [_FakeResult(boxes, [0.9] * len(boxes))]
 
+    def track(self, frame, **kwargs):  # noqa: ANN001, ANN003
+        result = self.predict(frame)[0]
+        result.boxes.id = _T(np.zeros(1, dtype=np.float32))
+        return [result]
+
 
 @pytest.fixture(scope="module")
 def panning_video(tmp_path_factory) -> Path:

@@ -26,10 +26,6 @@
         cursor: pointer;
         font-size: 13px;
       }
-      button.active {
-        background: #2563eb;
-        border-color: #2563eb;
-      }
       #zoom-out,
       #zoom-in {
         min-width: 32px;
@@ -41,23 +37,34 @@
         min-width: 62px;
         text-align: center;
       }
-      /* The marker picker preselects what the next click on the magnified view means, so a landmark can be named
-         before it is placed instead of only afterwards. It sits just left of the zoom controls. */
-      #marker-picker {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 12px;
-        color: #9ca3af;
-      }
-      #marker-kind {
-        background: #1f2937;
-        color: white;
+      /* The landmark picker is a popover at the click itself: click, and the list of landmarks appears where you
+         clicked, so the choice is made about the thing being pointed at rather than in a toolbar far away. */
+      #marker-popover {
+        position: absolute;
+        z-index: 5;
+        background: #0b1220;
         border: 1px solid #374151;
         border-radius: 6px;
-        padding: 6px 8px;
-        font-size: 13px;
-        max-width: 220px;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+        max-height: 260px;
+        min-width: 210px;
+        overflow-y: auto;
+        padding: 4px;
+      }
+      #marker-popover button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        background: transparent;
+        border: 0;
+        border-radius: 4px;
+        color: #e5e7eb;
+        padding: 5px 8px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      #marker-popover button:hover {
+        background: #2563eb;
       }
 
       /* Two viewports side by side: the magnified crop you click on, and the whole frame that you aim it with.
@@ -70,6 +77,7 @@
       }
       #crop-wrap {
         grid-column: 1;
+        position: relative;
         border: 1px solid #374151;
         background: #0f172a;
         line-height: 0;
@@ -167,15 +175,7 @@
   </head>
   <body>
     <div class="toolbar">
-      <button data-mode="polygon">Polygon</button>
-      <button data-mode="line">Line</button>
-      <button data-mode="point" class="active">Point</button>
-      <button id="clear-btn">Clear</button>
-      <button id="apply-btn">Apply</button>
-      <label id="marker-picker" title="The pitch marker the next click on the magnified view will be tagged as">
-        <span>Marker</span>
-        <select id="marker-kind"></select>
-      </label>
+      <button id="clear-btn" title="Remove the applied points in the frame you are looking at">Clear</button>
       <button id="zoom-out" title="Zoom out">-</button>
       <span id="zoom-readout">zoom 8x</span>
       <button id="zoom-in" title="Zoom in">+</button>
@@ -184,13 +184,14 @@
     <div id="layout">
       <div id="crop-wrap">
         <canvas id="fieldCanvas"></canvas>
+        <div id="marker-popover" hidden></div>
       </div>
       <div id="overview-wrap">
         <video id="overviewVideo" muted playsinline preload="auto"></video>
         <canvas id="overview"></canvas>
       </div>
       <div id="crop-label" class="viewport-label">
-        <b>Magnified.</b> Click landmarks here, then press Apply.
+        <b>Magnified.</b> Click to place a landmark - pick which one in the list that appears where you clicked.
         <span id="crop-note"></span>
       </div>
       <div id="overview-label" class="viewport-label">
@@ -246,16 +247,14 @@
       const cropNote = document.getElementById('crop-note');
       const zoomReadout = document.getElementById('zoom-readout');
       const hint = document.getElementById('hint');
-      const toolbarButtons = [...document.querySelectorAll('[data-mode]')];
       const clearBtn = document.getElementById('clear-btn');
-      const applyBtn = document.getElementById('apply-btn');
-      const markerKind = document.getElementById('marker-kind');
+      const popover = document.getElementById('marker-popover');
 
-      let mode = 'point';
       let currentPoints = [];
       let savedPolygon = [];
       let savedFeatures = [];
-      let markerOptions = ''; // the landmark list last written into the picker, so a rerun does not reset the choice
+      let markerOptions = ''; // the landmark list last written into the popover, so a rerun does not reset it
+      let popoverOpen = false; // whether the landmark picker is showing at the last click
       let bgImage = null;
       let overviewImage = null;
       let overviewDataSrc = ''; // so an unchanged still is not re-decoded on every rerun
@@ -281,6 +280,10 @@
       let pendingFrame = null; // the frame to land on once the video's metadata has loaded
       let cropFrame = 0; // the frame the magnified crop was actually rendered from
       let seekPending = false;
+      // The pitch overlay, drawn by the browser: sampled pitch->pixel homographies along the chain plus the
+      // markings in pitch metres. Python recomputes both whenever the calibration changes, so a refit redraws.
+      let overlaySamples = []; // [{frame, h: [9]}] sorted by frame
+      let overlayPolylines = []; // [[x, y], ...] per marking, in pitch metres
 
       function clamp(value, low, high) {
         if (high < low) return (low + high) / 2;
@@ -288,12 +291,6 @@
       }
       function clamp01(value) {
         return clamp(value, 0, 1);
-      }
-
-      function updateButtons() {
-        toolbarButtons.forEach((btn) => {
-          btn.classList.toggle('active', btn.dataset.mode === mode);
-        });
       }
 
       function updateZoomReadout() {
@@ -346,6 +343,84 @@
         return clampFrame(Number(scrub.value)) === cropFrame;
       }
 
+      /* The overlay for one frame: the two homography samples bracketing it, interpolated coefficient-wise. The
+         chain is smooth on the sample spacing, so the interpolation error is far below a pixel. Outside the
+         sampled range the nearest sample is used, which is what the ends of the video want anyway. */
+      function overlayMatrix(frame) {
+        if (!overlaySamples.length) return null;
+        let lo = overlaySamples[0];
+        let hi = overlaySamples[overlaySamples.length - 1];
+        for (let i = 0; i < overlaySamples.length - 1; i += 1) {
+          if (overlaySamples[i].frame <= frame && frame <= overlaySamples[i + 1].frame) {
+            lo = overlaySamples[i];
+            hi = overlaySamples[i + 1];
+            break;
+          }
+        }
+        if (frame <= lo.frame) return lo.h;
+        if (frame >= hi.frame) return hi.h;
+        const t = (frame - lo.frame) / Math.max(1, hi.frame - lo.frame);
+        return lo.h.map((value, i) => value + (hi.h[i] - value) * t);
+      }
+
+      /* The frame whose homography the overlay should draw with. While the proxy *plays*, this is the media time
+         of the frame the eye is actually looking at: `requestVideoFrameCallback` reports it as each frame is
+         presented, so the geometry sits exactly on the picture - `currentTime` alone can advance in ~250 ms
+         steps, which draws fractions of a second off the frame on screen. Browsers without the callback use the
+         video clock via the rAF loop below. At rest (or without a proxy) the scrub readout is used, exactly as
+         before. */
+      function overlayFrame() {
+        if (videoMode && videoReady && !overviewVideo.paused && duration > 0) {
+          const span = Math.max(1, frameCount - 1);
+          const time = presentedMediaTime !== null ? presentedMediaTime : overviewVideo.currentTime;
+          return Math.min(Math.max((time / duration) * span, 0), span);
+        }
+        return videoMode && videoReady ? clampFrame(Number(scrub.value)) : cropFrame;
+      }
+
+      function drawPitchOverlay() {
+        if (!overlaySamples.length || !overlayPolylines.length) return;
+        const frame = overlayFrame();
+        const h = overlayMatrix(frame);
+        if (!h) return;
+        const frameWidth = args.frame_width || overview.width;
+        const frameHeight = args.frame_height || overview.height;
+        const toX = overview.width / frameWidth;
+        // v is normalised by the frame *width* (the solver's convention), and the canvas maps frame pixels onto
+        // itself by (canvas/frame) ratios: x by width, y by height. Dividing by the width here squashed the
+        // geometry to 9/16 of its height - the pitch was drawn hovering far above the field.
+        const toY = overview.height / frameHeight;
+        overviewCtx.save();
+        // The same yellow and weight Python bakes into the exact still (cv2 BGR (0, 255, 255) = this yellow), so
+        // swapping between the still and the moving projection does not read as a change of geometry.
+        overviewCtx.strokeStyle = 'rgba(255, 255, 0, 0.9)';
+        overviewCtx.lineWidth = 3;
+        for (const line of overlayPolylines) {
+          overviewCtx.beginPath();
+          let started = false;
+          for (const [x, y] of line) {
+            const w = h[6] * x + h[7] * y + h[8];
+            if (!(w > 1e-9)) {
+              // The point is on the camera plane: the segment to it is not a projection, so break the line.
+              started = false;
+              continue;
+            }
+            const u = (h[0] * x + h[1] * y + h[2]) / w;
+            const v = (h[3] * x + h[4] * y + h[5]) / w;
+            const px = u * frameWidth * toX;
+            const py = v * frameWidth * toY;
+            if (!started) {
+              overviewCtx.moveTo(px, py);
+              started = true;
+            } else {
+              overviewCtx.lineTo(px, py);
+            }
+          }
+          overviewCtx.stroke();
+        }
+        overviewCtx.restore();
+      }
+
       function drawOverview() {
         if (!videoMode && !overviewImage) return;
         const frameWidth = args.frame_width || overview.width;
@@ -355,9 +430,19 @@
         const exact = pictureIsExact();
 
         overviewCtx.clearRect(0, 0, overview.width, overview.height);
-        if (exact && overviewImage) {
-          // Covers the video underneath, so what is compared with the crop is the crop's own frame.
+        const stillUp = exact && overviewImage;
+        if (stillUp) {
+          // Covers the video underneath, so what is compared with the crop is the crop's own frame. Python bakes
+          // the calibration into this still (the bolder markings and the landmark crosses), so the browser must
+          // not project a second copy over it: two projections for one moment - one interpolated and one exact,
+          // disagreeing slightly - is exactly what the user reads as "the overlay is drawn wrong".
           overviewCtx.drawImage(overviewImage, 0, 0, overview.width, overview.height);
+        } else {
+          // Away from the crop's frame the picture is the coarse proxy and Python cannot have drawn on it, so the
+          // browser projects the pitch for whatever frame the timeline is showing - scrubbed or playing - from
+          // the sampled homographies. It is drawn *under* the click markers and the crop box: those are what is
+          // being aimed at, and the moving projection must not draw over them.
+          drawPitchOverlay();
         }
 
         // Landmarks already clicked on this frame, so the whole frame shows the work in progress - but only while
@@ -380,6 +465,47 @@
         overviewCtx.strokeStyle = '#facc15';
         overviewCtx.lineWidth = 2;
         overviewCtx.strokeRect(box.x * toX, box.y * toY, box.w * toX, box.h * toY);
+      }
+
+      /* While the proxy plays, the geometry is redrawn once per frame the video actually presents.
+         `requestVideoFrameCallback` reports the media time of each presented frame - drawing on that moment is
+         what makes the geometry sit exactly on the picture instead of trailing it, where `timeupdate` (a few
+         times a second) and even a read of `currentTime` per animation frame can be a quarter second off.
+         Browsers without the callback fall back to the rAF loop reading the video clock. Both stop themselves as
+         soon as the video is not playing; `play` starts them again. */
+      let playbackRaf = 0;
+      let presentedMediaTime = null; // media time of the frame on screen, while playing
+
+      function schedulePlaybackFrame() {
+        if (!videoMode || overviewVideo.paused) return;
+        if (typeof overviewVideo.requestVideoFrameCallback === 'function') {
+          overviewVideo.requestVideoFrameCallback(onPresentedFrame);
+        } else if (!playbackRaf) {
+          playbackRaf = requestAnimationFrame(playbackTick);
+        }
+      }
+
+      function onPresentedFrame(_now, metadata) {
+        presentedMediaTime = metadata.mediaTime;
+        if (!videoMode || overviewVideo.paused) return;
+        scrub.value = String(timeToFrame(presentedMediaTime));
+        updateTimelineReadout();
+        drawOverview();
+        schedulePlaybackFrame();
+      }
+
+      function playbackTick() {
+        playbackRaf = 0;
+        if (!videoMode || overviewVideo.paused) return;
+        presentedMediaTime = null; // no presentation clock available; the video clock drives the overlay
+        scrub.value = String(timeToFrame(overviewVideo.currentTime));
+        updateTimelineReadout();
+        drawOverview();
+        playbackRaf = requestAnimationFrame(playbackTick);
+      }
+
+      function startPlaybackTick() {
+        if (videoMode && !overviewVideo.paused) schedulePlaybackFrame();
       }
 
       function drawImage() {
@@ -469,41 +595,60 @@
         drawImage();
       }
 
-      function addPoint(x, y) {
-        if (mode === 'point') {
-          // Tag the click with whatever the picker has selected, so the landmark is chosen before the click rather
-          // than assigned afterwards. An empty value means "decide by click order" on the Python side.
-          savedFeatures.push({type: 'point', point: [x, y], label: markerKind.value});
-          currentPoints = [];
-          redraw();
-          return;
+      /* The landmark picker: a popover at the click itself. The click is committed immediately with the landmark
+         chosen in the popover, so there is no Apply step and no toolbar picker to pre-select from - the choice is
+         made about the thing being pointed at, and the list is long enough that naming it there beats naming it in
+         advance. */
+      function openPopover(x, y) {
+        const names = args.marker_kinds || [];
+        if (!names.length) return;
+        popover.innerHTML = '';
+        for (const name of names) {
+          const option = document.createElement('button');
+          option.type = 'button';
+          option.textContent = name;
+          option.addEventListener('click', () => {
+            closePopover();
+            commitPoint(x, y, name);
+          });
+          popover.appendChild(option);
         }
-
-        if (mode === 'line') {
-          currentPoints.push([x, y]);
-          if (currentPoints.length === 2) {
-            savedFeatures.push({type: 'line', points: currentPoints.slice()});
-            currentPoints = [];
-          }
-          redraw();
-          return;
-        }
-
-        if (mode === 'polygon') {
-          currentPoints.push([x, y]);
-          if (currentPoints.length > 2 && isNearStart(currentPoints[0], x, y)) {
-            savedPolygon = currentPoints.slice();
-            currentPoints = [];
-          }
-          redraw();
-        }
+        popover.hidden = false;
+        popoverOpen = true;
+        // Keep the popover inside the crop: a click near an edge must not cut the list off.
+        const wrap = popover.parentElement;
+        const left = clamp(x - popover.offsetWidth / 2, 4, Math.max(4, wrap.clientWidth - popover.offsetWidth - 4));
+        const top = clamp(y + 10, 4, Math.max(4, wrap.clientHeight - popover.offsetHeight - 4));
+        popover.style.left = `${left}px`;
+        popover.style.top = `${top}px`;
       }
 
-      function isNearStart(start, x, y) {
-        return Math.hypot(start[0] - x, start[1] - y) < 12;
+      function closePopover() {
+        popover.hidden = true;
+        popoverOpen = false;
+      }
+
+      document.addEventListener('click', (event) => {
+        if (popoverOpen && !popover.contains(event.target)) closePopover();
+      });
+
+      function commitPoint(x, y, label) {
+        // The click is its own commit: the position and its landmark go to Python at once, and the marker on
+        // screen becomes Python's canonical copy of the click (dirty=false) rather than a pending gesture.
+        savedFeatures.push({type: 'point', point: [x, y], label, dirty: false});
+        currentPoints = [];
+        redraw();
+        sendValue('apply');
+      }
+
+      function addPoint(x, y) {
+        // Point mode is the only mode: a click opens the landmark picker at the click itself.
+        openPopover(x, y);
       }
 
       canvas.addEventListener('click', (event) => {
+        // Not let through to the document-level closer, which would shut the popover this click is about to open.
+        event.stopPropagation();
         if (suppressClick) {
           // The pointer was dragging a marker, not placing one: the drag has already said what it had to say.
           suppressClick = false;
@@ -517,8 +662,8 @@
 
       /* Dragging a placed marker is how a projected landmark is corrected: the marker carries its label, so moving
          it onto the real marking is the whole measurement Python needs - and it is quicker than clicking from
-         scratch. Only in point mode, because the polygon and line tools own their own click sequences. A drag that
-         actually moved suppresses the click that follows, so a drag never leaves a fresh point behind it. */
+         scratch. A drag that actually moved suppresses the click that follows, so a drag never opens the picker
+         behind it. */
       const DRAG_RADIUS = 14;
       let dragging = null;
       let suppressClick = false;
@@ -546,7 +691,6 @@
       }
 
       canvas.addEventListener('mousedown', (event) => {
-        if (mode !== 'point') return;
         const [x, y] = canvasPoint(event);
         const index = featureNear(x, y);
         if (index === null) return;
@@ -569,37 +713,49 @@
       });
 
       function endDrag() {
-        if (dragging && dragging.moved) suppressClick = true;
+        if (dragging && dragging.moved) {
+          suppressClick = true;
+          // The drag is the measurement, so like a click it commits the moment it ends: the moved marker goes to
+          // Python at once, and its position becomes the canonical copy rather than a pending gesture.
+          savedFeatures.forEach((feature) => {
+            if (feature) feature.dirty = false;
+          });
+          redraw();
+          sendValue('apply');
+        }
         dragging = null;
       }
       canvas.addEventListener('mouseup', endDrag);
       canvas.addEventListener('mouseleave', endDrag);
 
-      toolbarButtons.forEach((btn) => {
-        btn.addEventListener('click', () => {
-          mode = btn.dataset.mode;
-          currentPoints = [];
-          updateButtons();
-          redraw();
-        });
-      });
-
+      /* Clear removes the applied points in the frame of reference - the frame the crop is on - and leaves the
+         clicks of every other frame alone. That is the same scoping a commit has: the crop is one frame's worth of
+         work, so undoing it must not undo the rest. */
       clearBtn.addEventListener('click', () => {
         savedPolygon = [];
         savedFeatures = [];
         currentPoints = [];
+        closePopover();
         redraw();
+        sendValue('clear');
       });
 
       /* The current frame rides along with every aiming gesture while the timeline is live. Scrubbing is deliberately
          local and reports nothing, so the magnified crop re-renders only when the user actually aims at a point; the
          gesture therefore has to carry the frame, or aiming after a scrub would crop a frame that is not on screen.
-         Python ignores the frame on Apply, because the points on screen belong to the crop that is already loaded. */
+         Python ignores the frame on a commit, because the points on screen belong to the crop that is already
+         loaded - which is also the frame Clear is scoped to. */
       function currentFrame() {
         return videoMode ? clampFrame(Number(scrub.value)) : null;
       }
 
+      /* Every reported gesture carries a sequence number, so Python can tell a fresh gesture from the sticky value
+         of an old one coming back on a later rerun - without remounting the component (and reloading the proxy
+         video) after every click. `mount` is the remount counter Python bumps when it re-keys the component, so the
+         sequence restarting from 1 on a fresh mount can never be mistaken for an already-seen gesture. */
+      let seq = 0;
       function sendValue(action) {
+        seq += 1;
         Streamlit.setComponentValue({
           polygon: savedPolygon,
           features: savedFeatures,
@@ -608,16 +764,10 @@
           zoom: zoom,
           action: action,
           frame: currentFrame(),
+          seq: seq,
+          mount: typeof args.mount_nonce === 'number' ? args.mount_nonce : 0,
         });
       }
-
-      applyBtn.addEventListener('click', () => {
-        // The positions just sent become Python's canonical copy of the clicks, so nothing is pending any more.
-        savedFeatures.forEach((feature) => {
-          if (feature) feature.dirty = false;
-        });
-        sendValue('apply');
-      });
 
       /* ---------------------------------------------------------------------------------------------------
          The overview is the control surface: click to aim at a point, scroll to zoom in on it, drag to pan.
@@ -820,14 +970,18 @@
       // While playing the video drives the bar and the readout. Pausing does not commit on its own: a navigation
       // gesture pauses the video too, and committing on `pause` would fire a rerun in the middle of every drag.
       overviewVideo.addEventListener('timeupdate', () => {
-        if (overviewVideo.paused || !videoMode) return;
+        // With requestVideoFrameCallback driving, the presented-frame path owns the redraw; `timeupdate` would
+        // only fight it with coarser values.
+        if (overviewVideo.paused || !videoMode || presentedMediaTime !== null) return;
         scrub.value = String(timeToFrame(overviewVideo.currentTime));
         updateTimelineReadout();
         drawOverview();
       });
       function updatePlayAndPicture() {
         updatePlayLabel();
+        presentedMediaTime = null; // stale until the first frame of this playing stretch is presented
         drawOverview();
+        if (!overviewVideo.paused) startPlaybackTick();
       }
       overviewVideo.addEventListener('play', updatePlayAndPicture);
       overviewVideo.addEventListener('pause', updatePlayAndPicture);
@@ -858,19 +1012,21 @@
           frameCount = Math.round(args.frame_count);
           scrub.max = String(Math.max(0, frameCount - 1));
         }
-        // The picker's options come from Python (they depend on the pitch size). They only need writing when the
-        // list actually changes, or a rerun would reset the user's choice mid-click.
+        // The landmark list comes from Python (it depends on the pitch size). It only needs rewriting when the
+        // list actually changes, or a rerun would close the popover the user is about to pick from.
+        // The pitch overlay: sampled homographies plus the markings. Python recomputes both whenever the
+        // calibration changes, so a refit redraws the overlay on the next render without any user action.
+        overlaySamples = Array.isArray(args.overlay_homographies)
+          ? args.overlay_homographies.map((sample) => ({frame: Number(sample.frame), h: sample.h.map(Number)}))
+          : [];
+        overlayPolylines = Array.isArray(args.overlay_polylines)
+          ? args.overlay_polylines.map((line) => line.map(([x, y]) => [Number(x), Number(y)]))
+          : [];
         if (Array.isArray(args.marker_kinds)) {
           const joined = args.marker_kinds.join('|');
           if (joined !== markerOptions) {
             markerOptions = joined;
-            const previous = markerKind.value;
-            markerKind.innerHTML = '';
-            markerKind.appendChild(new Option('Auto (click order)', ''));
-            for (const name of args.marker_kinds) {
-              markerKind.appendChild(new Option(name, name));
-            }
-            markerKind.value = args.marker_kinds.includes(previous) ? previous : '';
+            if (popoverOpen) closePopover();
           }
         }
         if (videoMode) {
@@ -912,9 +1068,9 @@
         }
         if (Array.isArray(args.initial_features)) {
           // A marker the user has dragged (dirty) outranks Python's copy of it. Python's positions only change
-          // when an Apply commits them, so anything that moved since is a measurement in progress - and aiming
-          // the view or zooming causes reruns that must not undo it. Matched by id: stored clicks carry their
-          // pid, placed markers the landmark name they were projected from.
+          // when a click is committed or a drag is sent, so anything that moved since is a measurement in progress
+          // - and aiming the view or zooming causes reruns that must not undo it. Matched by id: stored clicks
+          // carry their pid, placed markers the landmark name they were projected from.
           const moved = new Map();
           savedFeatures.forEach((feature) => {
             if (feature && feature.type === 'point' && feature.id && feature.dirty) moved.set(feature.id, feature);
@@ -938,13 +1094,11 @@
           x: typeof args.actual_x === 'number' ? args.actual_x : centre.x,
           y: typeof args.actual_y === 'number' ? args.actual_y : centre.y,
         };
-        if (Array.isArray(args.modes)) {
-          mode = args.modes.includes(mode) ? mode : args.modes[0];
-          updateButtons();
-        }
         setCanvasSize(canvas, args.width || 1280, args.height || 720);
         currentPoints = [];
-        // A fresh crop has arrived, so the gesture that caused it is finished.
+        // A fresh crop has arrived, so the gesture that caused it is finished - and a popover left open belongs to
+        // the crop that was replaced, not this one.
+        closePopover();
         navigating = false;
         updateZoomReadout();
         updateHint();
@@ -955,7 +1109,6 @@
 
       Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
       window.addEventListener('resize', () => Streamlit.setFrameHeight());
-      updateButtons();
       updateZoomReadout();
       updateHint();
       Streamlit.setFrameHeight();

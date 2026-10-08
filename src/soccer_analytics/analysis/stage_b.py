@@ -6,9 +6,11 @@ requires decoding the video again.
 
 Honesty about what is and is not measurable with one following camera:
 * positions/teams/distances/territory/momentum are derived from players we can see on the pitch;
-* the ball has its own dedicated scan (``analysis.ball``, run from the dashboard); this stage does not consume it yet,
-  so goals, shots, saves and blocks remain *manual* tags or candidates for review, never claimed automatically;
-  this stage's ball *proxy* is the aim point - the pitch position the camera was pointed at each frame;
+* the ball has its own dedicated scan (``analysis.ball``, run from the dashboard); ``analysis.event_detection``
+  reads that scan together with these tracks to infer goals, shots, corners, penalties, clearances and tackles, and
+  the dashboard offers them as review candidates - saves and blocks stay manual tags, because a keeper's save and a
+  shot wide look the same to a ball track;
+* this stage's ball *proxy* is the aim point - the pitch position the camera was pointed at each frame;
 * the camera sees part of the pitch at a time, so no full-pitch formation is reported.
 """
 
@@ -19,7 +21,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from soccer_analytics.analysis.kit import kit_rgb
+from soccer_analytics.analysis.kit import DESCRIPTOR_SIZE, kit_rgb
 from soccer_analytics.analysis.projection import PitchDetections, on_pitch_mask
 
 # Physics-limited gating: at 5 fps a player covers < ~1 m per frame, so anything beyond this is not the same person.
@@ -113,6 +115,13 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
 
     Association is gated by each detection's own uncertainty, so a far-side player (sigma of metres) is allowed a
     larger jump than a near-side one, and the gate tightens rather than loosens when the geometry is good.
+
+    Stage A's BoT-SORT identities (``detections.det_track``) are the *hints*, not the authority: they are
+    image-space, so a camera whip can hand two different players one identity, and the pitch-space gate below is
+    what says whether a continuation is physically possible. A hint is honoured only when it agrees with the
+    geometry - the detection claims a track whose predicted position is within the gate - and a hint that fails
+    the gate is ignored, exactly like a wrong kit colour would be. Where there is no hint (v1 chunks, or a
+    detection the tracker dropped), the assignment runs on position and kit alone, as it always did.
     """
     rows = np.where(keep)[0]
     track_id = np.full(len(detections.xy), -1, dtype=np.int32)
@@ -122,6 +131,11 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
 
     frame_of = detections.frame
     states: dict[int, dict] = {}  # id -> last xy, velocity, last frame
+    # Stage A's identities are offset into their own space: they arrive as small non-negative ints that mean
+    # nothing to this pass's own numbering, so each is mapped to a local id the first time it is honoured.
+    bot_ids = getattr(detections, "det_track", None)
+    bot_of_row = {int(row): int(bot_ids[row]) for row in rows if bot_ids is not None and bot_ids[row] >= 0}
+    bot_to_local: dict[int, int] = {}
     next_id = 0
     unique_frames = np.unique(frame_of[rows])
     progress_every = max(1, len(unique_frames) // 25)
@@ -141,6 +155,8 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
                     "kit": detections.kit[row, 1:6].copy() if detections.kit[row, 0] > MIN_KIT_FOR_COST else None,
                 }
                 track_id[row] = next_id
+                if row in bot_of_row:
+                    bot_to_local[bot_of_row[row]] = next_id
                 next_id += 1
             continue
 
@@ -171,10 +187,33 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
                 current = detections.kit[row, 1:6]
                 states[tid]["kit"] = current.copy() if previous is None else 0.85 * previous + 0.15 * current
             track_id[row] = tid
+            if row in bot_of_row:
+                bot_to_local[bot_of_row[row]] = tid
             matched.add(int(row))
         for row in here:  # unmatched detections start new tracks (a player entering the camera's view)
             if int(row) in matched:
                 continue
+            # A BoT-SORT hint can rescue a detection the geometry alone would have made a new track of: the
+            # tracker has seen this identity before, so if that identity is a live state whose prediction is
+            # within the gate, continue it instead of forking. This is the case the ReID embedding exists for -
+            # two players crossing, where position alone is ambiguous but appearance is not.
+            hint = bot_to_local.get(bot_of_row.get(row, -1), None)
+            if hint is not None and hint in states:
+                st = states[hint]
+                gap = frame - st["frame"]
+                jump = np.linalg.norm(detections.xy[row] - (st["xy"] + st["vel"] * gap))
+                allowed = np.minimum(MAX_STEP_M + SIGMA_STEP_FACTOR * max(detections.sigma_m[row], 0.35), MAX_GATE_M)
+                allowed *= min(1.0 + 0.1 * gap, MAX_AGE_GATE_FACTOR)
+                if jump <= allowed:
+                    st["vel"] = 0.5 * st["vel"] + 0.5 * ((detections.xy[row] - st["xy"]) / max(1, gap))
+                    st["xy"] = detections.xy[row]
+                    st["frame"] = int(frame)
+                    if detections.kit[row, 0] > MIN_KIT_FOR_COST:
+                        previous = st.get("kit")
+                        current = detections.kit[row, 1:6]
+                        st["kit"] = current.copy() if previous is None else 0.85 * previous + 0.15 * current
+                    track_id[row] = hint
+                    continue
             states[next_id] = {
                 "xy": detections.xy[row],
                 "vel": np.zeros(2),
@@ -182,6 +221,8 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
                 "kit": detections.kit[row, 1:6].copy() if detections.kit[row, 0] > MIN_KIT_FOR_COST else None,
             }
             track_id[row] = next_id
+            if row in bot_of_row:
+                bot_to_local[bot_of_row[row]] = next_id
             next_id += 1
 
     for row in rows:
@@ -204,25 +245,69 @@ STITCH_MAX_KIT_DISTANCE = 0.45  # kit colours (L, a, b, saturation, value) furth
 STITCH_NO_KIT_FACTOR = 0.6  # with no colour evidence the spatial window tightens
 
 KIT_SIZE_MIN_HEIGHT = 60.0  # px at 1920 width: below this a torso crop is a few pixels and reads grey
+KIT_SIZE_MAX_HEIGHT = 200.0  # px at 1920 width: above this the box is a near-sideline bystander, not a player
 KIT_SIZE_QUANTILE = 0.75  # per track, only its largest quartile of observations is trusted for colour
+TEAM_MIN_KIT_FRACTION = 0.55  # a track whose crops are mostly grass is not a kit reading at all
+TEAM_MIN_EVIDENCE = 6.0  # sqrt of player-sized observations: below this a track's colour is a guess
+
+
+def _team_min_evidence(frames: int) -> float:
+    """The evidence floor for team clustering, scaled to how long the segment is.
+
+    The floor is tuned on a whole-game segment (21.5k frames at 5 fps), where a well-seen player collects hundreds
+    of player-sized observations and 36 of them (sqrt = 6) is a trustworthy colour. A short synthetic match (400
+    frames) yields ~11 observations per track, so the same absolute floor would leave nothing to cluster. The
+    floor scales with the square root of length between the two: a 400-frame match needs ~9 observations, the
+    whole game needs 36 - and anything longer keeps the whole-game floor.
+    """
+    scaled = 6.0 * np.sqrt(max(frames, 1) / 21552.0)
+    return float(np.clip(scaled, 2.6, 6.0))
 
 
 def _track_kit_descriptor(detections: PitchDetections, rows: np.ndarray) -> np.ndarray | None:
-    """One kit descriptor per track, taken from its LARGEST observations.
+    """One kit descriptor per track, taken from its clearest PLAYER-SIZED observations.
 
-    Most detections in a fixed-camera game are tiny far-side figures whose torso crop is a handful of grey pixels;
-    the median over all of a track's observations is therefore washed out even when the same player was seen up
-    close reading pure kit colour. So the descriptor is the median over the track's largest quartile of boxes
-    (and never over boxes below ``KIT_SIZE_MIN_HEIGHT``), falling back to all usable observations only when the
-    track was never seen large enough. Returns None when there is not enough colour evidence at all.
+    Two failure modes are measured on the real game, and both poison the team colours:
+    * most detections are tiny far-side figures whose torso crop is a handful of grey pixels - a median over all
+      of a track's observations is washed out even when the same player was seen up close reading pure kit colour;
+    * the very largest boxes (200 px+ at 1920) are not players at all but near-sideline bystanders - coaches,
+      photographers, spectators - whose random clothing lands in whichever cluster is nearest. So "largest" is
+      capped: the trusted band is player-sized boxes, and anything bigger is ignored for colour.
+    A track that was never seen in that band has no trustworthy colour at all, so it returns None rather than a
+    grey median that would drag the team colour towards grey. Returns None when there is not enough evidence.
     """
+    chosen = _track_kit_rows(detections, rows)
+    if chosen is None:
+        return None
+    return np.median(detections.kit[chosen, 1:6], axis=0)
+
+
+def _track_kit_rows(detections: PitchDetections, rows: np.ndarray) -> np.ndarray | None:
+    """The observations a track's kit colour is read from (player-sized band, largest quartile), or None."""
     usable = rows[detections.kit[rows, 0] > MIN_KIT_FOR_COST]
     if len(usable) < MIN_KIT_OBSERVATIONS:
         return None
-    heights = detections.height_px[usable]
-    big = usable[heights >= max(KIT_SIZE_MIN_HEIGHT, np.quantile(heights, KIT_SIZE_QUANTILE))]
-    chosen = big if len(big) >= MIN_KIT_OBSERVATIONS else usable
-    return np.median(detections.kit[chosen, 1:6], axis=0)
+    # abs(): the synthetic simulator emits inverted boxes (top below foot in image coords), and a box's size
+    # is still meaningful there. Real detections are never inverted; this only keeps the band honest.
+    heights = np.abs(detections.height_px[usable])
+    in_band = (heights >= KIT_SIZE_MIN_HEIGHT) & (heights <= KIT_SIZE_MAX_HEIGHT)
+    band = usable[in_band]
+    if len(band) < MIN_KIT_OBSERVATIONS:
+        return None
+    band_heights = heights[in_band]
+    big = band[band_heights >= np.quantile(band_heights, KIT_SIZE_QUANTILE)]
+    return big if len(big) >= MIN_KIT_OBSERVATIONS else band
+
+
+def _track_kit_evidence(detections: PitchDetections, rows: np.ndarray) -> tuple[np.ndarray, float] | None:
+    """Full colour evidence for a track: the 11-float descriptor (L a b sat val + 6 hue bins) and how much of it
+    there is - the number of player-sized observations the colour was medianed over, square-rooted so a handful of
+    long-lived tracks cannot shout down everyone else. Team clustering weights tracks by this; stitching keeps the
+    plain 5-float descriptor because hue bins would double-count what L/a/b already say."""
+    chosen = _track_kit_rows(detections, rows)
+    if chosen is None:
+        return None
+    return np.median(detections.kit[chosen, 1:12], axis=0), float(np.sqrt(len(chosen)))
 
 
 def _track_kit_colours(detections: PitchDetections, tracks: dict[int, np.ndarray]) -> dict[int, np.ndarray | None]:
@@ -313,51 +398,112 @@ def _team_assignment(
 
     Returns the team label per track (``-1`` for a cluster identified as neither team), how separable the basis was,
     and each team's mean kit descriptor - the colour that tells the two teams apart, read back out for display.
-    Two things make this honest rather than confident:
+    Three things make this honest rather than confident:
+    * only tracks with real colour evidence may vote: enough player-sized observations (the sqrt-weight also
+      down-weights short tracks) and crops that were mostly kit rather than grass. Measured on the real game this
+      cuts ~2800 tracks to ~150 - the rest are fragments whose grey medians would outvote the real kits;
+    * the cluster centres are SEEDED from the a-axis extremes (reddest vs least-red strong track) - kits are
+      usually told apart by redness vs not-redness, and seeding from saturation lands on whatever is most garish
+      (measured: a dark-orange bystander) instead of on a kit;
     * a third cluster is only believed when there are enough tracks, and it is only treated as "other" when it is
       clearly smaller than the two team clusters - that is the referee or a stray track, who would otherwise be
-      counted as a team member and would inflate that team's numbers (a referee follows the ball everywhere);
-    * separation is a between/within ratio, so identical kits cannot score as a confident split.
+      counted as a team member and would inflate that team's numbers (a referee follows the ball everywhere).
+    Separation is a between/within ratio, so identical kits cannot score as a confident split.
     """
     from sklearn.cluster import KMeans
 
-    per_track: dict[int, np.ndarray] = {}
+    per_track: dict[int, tuple[np.ndarray, float]] = {}
     for tid, rows in assignment.tracks.items():
-        descriptor = _track_kit_descriptor(detections, rows)
-        if descriptor is not None:
-            per_track[tid] = descriptor
+        evidence = _track_kit_evidence(detections, rows)
+        if evidence is not None:
+            per_track[tid] = evidence
     if len(per_track) < num_teams * 2:
         return {}, {tid: 0.0 for tid in assignment.tracks}, {}
 
-    ids = sorted(per_track)
-    features = np.stack([per_track[tid] for tid in ids])
+    # Only tracks with REAL colour evidence may vote: enough player-sized observations, and crops that were
+    # mostly kit rather than grass (a crop that is half grass is not a kit reading at all). Measured on the real
+    # game this cuts ~2800 tracks to ~150 - the rest are fragments whose grey medians would outvote the kits.
+    strong: dict[int, tuple[np.ndarray, float]] = {}
+    for tid, (descriptor, weight) in per_track.items():
+        chosen = _track_kit_rows(detections, assignment.tracks[tid])
+        if chosen is None:
+            continue
+        if float(np.mean(detections.kit[chosen, 0])) < TEAM_MIN_KIT_FRACTION:
+            continue
+        if weight < _team_min_evidence(len(detections.time)):
+            continue
+        strong[tid] = (descriptor, weight)
+    if len(strong) < num_teams * 2:
+        return {}, {tid: 0.0 for tid in assignment.tracks}, {}
+
+    ids = sorted(strong)
+    features = np.stack([strong[tid][0] for tid in ids])
+    weights = np.array([strong[tid][1] for tid in ids])
     features = (features - features.mean(0)) / (features.std(0) + 1e-6)
     clusters = 3 if len(ids) >= 3 * num_teams else num_teams
-    kmeans = KMeans(n_clusters=clusters, n_init=10, random_state=0).fit(features)
+
+    # Seed from the a-axis extremes: the reddest and the least-red strong track (plus the least saturated as the
+    # "other" seed when a third cluster is wanted). Kits are usually told apart by redness vs not-redness, and
+    # seeding from the extremes beats seeding from saturation, which lands on whatever is most garish (measured:
+    # a dark-orange bystander) instead of on a kit.
+    a_column = features[:, 1]
+    seeds = [int(np.argmax(a_column)), int(np.argmin(a_column))]
+    if clusters == 3:
+        seeds.append(int(np.argmin(features[:, 3])))
+    kmeans = KMeans(n_clusters=clusters, n_init=1, init=features[seeds], random_state=0).fit(
+        features, sample_weight=weights
+    )
     centres, labels = kmeans.cluster_centers_, kmeans.labels_
 
     sizes = np.bincount(labels, minlength=clusters)
-    team_clusters = list(np.argsort(-sizes)[:num_teams])
+    # The two TEAM clusters are the two most colourful (highest mean saturation in standardised space), not the
+    # two largest: measured on the real game the red team was the SMALLEST of three clusters (36 of 150 strong
+    # tracks) and the size rule dropped it in favour of a grey/teal junk cluster. A grey "other" cluster is
+    # unsaturated by definition, so saturation picks the kits and size never overrides them.
+    cluster_sat = [float(features[labels == c, 3].mean()) if np.any(labels == c) else -1.0 for c in range(clusters)]
     other_cluster = None
     if clusters == 3:
-        smallest = int(np.argmin(sizes))
-        reference = float(np.median(sizes[team_clusters])) or 1.0
-        if sizes[smallest] < 0.4 * reference:
-            other_cluster = smallest
-            team_clusters = [c for c in range(clusters) if c != other_cluster]
+        # The "other" cluster is whichever cluster looks like non-team people: clearly smaller than the teams
+        # (a referee is one person) or clearly unsaturated (grey junk). Measured on the synthetic game, the
+        # neon referee out-saturated both teams, so "least saturated" alone mislabels the referee a team and
+        # "most saturated" alone mislabels a team the referee - each candidate is checked against both tests.
+        reference = float(np.median(sizes)) or 1.0
+        for candidate in range(clusters):
+            small = sizes[candidate] < 0.4 * reference
+            unsaturated = cluster_sat[candidate] <= 0.0
+            if small or unsaturated:
+                others = [c for c in range(clusters) if c != candidate]
+                if float(sum(int(sizes[c]) for c in others)) >= 0.5 * float(sizes.sum()):
+                    other_cluster = candidate
+                    break
+    team_clusters = (
+        [c for c in range(clusters) if c != other_cluster]
+        if other_cluster is not None
+        else list(np.argsort(-np.asarray(cluster_sat))[:num_teams])
+    )
 
     # Deterministic team ids across runs: the more red kit (standardised 'a' axis) is team 0.
     team_clusters = sorted(team_clusters[:num_teams], key=lambda c: -centres[c, 1])
     remap = {int(cluster): team for team, cluster in enumerate(team_clusters)}
     teams = {tid: remap.get(int(label), -1) for tid, label in zip(ids, labels)}
 
-    # Each team's colour, averaged over the kit descriptors of the tracks that wear it (not the cluster centre,
-    # which lives in standardised space and no longer means a colour).
+    # Each team's colour, medianed over the kit descriptors of the tracks that wear it (not the cluster centre,
+    # which lives in standardised space and no longer means a colour). The median, not a saturation-weighted
+    # mean: weighting by saturation amplifies whatever is most garish, and the most garish members of a cluster
+    # are its grass leaks (measured: a red/blue split came out orange/green under the weighting).
+    # The vector here is [L, a, b, sat, val] - descriptor columns 1..5 - so it is padded back into the full
+    # 12-float layout (leading kit_fraction) that kit_rgb expects. Measured on the real game, passing the bare
+    # 5-float vector read a/b/sat as L/a/b and reported a red team as "light grey".
     members: dict[int, list[np.ndarray]] = {}
     for tid, team in teams.items():
         if team >= 0:
-            members.setdefault(team, []).append(per_track[tid])
-    colours = {team: np.mean(np.stack(rows), axis=0) for team, rows in members.items()}
+            members.setdefault(team, []).append(per_track[tid][0][:5])
+    colours: dict[int, np.ndarray] = {}
+    for team, rows in members.items():
+        padded = np.zeros(DESCRIPTOR_SIZE, dtype=np.float64)
+        padded[0] = 1.0
+        padded[1:6] = np.median(np.stack(rows), axis=0)
+        colours[team] = padded
 
     within = float(np.mean(np.linalg.norm(features - centres[labels], axis=1)))
     between = float(np.linalg.norm(centres[team_clusters[0]] - centres[team_clusters[1]])) if len(team_clusters) >= 2 else 0.0
@@ -536,8 +682,9 @@ def build_report(
     if weak:
         notes.append(f"{len(weak)} track(s) had weakly separated kit colours; their team label is a best guess.")
     notes.append(
-        "Goals, shots, saves and blocks are manual tags: the ball scan can follow the ball, but no event is inferred "
-        "from it yet."
+        "Goals, shots, corners, penalties, clearances and tackles can be inferred from the ball scan and these "
+        "tracks (Step 4's Detect events); saves and blocks stay manual tags, because a keeper's save and a shot "
+        "wide look the same to a ball track."
     )
     notes.append("Only part of the pitch is in view at once, so no full-pitch formation is reported.")
     report(1.0)

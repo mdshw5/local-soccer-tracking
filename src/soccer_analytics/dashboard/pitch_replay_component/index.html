@@ -56,14 +56,63 @@
         font-size: 13px;
         color: #cbd5e1;
       }
+      #panes {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      #pitch-pane {
+        flex: 1 1 58%;
+        min-width: 300px;
+      }
+      #clip-pane {
+        flex: 1 1 42%;
+        min-width: 260px;
+      }
       #stage {
         border: 1px solid #374151;
         background: #05240f;
         line-height: 0;
       }
+      #clip {
+        display: block;
+        width: 100%;
+        border-radius: 6px;
+        background: #000;
+      }
+      #clip-empty {
+        border: 1px dashed #374151;
+        border-radius: 6px;
+        padding: 14px;
+        font-size: 13px;
+        color: #9ca3af;
+      }
+      #clip-note {
+        font-size: 12px;
+        color: #9ca3af;
+        padding-top: 5px;
+      }
       canvas {
         display: block;
         width: 100%;
+      }
+      #timeline {
+        position: relative;
+        margin-bottom: 8px;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        background: #0b1220;
+        line-height: 0;
+        cursor: pointer;
+      }
+      #tl {
+        display: block;
+        width: 100%;
+      }
+      #tl-hint {
+        font-size: 11px;
+        color: #9ca3af;
+        padding: 2px 2px 0;
       }
       #legend {
         display: flex;
@@ -91,6 +140,11 @@
   <body>
     <div id="controls">
       <button id="play" title="Play / pause">&#9654;</button>
+      <button
+        id="follow-clip"
+        title="Jump the animation to the clip's moment and play both in step"
+        disabled
+      >&#128279;</button>
       <button id="step-back" title="Previous frame">&#9664;&#9474;</button>
       <button id="step-fwd" title="Next frame">&#9474;&#9654;</button>
       <input id="scrub" type="range" min="0" max="1" step="0.05" value="0" />
@@ -104,6 +158,8 @@
       <label class="toggle"><input id="loop" type="checkbox" /> loop</label>
       <label class="toggle"><input id="trails" type="checkbox" checked /> trails</label>
       <label class="toggle"><input id="labels" type="checkbox" checked /> shirts</label>
+      <label class="toggle" title="Keep the clip on the same second of the match as the animation"
+        ><input id="sync" type="checkbox" checked /> sync clip</label>
       <label class="toggle"
         >heat
         <select id="heat">
@@ -113,7 +169,26 @@
         </select>
       </label>
     </div>
-    <div id="stage"><canvas id="canvas"></canvas></div>
+    <div id="panes">
+      <div id="pitch-pane">
+        <div id="stage"><canvas id="canvas"></canvas></div>
+      </div>
+      <div id="clip-pane">
+        <video id="clip" controls playsinline preload="metadata" style="display: none"></video>
+        <div id="clip-empty">
+          No clip yet. Pick a moment under the pitch and press <b>Generate clip</b> - it is cut from the footage and
+          then plays here in step with the animation.
+        </div>
+        <div id="clip-note"></div>
+      </div>
+    </div>
+    <div id="timeline" title="Click to jump to that moment">
+      <canvas id="tl"></canvas>
+    </div>
+    <div id="tl-hint">
+      The strip above is the match timeline: the momentum curve (share of contested frames, team 1 above the
+      centre line) with every tagged and detected event marked. Click it to jump the replay to that moment.
+    </div>
     <div id="legend"></div>
     <div id="empty">Waiting for the replay data...</div>
 
@@ -144,10 +219,27 @@
       const TEAM_COLOURS = ['#4f8ef7', '#fb7185'];
       const OTHER_COLOUR = '#9ca3af';
       const AIM_COLOUR = '#fde047';
+      const CAMERA_COLOUR = '#38bdf8';
       const BALL_COLOUR = '#f8fafc';
       const MARGIN_M = 3.5; // room around the pitch for goals and breathing space
       const TRAIL_SECONDS = 4.0;
       const HEAT_RADIUS_M = 2.6;
+      const TL_HEIGHT = 74; // the timeline strip's height in CSS pixels
+      // One colour per event type, so a glance at the strip says what happened. Detected events are drawn hollow
+      // (a ring) and manual tags filled, so a machine's guess never reads as a human's certainty.
+      const EVENT_COLOURS = {
+        goal: '#22c55e',
+        penalty: '#f97316',
+        shot: '#eab308',
+        save: '#38bdf8',
+        block: '#a78bfa',
+        corner: '#14b8a6',
+        clearance: '#94a3b8',
+        tackle: '#ef4444',
+        foul: '#f43f5e',
+        substitution: '#c084fc',
+        other: '#9ca3af',
+      };
 
       const state = {
         data: null,
@@ -166,6 +258,13 @@
         index: [], // per player: {byFrame: {frame: i}}
         pitchCanvas: null,
         cssW: 0,
+        events: [], // tagged and detected events, drawn on the timeline strip
+        momentum: [], // [{minute, team_0, team_1}] sorted by minute
+        halfMinute: null, // half-time in minutes, for the timeline's half marker
+        clipUrl: '', // the generated clip beside the pitch, if one has been cut
+        clipStart: null, // the clip's window on the strip's own clock (seconds)
+        clipEnd: null,
+        clipSync: true, // keep the clip on the same second of the match as the animation
       };
 
       const canvas = document.getElementById('canvas');
@@ -173,8 +272,16 @@
       const clock = document.getElementById('clock');
       const scrub = document.getElementById('scrub');
       const playBtn = document.getElementById('play');
+      const followClipBtn = document.getElementById('follow-clip');
       const legend = document.getElementById('legend');
       const emptyNote = document.getElementById('empty');
+      const timeline = document.getElementById('timeline');
+      const tl = document.getElementById('tl');
+      const tlCtx = tl.getContext('2d');
+      const pitchPane = document.getElementById('pitch-pane');
+      const clip = document.getElementById('clip');
+      const clipEmpty = document.getElementById('clip-empty');
+      const clipNote = document.getElementById('clip-note');
 
       function detectedKit(team) {
         const entry = team >= 0 ? (state.data.team_colours || [])[team] : null;
@@ -251,16 +358,35 @@
       // ---------------------------------------------------------------------------------------------------
       // Geometry: pitch metres -> canvas pixels.
       // ---------------------------------------------------------------------------------------------------
-      function geometry() {
+      function viewBounds() {
+        // The pitch plus a margin, widened to include the camera's own ground position: the camera sits off the
+        // near touchline, and the direction line is drawn from there, so it has to be inside the view.
         const pitch = state.data.pitch;
+        let minX = -MARGIN_M;
+        let maxX = pitch[0] + MARGIN_M;
+        let minY = -MARGIN_M;
+        let maxY = pitch[1] + MARGIN_M;
+        const cam = state.data.camera;
+        if (cam) {
+          minX = Math.min(minX, cam[0] - MARGIN_M);
+          maxX = Math.max(maxX, cam[0] + MARGIN_M);
+          minY = Math.min(minY, cam[1] - MARGIN_M);
+          maxY = Math.max(maxY, cam[1] + MARGIN_M);
+        }
+        return {minX, maxX, minY, maxY};
+      }
+
+      function geometry() {
+        const b = viewBounds();
         const usableW = state.cssW;
-        const scale = usableW / (pitch[0] + 2 * MARGIN_M);
-        const height = (pitch[1] + 2 * MARGIN_M) * scale;
+        const scale = usableW / (b.maxX - b.minX);
+        const height = (b.maxY - b.minY) * scale;
         return {
           scale,
           height,
-          x: (x) => (MARGIN_M + x) * scale,
-          y: (y) => (MARGIN_M + (pitch[1] - y)) * scale, // near touchline (y=0) at the bottom of the view
+          bounds: b,
+          x: (x) => (x - b.minX) * scale,
+          y: (y) => (b.maxY - y) * scale, // near touchline (y=0) at the bottom of the view
         };
       }
 
@@ -276,7 +402,7 @@
         const s = g.scale;
         // All markings drawn in pitch metres: y-up, so the canvas y axis is flipped.
         c.save();
-        c.translate(MARGIN_M * s, (MARGIN_M + pitch[1]) * s);
+        c.translate(-g.bounds.minX * s, g.bounds.maxY * s);
         c.scale(s, -s);
 
         c.fillStyle = '#0b3d20';
@@ -458,6 +584,26 @@
 
         // ball proxy: the point the gimbal was aimed at
         const aim = state.data.aim[frame];
+        // camera direction: a line from the camera's own ground position to the aim point, so the direction the
+        // camera is pointing is visible on the pitch. Drawn under the aim dot and the players.
+        const cam = state.data.camera;
+        if (cam && aim) {
+          ctx.beginPath();
+          ctx.moveTo(g.x(cam[0]), g.y(cam[1]));
+          ctx.lineTo(g.x(aim[0]), g.y(aim[1]));
+          ctx.strokeStyle = CAMERA_COLOUR;
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([6, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.arc(g.x(cam[0]), g.y(cam[1]), Math.max(3, 0.5 * g.scale), 0, Math.PI * 2);
+          ctx.fillStyle = CAMERA_COLOUR;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
         if (aim) {
           ctx.beginPath();
           ctx.arc(g.x(aim[0]), g.y(aim[1]), Math.max(2.5, 0.35 * g.scale), 0, Math.PI * 2);
@@ -536,6 +682,109 @@
         }
         clock.textContent = clockText(t);
         if (document.activeElement !== scrub) scrub.value = String(t);
+        drawTimeline();
+      }
+
+      // ---------------------------------------------------------------------------------------------------
+      // Timeline strip: momentum curve + event markers, click to seek.
+      // ---------------------------------------------------------------------------------------------------
+      function eventColour(type) {
+        return EVENT_COLOURS[type] || EVENT_COLOURS.other;
+      }
+
+      function drawTimeline() {
+        if (!state.data) return;
+        const dpr = window.devicePixelRatio || 1;
+        const width = Math.max(320, document.body.clientWidth - 2);
+        tl.width = Math.round(width * dpr);
+        tl.height = Math.round(TL_HEIGHT * dpr);
+        tl.style.height = `${TL_HEIGHT}px`;
+        tlCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        tlCtx.clearRect(0, 0, width, TL_HEIGHT);
+
+        const duration = state.data.duration_s || 1;
+        const pad = 6;
+        const plotW = width - 2 * pad;
+        const midY = TL_HEIGHT / 2;
+        const amp = TL_HEIGHT / 2 - 12;
+        const xOf = (t) => pad + (Math.min(duration, Math.max(0, t)) / duration) * plotW;
+
+        // baseline
+        tlCtx.strokeStyle = '#334155';
+        tlCtx.lineWidth = 1;
+        tlCtx.beginPath();
+        tlCtx.moveTo(pad, midY);
+        tlCtx.lineTo(pad + plotW, midY);
+        tlCtx.stroke();
+
+        // momentum: team 0's share above the centre line, team 1's below (mirrored), so a swing is a bulge.
+        const momentum = state.momentum || [];
+        if (momentum.length >= 2) {
+          const drawSide = (key, sign, colour) => {
+            tlCtx.beginPath();
+            momentum.forEach((bucket, i) => {
+              const x = xOf(bucket.minute * 60 + 30);
+              const share = Math.max(0, Math.min(1, bucket[key]));
+              const y = midY - sign * (share - 0.5) * 2 * amp;
+              if (i === 0) tlCtx.moveTo(x, y);
+              else tlCtx.lineTo(x, y);
+            });
+            tlCtx.strokeStyle = colour;
+            tlCtx.lineWidth = 1.6;
+            tlCtx.globalAlpha = 0.85;
+            tlCtx.stroke();
+            tlCtx.globalAlpha = 1;
+          };
+          drawSide('team_0', 1, teamColour(0));
+          drawSide('team_1', -1, teamColour(1));
+        }
+
+        // half-time marker
+        if (state.halfMinute !== null && state.halfMinute !== undefined) {
+          const x = xOf(state.halfMinute * 60);
+          tlCtx.strokeStyle = '#ffd166';
+          tlCtx.setLineDash([4, 3]);
+          tlCtx.beginPath();
+          tlCtx.moveTo(x, 2);
+          tlCtx.lineTo(x, TL_HEIGHT - 2);
+          tlCtx.stroke();
+          tlCtx.setLineDash([]);
+        }
+
+        // event markers: a vertical tick from the centre line, a filled dot for a manual tag and a hollow ring
+        // for a detected one. The type's colour is the legend.
+        for (const event of state.events || []) {
+          const x = xOf(event.time_s);
+          const colour = eventColour(event.type);
+          const manual = event.source === 'manual';
+          tlCtx.strokeStyle = colour;
+          tlCtx.globalAlpha = 0.5;
+          tlCtx.lineWidth = 1;
+          tlCtx.beginPath();
+          tlCtx.moveTo(x, midY - amp - 4);
+          tlCtx.lineTo(x, midY + amp + 4);
+          tlCtx.stroke();
+          tlCtx.globalAlpha = 1;
+          tlCtx.beginPath();
+          tlCtx.arc(x, midY, 4.5, 0, Math.PI * 2);
+          if (manual) {
+            tlCtx.fillStyle = colour;
+            tlCtx.fill();
+          } else {
+            tlCtx.lineWidth = 2;
+            tlCtx.strokeStyle = colour;
+            tlCtx.stroke();
+          }
+        }
+
+        // playhead
+        const headX = xOf(state.time);
+        tlCtx.strokeStyle = '#fafafa';
+        tlCtx.lineWidth = 1.5;
+        tlCtx.beginPath();
+        tlCtx.moveTo(headX, 0);
+        tlCtx.lineTo(headX, TL_HEIGHT);
+        tlCtx.stroke();
       }
 
       function setPlaying(playing) {
@@ -548,6 +797,62 @@
           cancelAnimationFrame(state.raf);
           state.raf = null;
         }
+        syncClip();
+      }
+
+      // ---------------------------------------------------------------------------------------------------
+      // The clip beside the pitch.
+      //
+      // The clip is the footage of one moment; the animation is the whole analysed window. They are two
+      // different clocks, and the clip's window is known on the strip's clock (``clipStart``/``clipEnd``), so
+      // the two can be held together: the clip's own currentTime is the strip's time minus the window start.
+      // Sync is one-way and driven by the *animation*, because the animation is the thing that can be scrubbed
+      // to any second of the match - the clip only exists for its own ten seconds. Dragging the clip's own
+      // controls therefore does not move the animation; it just plays, and the next animation tick takes over.
+      // ---------------------------------------------------------------------------------------------------
+      function clipTimeFor(time) {
+        if (state.clipStart === null || state.clipEnd === null) return null;
+        if (time < state.clipStart || time > state.clipEnd) return null;
+        return time - state.clipStart;
+      }
+
+      function syncClip() {
+        if (!state.clipUrl || !state.clipSync) return;
+        const wanted = clipTimeFor(state.time);
+        if (wanted === null) {
+          // Outside the clip's window: pause it rather than let it run on past the moment it shows.
+          if (!clip.paused) clip.pause();
+          return;
+        }
+        // Only correct a real drift. Seeking every frame would stutter the video, and the two clocks run at
+        // the same rate, so a small difference is just the gap between the last tick and this one.
+        if (Math.abs(clip.currentTime - wanted) > 0.35) {
+          clip.currentTime = wanted;
+        }
+        if (state.playing && clip.paused) {
+          clip.play().catch(() => {});
+        } else if (!state.playing && !clip.paused) {
+          clip.pause();
+        }
+      }
+
+      function showClip() {
+        const has = Boolean(state.clipUrl);
+        clip.style.display = has ? 'block' : 'none';
+        clipEmpty.style.display = has ? 'none' : 'block';
+        // The follow button is only meaningful once there is a clip and a window to jump into.
+        followClipBtn.disabled = !has || state.clipStart === null;
+        if (!has) {
+          clipNote.textContent = '';
+          return;
+        }
+        const window =
+          state.clipStart === null
+            ? ''
+            : ` - ${clockText(state.clipStart)} to ${clockText(state.clipEnd)} of the analysed window`;
+        clipNote.textContent = state.clipSync
+          ? `Playing in step with the animation${window}.`
+          : `Sync is off, so the clip plays on its own${window}.`;
       }
 
       let lastTimestamp = 0;
@@ -568,6 +873,7 @@
           }
         }
         draw();
+        syncClip();
         state.raf = requestAnimationFrame(tick);
       }
 
@@ -587,7 +893,8 @@
 
       function resize() {
         if (!state.data) return;
-        state.cssW = Math.max(320, document.body.clientWidth - 2);
+        // The pitch shares the row with the clip, so its width is its own pane's, not the page's.
+        state.cssW = Math.max(240, pitchPane.clientWidth - 2);
         const g = geometry();
         const dpr = window.devicePixelRatio || 1;
         canvas.width = Math.round(state.cssW * dpr);
@@ -597,6 +904,7 @@
         state.heatKey = ''; // the heat canvas is drawn with explicit size, so a resize only re-renders it
         rebuildHeatIfNeeded();
         draw();
+        drawTimeline();
         Streamlit.setFrameHeight(document.body.scrollHeight + 6);
       }
 
@@ -625,6 +933,9 @@
       }
 
       function renderLegend() {
+        // The replay payload is fetched asynchronously, so a render event can arrive before it is loaded: the
+        // legend (and the strip) can only be drawn once it is here.
+        if (!state.data) return;
         const names = state.data.team_names || ['Team A', 'Team B'];
         const counts = [0, 0];
         let other = 0;
@@ -639,18 +950,49 @@
               `<span><span class="chip" style="background:${teamColour(i)}"></span>${name} (${counts[i]})</span>`
           )
           .join('');
+        // One chip per event type actually on the timeline, so the strip's colours are readable without a key.
+        const types = [...new Set((state.events || []).map((e) => e.type))];
+        const eventChips = types
+          .map(
+            (type) =>
+              `<span><span class="chip" style="background:${eventColour(type)}"></span>${type}</span>`
+          )
+          .join('');
         legend.innerHTML =
           chips +
           (other ? `<span><span class="chip" style="background:${OTHER_COLOUR}"></span>other (${other})</span>` : '') +
           `<span><span class="chip" style="background:${AIM_COLOUR}"></span>ball proxy (camera aim)</span>` +
+          (state.data.camera
+            ? `<span><span class="chip" style="background:${CAMERA_COLOUR}"></span>camera position &amp; direction</span>`
+            : '') +
           (state.data.ball
             ? `<span><span class="chip" style="background:${BALL_COLOUR}"></span>` +
               `ball (scan: drawn = seen, dashed ring = forecast)</span>`
             : '') +
-          `<span>${state.data.players.length} tracks, ${Math.round(state.data.duration_s)}s at ${state.data.fps} fps</span>`;
+          (eventChips ? `<span>events (filled = tagged, ring = detected):</span>${eventChips}` : '') +
+          `<span>${state.data.players.length} tracks, ${Math.round(state.data.duration_s)}s at ${state.data.fps} fps</span>` +
+          (state.data.bystanders_excluded
+            ? `<span>${state.data.bystanders_excluded} bystander tracks (touchline/spectators) not shown</span>`
+            : '');
       }
 
       playBtn.addEventListener('click', () => setPlaying(!state.playing));
+      followClipBtn.addEventListener('click', () => {
+        // The clip's own controls may have moved it away from the animation; this takes the animation to the same
+        // second of the match and starts both. The clip's window is known on the strip's clock, so the animation
+        // time is the window start plus where the clip is now - always inside the window, so sync can hold them.
+        if (!state.clipUrl || state.clipStart === null || !state.data) return;
+        state.time = Math.min(state.data.duration_s, Math.max(0, state.clipStart + clip.currentTime));
+        // The button's whole point is playing the two together, so it re-couples them if sync was switched off.
+        if (!state.clipSync) {
+          state.clipSync = true;
+          document.getElementById('sync').checked = true;
+          showClip();
+        }
+        draw();
+        if (!state.playing) setPlaying(true);
+        else syncClip();
+      });
       document.getElementById('step-back').addEventListener('click', () => {
         setPlaying(false);
         state.time = Math.max(0, state.time - 1 / state.data.fps);
@@ -664,6 +1006,16 @@
       scrub.addEventListener('input', () => {
         setPlaying(false);
         state.time = Number(scrub.value);
+        draw();
+      });
+      timeline.addEventListener('click', (event) => {
+        if (!state.data) return;
+        const rect = tl.getBoundingClientRect();
+        const pad = 6;
+        const plotW = rect.width - 2 * pad;
+        const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left - pad) / plotW));
+        setPlaying(false);
+        state.time = fraction * state.data.duration_s;
         draw();
       });
       document.getElementById('speed').addEventListener('change', (event) => {
@@ -685,6 +1037,14 @@
         rebuildHeatIfNeeded();
         draw();
       });
+      document.getElementById('sync').addEventListener('change', (event) => {
+        state.clipSync = event.target.checked;
+        if (!state.clipSync && !clip.paused) clip.pause();
+        showClip();
+        syncClip();
+      });
+      // The clip's own controls are the browser's; a seek there is the user's business, not ours. Only the
+      // animation drives the clip, so nothing is listened for here beyond keeping the note honest.
 
       window.addEventListener('resize', resize);
       new ResizeObserver(() => resize()).observe(document.body);
@@ -694,12 +1054,40 @@
         const selected = args.selected_track;
         state.selected = selected === undefined || selected === null || selected < 0 ? null : selected;
         state.numbers = args.numbers || {};
+        state.events = args.events || [];
+        state.momentum = args.momentum || [];
+        state.halfMinute = args.half_minute === undefined ? null : args.half_minute;
+        // The clip is cut by Python and served through the media endpoint, so it arrives as a URL plus the
+        // window it covers on the strip's clock. A new URL is a new clip: load it and put it at the right
+        // second, so pressing Generate clip shows the moment the animation is already sitting on.
+        const clipUrl = args.clip_url || '';
+        const clipChanged = clipUrl !== state.clipUrl;
+        state.clipUrl = clipUrl;
+        state.clipStart = args.clip_start_s === undefined || args.clip_start_s === null ? null : Number(args.clip_start_s);
+        state.clipEnd = args.clip_end_s === undefined || args.clip_end_s === null ? null : Number(args.clip_end_s);
+        if (clipChanged) {
+          if (clipUrl) {
+            clip.src = clipUrl;
+            clip.load();
+          } else {
+            clip.removeAttribute('src');
+            clip.load();
+          }
+        }
+        showClip();
         const url = args.data_url || '';
         if (url && url !== state.loadedUrl) {
           loadData(url);
         } else {
           rebuildHeatIfNeeded();
+          // The legend carries a chip per event type, and the events arrive as their own argument - so it has to be
+          // redrawn here too, not only when the replay payload loads. Otherwise tagging an event (or running the
+          // detectors) adds markers to the strip while the legend still lists only the types it saw at load time.
+          // It is a no-op while the payload is still loading.
+          renderLegend();
           draw();
+          drawTimeline();
+          syncClip();
         }
         Streamlit.setFrameHeight(document.body.scrollHeight + 6);
       });

@@ -26,6 +26,44 @@ from soccer_analytics.dashboard.reports import team_name
 POSSESSION_RADIUS_M = 12.0
 ROUND_M = 0.1
 
+# Bystander exclusion. The detector sees everyone in frame - coaches on the touchline, photographers,
+# spectators beyond the far touchline - and the tracker tracks them like anyone else. Drawing them on the
+# pitch animation puts a crowd of stationary dots on the field of play. Two measurements separate them
+# from players (calibrated on the real 2026-10-03 game, where 64 team-labelled tracks are ground truth):
+# * a player track covers ground - the 5th percentile of team-labelled tracks spans a 17.9 m diagonal,
+#   while a spectator's track spans a metre or two;
+# * a player moves - the 5th percentile of team-labelled tracks is moving (over 1 km/h) 6% of observations,
+#   while a spectator essentially never moves.
+# The rule flags a track as a bystander when it is small, or small AND still. Measured on the same game:
+# 1,095 of 4,378 long tracks flagged, zero of them team-labelled, and the per-frame count of surviving
+# tracks has a median of 14 - what a camera following the ball actually sees.
+BYSTANDER_MIN_EXTENT_M = 8.0  # below this diagonal the track never left its spot
+BYSTANDER_EXTENT_M = 15.0  # the "small and still" band's upper edge
+BYSTANDER_MOVING_FRACTION = 0.05  # below this share of moving observations a small track is "still"
+BYSTANDER_MIN_OBSERVATIONS = 20  # shorter tracks say too little about extent or movement to judge
+
+
+def _is_bystander(track: PlayerTrack) -> bool:
+    """True for a track that behaves like a touchline bystander rather than a player.
+
+    Extent is the diagonal of the track's bounding box in pitch metres; movement is the share of observations
+    whose speed exceeds 1 km/h (the same threshold the report uses for "moving"). Tracks too short to judge are
+    kept - dropping them would hide real players who were only briefly visible, and a short fragment cannot
+    clutter the animation much either way.
+    """
+    if len(track.xy) < BYSTANDER_MIN_OBSERVATIONS:
+        return False
+    finite = track.xy[np.isfinite(track.xy).all(axis=1)]
+    if len(finite) < BYSTANDER_MIN_OBSERVATIONS:
+        return False
+    extent = float(np.hypot(np.ptp(finite[:, 0]), np.ptp(finite[:, 1])))
+    if extent < BYSTANDER_MIN_EXTENT_M:
+        return True
+    if extent >= BYSTANDER_EXTENT_M:
+        return False
+    moving = float(np.mean(np.asarray(track.speed_kmh, dtype=np.float64) > 1.0))
+    return moving < BYSTANDER_MOVING_FRACTION
+
 
 def _round(value: float) -> float:
     return float(round(float(value), 1))
@@ -52,6 +90,7 @@ def build_replay(
     team_names: list[str],
     ball: tuple[np.ndarray, np.ndarray] | None = None,
     team_colours: Sequence[Sequence[int] | None] | None = None,
+    camera_xy: Sequence[float] | None = None,
 ) -> dict:
     """Assemble the replay payload from tracks, the per-frame camera aim (ball proxy) and the ball track.
 
@@ -67,11 +106,19 @@ def build_replay(
     ``team_colours`` is each team's measured kit colour as ``(r, g, b)``, ``None`` where the clustering could not
     separate the kits: the component paints its markers with the colour that was actually on the pitch, and keeps
     its own palette only as the fallback.
+
+    ``camera_xy`` is the camera's own ground position (its X/Y, ignoring height). The replay draws a line from it
+    to the aim point each frame, so the direction the camera is pointing is visible on the pitch. It is ``None``
+    when the caller has no calibration to give one.
     """
     aim = [
         [_round(x), _round(y)] if np.isfinite(x) and np.isfinite(y) else None
         for x, y in np.asarray(aim_xy, dtype=np.float64)
     ]
+
+    camera = None
+    if camera_xy is not None:
+        camera = [_round(camera_xy[0]), _round(camera_xy[1])]
 
     ball_out = None
     if ball is not None:
@@ -82,8 +129,11 @@ def build_replay(
         ]
 
     # Who was on the ball each frame, by proximity to the camera's aim point (the same proxy stage_b uses).
+    # Bystanders are excluded first: they are not players, and counting their proximity to the aim point
+    # would credit touches to people who cannot touch a ball.
+    field_players = [track for track in players if not _is_bystander(track)]
     by_frame: dict[int, list[tuple[int, float, float]]] = {}
-    for track in players:
+    for track in field_players:
         for frame, position in zip(track.frame, track.xy):
             by_frame.setdefault(int(frame), []).append((int(track.track_id), float(position[0]), float(position[1])))
     touches: dict[int, int] = {}
@@ -100,7 +150,7 @@ def build_replay(
             touches[best_track] = touches.get(best_track, 0) + 1
 
     out_players = []
-    for track in sorted(players, key=lambda item: int(item.track_id)):
+    for track in sorted(field_players, key=lambda item: int(item.track_id)):
         speed = np.asarray(track.speed_kmh, dtype=np.float64)
         moving = speed[speed > 0.5]
         out_players.append(
@@ -133,8 +183,13 @@ def build_replay(
         "team_names": list(team_names),
         "team_colours": None if team_colours is None else [_kit_colour(entry) for entry in team_colours],
         "aim": aim,
+        "camera": camera,
         "ball": ball_out,
         "players": out_players,
+        # How many tracked people were judged bystanders (touchline coaches, photographers, spectators) and
+        # left out of ``players``. The view draws the field of play only; the count keeps the exclusion honest
+        # - the page can say how many tracked people are not shown rather than silently shrinking the world.
+        "bystanders_excluded": len(players) - len(field_players),
     }
 
 

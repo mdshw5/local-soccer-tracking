@@ -71,6 +71,15 @@ class _FakeModel:
         scaled = [(x1 * w / 1920, y1 * w / 1920, x2 * w / 1920, y2 * w / 1920) for x1, y1, x2, y2 in self.boxes]
         return [_FakeResult(scaled, [0.9] * len(scaled))]
 
+    def track(self, frame, **kwargs):
+        """Same boxes as predict, with a stable id per box position (what BoT-SORT approximates)."""
+        self.calls += 1
+        w = frame.shape[1]
+        scaled = [(x1 * w / 1920, y1 * w / 1920, x2 * w / 1920, y2 * w / 1920) for x1, y1, x2, y2 in self.boxes]
+        result = _FakeResult(scaled, [0.9] * len(scaled))
+        result.boxes.id = _T(np.arange(len(scaled), dtype=np.float32))
+        return [result]
+
 
 def _scene() -> np.ndarray:
     rng = np.random.default_rng(11)
@@ -194,7 +203,7 @@ def test_mismatched_settings_refuse_to_mix_results(panning_video: Path, tmp_path
 
 def test_detector_failure_is_recorded_not_swallowed(panning_video: Path, tmp_path: Path) -> None:
     class Boom(_FakeModel):
-        def predict(self, frame, **kwargs):
+        def track(self, frame, **kwargs):
             raise RuntimeError("CUDA out of memory")
 
     out = tmp_path / "boom"

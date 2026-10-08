@@ -34,8 +34,10 @@ def _detections(rows: list[tuple[int, float, float, list[float]]]) -> PitchDetec
         height_px=np.full(n, 200.0),
         conf=np.full(n, 0.9),
         kit=kit,
+        det_track=np.full(n, -1, dtype=np.int32),
         det_index=np.arange(n),
         aim_xy=np.full((int(frame.max()) + 1, 2), np.nan),
+        camera_xy=np.zeros(2),
     )
 
 

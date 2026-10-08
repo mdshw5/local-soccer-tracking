@@ -32,6 +32,7 @@ CLICK_MAX_WIDTH = 1600  # canvas pixels sent to the browser; small crops go at n
 
 # Standard pitch markings (metres), the same for every format. Kept in one place so the clickable landmarks and the
 # outline drawn back onto the frame cannot drift apart.
+GOAL_WIDTH_M = 7.32  # between the posts, so each post stands 3.66 m either side of the goal centre
 GOAL_BOX_DEPTH_M = 5.5
 # The goal area (six-yard box) is 5.5 m out from *each goalpost*, and the posts are 7.32 m apart, so its half-width
 # is 3.66 + 5.5 = 9.16 m - not 5.5 m. Using 5.5 drew a goal box narrower than the real one.
@@ -45,40 +46,41 @@ CENTRE_CIRCLE_RADIUS_M = 9.15
 def landmark_table(length_m: float, width_m: float) -> dict[str, tuple[float, float]]:
     """Pitch landmarks a user can click, in the order they should be clicked.
 
-    Corners first because they spread the fit across the pitch, then the goal centres - which matter because the near
-    corners are often out of frame, and the goal mouth is a far easier thing to pick out than a corner flag. The
-    halfway line and centre spot then pin the middle down.
+    Corners first because they spread the fit across the pitch, then the goalposts - which matter because the near
+    corners are often out of frame, and a post is a far easier thing to pick out than a corner flag. The halfway
+    line and centre spot then pin the middle down.
 
-    The rest are the markings that are *usually* visible and add spread where the corners cannot: the goal box (the
-    six-yard box) and penalty box corners at each end, the penalty spots, and the four cardinals of the centre
-    circle. They are the same standard markings for every format, so the same list works once the dimensions are
-    known - and because they sit at a range of distances from the camera they are exactly the near landmarks the fit
-    is short of when the near corners are out of shot. The goal box and penalty box are drawn from the goal line
-    (``x = 0`` and ``x = length_m``) and the centre circle from the halfway line, so a click on any of them is a
-    measurement of the pitch, not of the camera.
+    The rest are the markings that are *usually* visible and add spread where the corners cannot: the penalty
+    spots, and the four cardinals of the centre circle. They are the same standard markings for every format, so
+    the same list works once the dimensions are known - and because they sit at a range of distances from the
+    camera they are exactly the near landmarks the fit is short of when the near corners are out of shot. The
+    centre circle is drawn from the halfway line, so a click on any of them is a measurement of the pitch, not of
+    the camera.
+
+    The boxes are deliberately *not* clickable. The goal box (six-yard box) is the hardest marking on the pitch to
+    place accurately - the box is small, its lines are lost against the netting and the goal frame - and the
+    penalty box corners are little better: the corner is a bare junction of two lines with nothing to focus on, so
+    a click a metre out is a metre of error in the fit. The posts carry that end of the pitch instead, and the
+    penalty spots pin the box's depth.
     """
     half_length = length_m / 2
     half_width = width_m / 2
+    half_goal = GOAL_WIDTH_M / 2
     return {
         "corner near-left": (0.0, 0.0),
         "corner near-right": (length_m, 0.0),
         "corner far-right": (length_m, width_m),
         "corner far-left": (0.0, width_m),
-        "goal centre left": (0.0, half_width),
-        "goal centre right": (length_m, half_width),
+        # The posts, not the goal centre: the base of a post is a hard, high-contrast edge that can be clicked to a
+        # pixel, whereas the middle of the goal mouth is a judgement call between two posts - and the posts are what
+        # the goal box is measured from, so they are the more useful pair.
+        "goal post left-near": (0.0, half_width - half_goal),
+        "goal post left-far": (0.0, half_width + half_goal),
+        "goal post right-near": (length_m, half_width - half_goal),
+        "goal post right-far": (length_m, half_width + half_goal),
         "halfway near": (half_length, 0.0),
         "halfway far": (half_length, width_m),
         "centre spot": (half_length, half_width),
-        # Goal box (six-yard box): 5.5 m out from the goal line, 5.5 m either side of the goal centre.
-        "goal box near-left": (0.0, half_width - GOAL_BOX_HALF_WIDTH_M),
-        "goal box near-right": (0.0, half_width + GOAL_BOX_HALF_WIDTH_M),
-        "goal box far-left": (length_m, half_width - GOAL_BOX_HALF_WIDTH_M),
-        "goal box far-right": (length_m, half_width + GOAL_BOX_HALF_WIDTH_M),
-        # Penalty box (18-yard box): 16.5 m out, 20.16 m either side of the goal centre.
-        "penalty box near-left": (0.0, half_width - PENALTY_BOX_HALF_WIDTH_M),
-        "penalty box near-right": (0.0, half_width + PENALTY_BOX_HALF_WIDTH_M),
-        "penalty box far-left": (length_m, half_width - PENALTY_BOX_HALF_WIDTH_M),
-        "penalty box far-right": (length_m, half_width + PENALTY_BOX_HALF_WIDTH_M),
         # Penalty spots: 11 m out from the goal line, on the goal centre line.
         "penalty spot left": (PENALTY_SPOT_DISTANCE_M, half_width),
         "penalty spot right": (length_m - PENALTY_SPOT_DISTANCE_M, half_width),
@@ -95,44 +97,26 @@ LANDMARK_HELP: dict[str, str] = {
     "corner near-right": "Corner flag at the right-hand end, on the touchline nearest the camera.",
     "corner far-right": "Corner flag at the right-hand end, on the far touchline - usually the hardest one to click.",
     "corner far-left": "Corner flag at the left-hand end, on the far touchline.",
-    "goal centre left": (
-        "Middle of the goal mouth at ground level - where the goal line crosses between the posts - at the same end "
-        "as the *-left corners. Use this when that corner flag is out of frame."
+    "goal post left-near": (
+        "The base of the goalpost at the left-hand end, on the near side of the goal - where the post meets the goal "
+        "line. Use the posts when the corner flag is out of frame: a post is a hard vertical edge, far easier to "
+        "click than the middle of the goal mouth."
     ),
-    "goal centre right": (
-        "Middle of the goal mouth at ground level, at the same end as the *-right corners. Use this when that "
-        "corner flag is out of frame."
+    "goal post left-far": (
+        "The base of the goalpost at the left-hand end, on the far side of the goal - where the post meets the goal "
+        "line."
+    ),
+    "goal post right-near": (
+        "The base of the goalpost at the right-hand end, on the near side of the goal - where the post meets the "
+        "goal line."
+    ),
+    "goal post right-far": (
+        "The base of the goalpost at the right-hand end, on the far side of the goal - where the post meets the "
+        "goal line."
     ),
     "halfway near": "Where the halfway line meets the near touchline.",
     "halfway far": "Where the halfway line meets the far touchline.",
     "centre spot": "The centre spot (or the centre of the centre circle).",
-    "goal box near-left": (
-        "The goal box (six-yard box) corner on the goal line, on the near side of the goal - where the goal line "
-        "meets the short line of the six-yard box. Usually visible even when the corner flag is not."
-    ),
-    "goal box near-right": (
-        "The goal box (six-yard box) corner on the goal line, on the far side of the goal - where the goal line "
-        "meets the short line of the six-yard box."
-    ),
-    "goal box far-left": (
-        "The goal box (six-yard box) corner on the goal line at the far end, on the near side of the goal."
-    ),
-    "goal box far-right": (
-        "The goal box (six-yard box) corner on the goal line at the far end, on the far side of the goal."
-    ),
-    "penalty box near-left": (
-        "The penalty box (18-yard box) corner on the goal line, on the near side of the goal - where the goal line "
-        "meets the long line of the penalty box. A good near landmark when the corner flag is out of shot."
-    ),
-    "penalty box near-right": (
-        "The penalty box (18-yard box) corner on the goal line, on the far side of the goal."
-    ),
-    "penalty box far-left": (
-        "The penalty box (18-yard box) corner on the goal line at the far end, on the near side of the goal."
-    ),
-    "penalty box far-right": (
-        "The penalty box (18-yard box) corner on the goal line at the far end, on the far side of the goal."
-    ),
     "penalty spot left": "The penalty spot at the left-hand end - 11 m out from the goal line, on the goal centre line.",
     "penalty spot right": "The penalty spot at the right-hand end - 11 m out from the goal line, on the goal centre line.",
     "centre circle near": "Where the centre circle crosses the centre line, on the near side of the halfway line.",
@@ -387,13 +371,18 @@ def restored_points(saved: list[dict], frame_count: int) -> list[dict] | None:
 class ClickResult:
     """What the component last reported.
 
-    ``action`` separates the two things a gesture in the component can mean: ``apply`` commits the points on screen,
-    and ``navigate`` moved, zoomed or re-framed the view (a click, scroll or pan on the whole frame, which is also
-    what loads a scrubbed-to frame into the crop). Neither may touch the stored clicks - that is what ``action`` is
-    for. Scrubbing the timeline itself reports nothing at all: it is handled entirely in the browser.
+    ``action`` separates the three things a gesture in the component can mean: ``apply`` commits the points on
+    screen (a click or a finished drag - the component commits the moment it happens, there is no Apply button),
+    ``clear`` asks for the applied points of the frame being viewed to be removed, and ``navigate`` moved, zoomed
+    or re-framed the view (a click, scroll or pan on the whole frame, which is also what loads a scrubbed-to frame
+    into the crop). Scrubbing the timeline itself reports nothing at all: it is handled entirely in the browser.
 
-    Each entry of ``points`` is ``(x, y, label)``: canvas pixels, plus the landmark the marker picker had selected
-    when it was clicked (empty when the picker was left on automatic).
+    Each entry of ``points`` is ``(x, y, label)``: canvas pixels, plus the landmark chosen in the popover that
+    appeared at the click.
+
+    ``seq``/``mount`` identify the gesture. The component's value is sticky - it comes back on every later rerun -
+    and with clicks committing immediately there is no Apply button to re-key the component after, so the page
+    dedupes on these instead: a gesture is acted on only when it has not been seen before (same mount, higher seq).
     """
 
     points: list[tuple[float, float, str]] = field(default_factory=list)
@@ -401,6 +390,8 @@ class ClickResult:
     zoom: float | None = None
     action: str = ""
     frame: int | None = None
+    seq: int = 0
+    mount: int = 0
 
 
 def frame_change(result_frame: int | None, reference: int, frame_count: int) -> int | None:
@@ -440,33 +431,12 @@ def parse_result(value: object) -> ClickResult:
         centre = (clamp01(value["centre_x"]), clamp01(value["centre_y"]))
     zoom = float(value["zoom"]) if isinstance(value.get("zoom"), (int, float)) else None
     frame = int(value["frame"]) if isinstance(value.get("frame"), (int, float)) else None
+    seq = int(value["seq"]) if isinstance(value.get("seq"), (int, float)) else 0
+    mount = int(value["mount"]) if isinstance(value.get("mount"), (int, float)) else 0
     return ClickResult(
-        points=points, centre=centre, zoom=zoom, action=str(value.get("action") or ""), frame=frame
+        points=points, centre=centre, zoom=zoom, action=str(value.get("action") or ""), frame=frame,
+        seq=seq, mount=mount,
     )
-
-
-def default_labels(count: int, length_m: float, width_m: float) -> list[str]:
-    """Suggested label for the nth click: the landmarks in click order, and the last one repeats if there are more."""
-    order = pitch_landmark_order(length_m, width_m)
-    return [order[min(index, len(order) - 1)] for index in range(count)]
-
-
-def per_anchor_labels(frames: list[int], length_m: float, width_m: float) -> list[str]:
-    """Suggested label per click, restarting the landmark loop at every new frame.
-
-    The suggestion restarts per moment because the workflow is per moment: click the landmarks you can see on one
-    frame, then scrub on and click the ones you can see on the next. Continuing the loop across frames would suggest
-    landmarks the user did not pick at that moment - and would read as advice to keep clicking *new* landmarks, when
-    what anchors the drift is clicking the *same* landmark again at a later moment.
-    """
-    order = pitch_landmark_order(length_m, width_m)
-    seen: dict[int, int] = {}
-    labels: list[str] = []
-    for frame in frames:
-        rank = seen.get(frame, 0)
-        labels.append(order[min(rank, len(order) - 1)])
-        seen[frame] = rank + 1
-    return labels
 
 
 def repeated_labels_within_a_frame(pairs: Iterable[tuple[int, str]]) -> list[str]:
@@ -480,6 +450,33 @@ def repeated_labels_within_a_frame(pairs: Iterable[tuple[int, str]]) -> list[str
     for frame, label in pairs:
         counts[(frame, label)] = counts.get((frame, label), 0) + 1
     return sorted({label for (frame, label), count in counts.items() if count > 1})
+
+
+def split_duplicate_clicks(
+    entries: Iterable[tuple[int, str, int]],
+) -> tuple[list[tuple[int, str, int]], list[tuple[int, str, int]]]:
+    """Split ``(frame, landmark, pid)`` entries into ``(kept, dropped)``, keeping the newest of each duplicate.
+
+    Two clicks of one landmark on *one* picture claim two pitch positions for a single image point, so at most one
+    can be right - and the newest click is the user's latest word on where the marking is. A re-click to fix a slip
+    and a re-label that collides with an older click both mean exactly that: replace the old one. Resolving the
+    contradiction here, automatically, is what keeps a stray click from blocking the fit - refusing to fit until
+    the user finds and removes it reads as the app rejecting perfectly good work.
+
+    Clicks on *different* frames are not duplicates (that is the drift-anchoring workflow), and an untagged click
+    cannot contradict anything - callers simply do not list those, and this function only groups exact
+    ``(frame, landmark)`` matches. The newest is the highest ``pid``: pids are handed out in click order.
+    """
+    items = list(entries)
+    counts: dict[tuple[int, str], int] = {}
+    newest: dict[tuple[int, str], int] = {}
+    for frame, label, pid in items:
+        key = (frame, label)
+        counts[key] = counts.get(key, 0) + 1
+        newest[key] = max(newest.get(key, -1), pid)
+    kept = [entry for entry in items if counts[(entry[0], entry[1])] == 1 or newest[(entry[0], entry[1])] == entry[2]]
+    dropped = [entry for entry in items if counts[(entry[0], entry[1])] > 1 and newest[(entry[0], entry[1])] != entry[2]]
+    return kept, dropped
 
 
 def project_landmarks(
@@ -566,6 +563,62 @@ def pitch_marking_polylines(length_m: float, width_m: float, *, arc_points: int 
         arc = np.linspace(start, start + np.pi / 2, 16)
         lines.append(np.column_stack([corner_x + np.cos(arc), corner_y + np.sin(arc)]))
     return lines
+
+
+def overlay_homographies(
+    calibration: PitchCalibration,
+    q: np.ndarray,
+    focal: np.ndarray,
+    length_m: float,
+    width_m: float,
+    frame_count: int,
+    samples: int = 240,
+) -> list[dict]:
+    """Pitch->pixel homographies sampled along the chain, for the browser to project the overlay itself.
+
+    The whole-frame viewport is scrubbed and played *in the browser*, so Python never sees most of the frames the
+    overlay has to be drawn on. Instead Python samples the corrected chain at ``samples`` frames and, for each,
+    fits the homography that maps pitch metres to frame-normalised pixels through the calibration at that moment.
+    The browser picks the two samples bracketing the frame it is showing and interpolates the coefficients - the
+    chain is smooth on this spacing, so the interpolation error is far below a pixel.
+
+    Each entry is ``{"frame": int, "h": [9 floats]}`` with ``h`` row-major, mapping ``(x_m, y_m, 1)`` to
+    ``(u, v, 1)`` in frame-normalised pixels (u by width, v by width - the convention everywhere here).
+    """
+    if frame_count <= 0 or len(q) == 0:
+        return []
+    # The chain is the authority on how far the overlay can reach: a segment shorter than the timeline (or a
+    # still-frame fallback) must not be indexed past its end.
+    limit = min(frame_count, len(q))
+    frames = np.unique(np.linspace(0, limit - 1, min(samples, limit)).round().astype(int))
+    # The markings are the same for every sample; only the projection changes.
+    points = np.concatenate(pitch_marking_polylines(length_m, width_m), axis=0)
+    out: list[dict] = []
+    for frame in frames:
+        q_frame, focal_frame = calibration.corrected_frame(q[frame], float(focal[frame]), int(frame))
+        uv, in_front = pitch_to_pixels(calibration, points, q_frame, focal_frame)
+        visible = in_front & np.isfinite(uv).all(axis=1)
+        # A camera at midfield never has the whole pitch in front of it, so the fit uses the visible markings -
+        # the ground-plane projection is a homography, so fitting on any four-plus of them recovers the same H,
+        # which then maps the rest of the plane too.
+        if visible.sum() < 4:
+            continue
+        seen, projected = points[visible], uv[visible]
+        # Solve seen -> projected exactly: 2N equations for the 8 unknowns of H (h33 fixed at 1).
+        ones = np.ones((len(seen), 1))
+        xy1 = np.hstack([seen, ones])
+        a = np.zeros((2 * len(seen), 8))
+        b = np.empty(2 * len(seen))
+        a[0::2, 0:3] = xy1
+        a[0::2, 6:8] = -seen * projected[:, 0, None]
+        a[1::2, 3:6] = xy1
+        a[1::2, 6:8] = -seen * projected[:, 1, None]
+        b[0::2] = projected[:, 0]
+        b[1::2] = projected[:, 1]
+        h, *_ = np.linalg.lstsq(a, b, rcond=None)
+        # Row-major [h11..h32, h33=1], so reshaping to 3x3 puts the fixed scale last.
+        out.append({"frame": int(frame), "h": [*map(float, h), 1.0]})
+    return out
 
 
 def pitch_overlay(

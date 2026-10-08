@@ -89,7 +89,26 @@ LOW_GAIN_BAND_HZ = (150.0, 1500.0)
 LOW_GAIN_SPAN_S = 0.10  # the grace around the blast that still counts as the blast
 LOW_GAIN_CONTEXT_S = 1.0
 
-EVENT_TYPES = ("goal", "shot", "save", "block", "corner", "foul", "substitution", "other")
+# The event vocabulary. The first group is what the audio and the ball scan can now infer (see
+# ``analysis.event_detection``); the rest stay human calls. ``penalty`` is the award, ``goal`` the outcome - a
+# converted penalty is both, and they are tagged separately because they are different things to watch.
+EVENT_TYPES = (
+    "goal",
+    "shot",
+    "save",
+    "block",
+    "corner",
+    "penalty",
+    "clearance",
+    "tackle",
+    "foul",
+    "substitution",
+    "other",
+)
+
+# Which events the ball scan and the player tracks can put on the timeline by themselves. Everything else is a
+# human's call, and the report says so rather than inventing it.
+DETECTED_EVENT_TYPES = ("goal", "shot", "corner", "penalty", "clearance", "tackle")
 
 # What a human has decided about a detected candidate. "" means nobody has looked at it yet, which is why it is
 # the default: a review queue that starts out "reviewed" is not a review queue.
@@ -120,6 +139,12 @@ class Event:
 
     ``verdict`` is the human's review of a detected candidate: ``""`` (not looked at yet), ``VERDICT_TRUE`` or
     ``VERDICT_FALSE``.
+
+    ``player_track`` and ``player_number`` name the player the event is attributed to, when one can be. The track id
+    is the pipeline's own identity (stable within a match, meaningless across matches); the number is the shirt
+    number the roster or the OCR scan gave that track, and is ``None`` when the track has no number. Both are
+    optional because a detected event often has no single player to name - a goal off a deflection, a clearance
+    nobody was near - and a guess would be worse than an honest blank.
     """
 
     time_s: float
@@ -130,6 +155,8 @@ class Event:
     confidence: float = 1.0
     video: str = ""
     verdict: str = ""
+    player_track: int | None = None
+    player_number: int | None = None
 
     def to_json(self) -> dict:
         return {
@@ -141,6 +168,8 @@ class Event:
             "confidence": round(float(self.confidence), 3),
             "video": self.video,
             "verdict": self.verdict,
+            "player_track": None if self.player_track is None else int(self.player_track),
+            "player_number": None if self.player_number is None else int(self.player_number),
         }
 
     @classmethod
@@ -154,6 +183,8 @@ class Event:
             confidence=float(data.get("confidence", 1.0)),
             video=str(data.get("video", "")),
             verdict=str(data.get("verdict", "")),
+            player_track=None if data.get("player_track") is None else int(data["player_track"]),
+            player_number=None if data.get("player_number") is None else int(data["player_number"]),
         )
 
 
@@ -437,7 +468,13 @@ class EventLog:
         self.events = kept
         return removed
 
-    def reconcile_detected(self, events: Iterable[Event], *, within_s: float = DUPLICATE_WINDOW_S) -> tuple[int, int]:
+    def reconcile_detected(
+        self,
+        events: Iterable[Event],
+        *,
+        within_s: float = DUPLICATE_WINDOW_S,
+        source: str | None = None,
+    ) -> tuple[int, int]:
         """Bring the auto-detected rows in line with a fresh scan; returns ``(added, dropped)``.
 
         A re-scan used to only ever *add*: rows the detector no longer reports stayed in the list for ever, so
@@ -445,6 +482,11 @@ class EventLog:
         candidate is anywhere near is dropped - unless a human *confirmed* it, because that verdict is data rather
         than a detector output, and losing it on a re-scan would make reviewing pointless. Manual tags are never
         touched. Rows that are still detected keep their time, note and verdict.
+
+        ``source`` limits the sweep to one detector's own rows. The whistle scan and the ball detectors write into
+        the same queue, so re-running one of them must not delete the other's candidates. It also has to delete its
+        *own* rows when their times have moved, which is exactly what a corrected time base does - otherwise the
+        old rows survive alongside the new ones and the queue shows every event twice.
         """
         fresh = list(events)
         added = self.add_detected(fresh, within_s=within_s)
@@ -452,6 +494,9 @@ class EventLog:
         dropped = 0
         for event in self.events:
             if event.source == "manual" or event.verdict == VERDICT_TRUE:
+                kept.append(event)
+                continue
+            if source is not None and event.source != source:
                 kept.append(event)
                 continue
             if any(abs(event.time_s - candidate.time_s) < within_s for candidate in fresh):

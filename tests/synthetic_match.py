@@ -198,6 +198,7 @@ def simulate_match(
         det_box=np.asarray(det_box, dtype=np.float32).reshape(n_det, 4),
         det_conf=np.asarray(det_conf, dtype=np.float32),
         det_kit=np.asarray(det_kit, dtype=np.float32).reshape(n_det, DESCRIPTOR_SIZE),
+        det_track=np.full(n_det, -1, dtype=np.int32),
     )
     detected = np.zeros((frames, p), dtype=bool)
     detected[np.asarray(det_frame, dtype=int), np.asarray(det_person, dtype=int)] = True
