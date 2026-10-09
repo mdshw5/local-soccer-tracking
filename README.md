@@ -90,8 +90,9 @@ The dashboard walks through four steps in order, and every step stores its resul
    does the same and then everything else in the background: the ball scan, the whistle scan and the shirt-number
    scan, the event detectors over what they find, and a final report + replay rebuild - one press for a full report.
    Every stage skips or resumes finished work, so a long ball scan can be left running.
-4. **Watch, tag and cut highlights.** Tag buttons sit under the pitch and the footage (Goal, Shot, Save, Tackle,
-   Foul, Corner, Penalty, Block, Clearance, Substitution, Other, with a team picker and an optional note): a press
+4. **Watch, tag and cut highlights.** Tag buttons stack under the pitch animation, filling the space its column
+   leaves (Goal, Shot, Save, Tackle, Foul, Corner, Penalty, Block, Clearance, Substitution, Other, with a team
+   picker and an optional note): a press
    stamps the event on the playback's own second, so tagging happens while the moment is on screen. Whistles are
    detected in the audio track and offered as candidates; goals, shots, corners, penalties, clearances and tackles
    are inferred from the ball scan and the player tracks (*Detect events*, or the one-press build above); saves and
@@ -141,7 +142,9 @@ The dashboard walks through four steps in order, and every step stores its resul
    in step with it: a still of the exact second while the animation is paused - so scrubbing the animation scrubs
    the footage - and a live stream opened at that second and speed while it plays (H.264 with sound where the
    browser can play it; the MJPEG stream, without sound, in Safari and other WebKit browsers, whose media stack
-   will not play an endless fragmented MP4). Above it, **Footage moment to
+   will not play an endless fragmented MP4). The footage holds the larger half of the row, and a play press waits
+   for the stream's first frame before the animation runs - the encoder's start-up is not baked in as a lag - with
+   a cap for a stream that never starts. Above it, **Footage moment to
    jump to** lists the same tagged and detected events as the strip; picking one and pressing *Jump to this moment*
    moves the animation there and starts both together, so the events are how a review picks its start times. The
    pane needs the stream server (`scripts/run_match_stream.py`); the page says so - and offers to start it - when

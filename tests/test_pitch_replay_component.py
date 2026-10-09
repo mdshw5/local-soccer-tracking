@@ -188,16 +188,46 @@ def test_the_legend_is_redrawn_when_events_arrive_without_a_reload() -> None:
 
 def test_the_pitch_and_the_footage_stream_sit_side_by_side() -> None:
     """The footage is the annotated match stream beside the animation; the pitch is the whole window. They are
-    read together, so they share a row - evenly split, since neither view is the other's annex - and the pitch
-    has to size itself from its own pane, not the page, or it would overflow the row."""
+    read together, and the footage gets the larger half - the video is the match itself, read at a glance, while
+    the pitch tolerates the narrower column - with the tag bar stacked under the animation, in the space the
+    shorter pitch column leaves. The pitch sizes itself from its own pane, not the page."""
     html = COMPONENT.read_text()
     assert 'id="panes"' in html, "the two views must be laid out as panes"
     assert 'id="pitch-pane"' in html and 'id="footage-pane"' in html
     assert 'id="footage"' in html and "<img" in html, "only an <img> element plays an MJPEG stream"
     pitch_css = html.split("#pitch-pane {", 1)[1].split("}", 1)[0]
     footage_css = html.split("#footage-pane {", 1)[1].split("}", 1)[0]
-    assert "flex: 1 1 50%" in pitch_css and "flex: 1 1 50%" in footage_css, "equal halves of the row"
+    assert "flex: 1 1 45%" in pitch_css and "flex: 1 1 55%" in footage_css, "the footage gets the larger half"
+    assert html.index('id="pitch-pane"') < html.index('id="tag-bar"') < html.index('id="footage-pane"'), (
+        "the tag bar is stacked under the animation, not beside it"
+    )
     assert "pitchPane.clientWidth" in html, "the pitch must measure its own pane, not the page"
+
+
+def test_playback_holds_until_the_streams_first_frame_but_never_forever() -> None:
+    """The encoder takes a second or two to start; letting the animation run through it would put the two clocks
+    out of step from the first second. A play press therefore holds the animation (freezing a run in progress,
+    e.g. a seek) until the stream's first frame is up - loadeddata for the video, the <img> load in MJPEG mode -
+    and the hold is capped, so a stream that never starts cannot wedge playback; giving up releases it too."""
+    html = COMPONENT.read_text()
+    assert "FOOTAGE_PRIME_TIMEOUT_S" in html
+    play = html.split("function setPlaying", 1)[1].split("function beginTicking", 1)[0]
+    assert "state.playbackPending = footageEnabled() && state.footageSync && !state.footageError" in play
+    assert "cancelAnimationFrame(state.raf)" in play, "a seek while playing freezes until the stream catches up"
+    assert "beginTicking()" in play and "setTimeout(releasePlayback" in play, "the cap never lets the hold wedge"
+    begin = html.split("function beginTicking", 1)[1].split("function releasePlayback", 1)[0]
+    assert "requestAnimationFrame(tick)" in begin and "lastTimestamp = 0" in begin
+    release = html.split("function releasePlayback", 1)[1].split("\n      function ", 1)[0]
+    assert "state.playbackPending = false" in release and "beginTicking()" in release
+    assert "!state.playbackPending || !state.playing" in release, "a pause while waiting cancels the release"
+    loaded = html.split("footageVideo.addEventListener('loadeddata'", 1)[1]
+    assert "releasePlayback()" in loaded, "the video's first frame releases the hold"
+    load = html.split("function onFootageLoad", 1)[1].split("\n      function ", 1)[0]
+    assert "state.footageMode === 'mjpeg' && state.footageKind === 'stream'" in load
+    assert "releasePlayback()" in load, "the MJPEG stream's first frame releases the same hold"
+    error_handler = html.split("function onFootageError", 1)[1].split("function onFootageLoad", 1)[0]
+    assert "releasePlayback()" in error_handler, "giving up on the stream must not hold playback forever"
+    assert "Starting the footage stream" in html, "the pane says why nothing is moving yet"
 
 
 def test_the_footage_follows_the_animation_clock() -> None:

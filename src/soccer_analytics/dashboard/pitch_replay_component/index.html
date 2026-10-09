@@ -72,14 +72,17 @@
         gap: 10px;
         align-items: flex-start;
       }
-      /* The two views are read side by side, so they split the row evenly: the pitch is a little taller from its
-         own aspect, the footage a fixed 16:9 pane - near enough the same size that neither reads as the annex. */
+      /* Side by side, with the footage the larger half: the video is the match itself and is read at a glance,
+         while the pitch drawing tolerates the narrower column. The tag bar stacks under the animation, in the
+         space the pitch column's shorter height leaves (see #tag-bar). */
       #pitch-pane {
-        flex: 1 1 50%;
+        flex: 1 1 45%;
         min-width: 300px;
+        display: flex;
+        flex-direction: column;
       }
       #footage-pane {
-        flex: 1 1 50%;
+        flex: 1 1 55%;
         min-width: 260px;
       }
       #stage {
@@ -176,8 +179,9 @@
         color: #9ca3af;
         font-size: 14px;
       }
-      /* The tag bar sits directly under the pitch and the footage: a tag is stamped with the playback's own second
-         at the moment the button is pressed, so tagging while watching cannot land on the wrong moment. */
+      /* The tag bar sits under the pitch animation, filling the space its shorter column leaves: a tag is stamped
+         with the playback's own second at the moment the button is pressed, so tagging while watching cannot land
+         on the wrong moment. */
       #tag-bar {
         display: flex;
         flex-wrap: wrap;
@@ -269,6 +273,17 @@
     <div id="panes">
       <div id="pitch-pane">
         <div id="stage"><canvas id="canvas"></canvas></div>
+        <!-- Quick tags: the buttons stamp the event on the second being watched, so a goal, shot, tackle or
+             anything else is tagged while it is on screen rather than remembered and typed in later. The tag goes
+             to Python (which stores it in the match's event log); the strip draws it faded until the store is
+             confirmed. Stacked here, under the animation, where the pitch column's shorter height leaves room. -->
+        <div id="tag-bar">
+          <span class="tag-title">tag this moment:</span>
+          <select id="tag-team" title="Which team the event belongs to"></select>
+          <span id="tag-buttons"></span>
+          <input id="tag-note" type="text" placeholder="note (optional)" maxlength="200" />
+          <span id="tag-status"></span>
+        </div>
       </div>
       <div id="footage-pane">
         <video id="footage-video" muted playsinline style="display: none"></video>
@@ -280,16 +295,6 @@
         </div>
         <div id="footage-note"></div>
       </div>
-    </div>
-    <!-- Quick tags: the buttons stamp the event on the second being watched, so a goal, shot, tackle or anything
-         else is tagged while it is on screen rather than remembered and typed in later. The tag goes to Python
-         (which stores it in the match's event log); the strip draws it faded until the store is confirmed. -->
-    <div id="tag-bar">
-      <span class="tag-title">tag this moment:</span>
-      <select id="tag-team" title="Which team the event belongs to"></select>
-      <span id="tag-buttons"></span>
-      <input id="tag-note" type="text" placeholder="note (optional)" maxlength="200" />
-      <span id="tag-status"></span>
     </div>
     <div id="timeline" title="Click to jump to that moment">
       <canvas id="tl"></canvas>
@@ -419,6 +424,8 @@
         footageOpenStrip: 0, // strip second the current stream was opened at (its own timeline's zero)
         footageRate: 1, // the content speed baked into the current stream's timestamps
         footageAwaitingFirstFrame: false, // a stream was asked for; its clock starts when frame one arrives
+        playbackPending: false, // play pressed: the animation holds until the stream's first frame (or the cap)
+        footagePrimeTimer: null, // the cap on that hold
         footageLastRestartAt: 0,
         footageStillTimer: null,
         seekSeq: 0, // the last seek request acted on (from Python's moment buttons)
@@ -1151,14 +1158,50 @@
       function setPlaying(playing) {
         state.playing = playing;
         playBtn.innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
+        clearTimeout(state.footagePrimeTimer);
+        state.footagePrimeTimer = null;
         if (playing) {
-          lastTimestamp = 0;
-          state.raf = requestAnimationFrame(tick);
-        } else if (state.raf) {
-          cancelAnimationFrame(state.raf);
-          state.raf = null;
+          // Hold the animation until the footage's first frame is actually up. The encoder needs a second or two
+          // to start; letting the animation run through that start-up would leave the two out of step from the
+          // first second (and the drift check would then fix it with a visible restart). With nothing to wait
+          // for - footage not configured, sync off, or already failed - playback begins at once, and the cap
+          // releases the hold even if the stream never starts, so it can wedge neither.
+          state.playbackPending = footageEnabled() && state.footageSync && !state.footageError;
+          if (state.playbackPending) {
+            if (state.raf) {
+              cancelAnimationFrame(state.raf); // a seek made mid-run freezes until the new stream's first frame
+              state.raf = null;
+            }
+            state.footagePrimeTimer = setTimeout(releasePlayback, FOOTAGE_PRIME_TIMEOUT_S * 1000);
+          } else {
+            beginTicking();
+          }
+        } else {
+          state.playbackPending = false;
+          if (state.raf) {
+            cancelAnimationFrame(state.raf);
+            state.raf = null;
+          }
         }
         syncFootage();
+        showFootage();
+      }
+
+      function beginTicking() {
+        if (!state.playing || state.raf) return;
+        lastTimestamp = 0;
+        state.raf = requestAnimationFrame(tick);
+      }
+
+      function releasePlayback() {
+        // The stream is up (or the wait is over): the animation starts now, on the second the first frame was
+        // anchored to, so both clocks begin together.
+        clearTimeout(state.footagePrimeTimer);
+        state.footagePrimeTimer = null;
+        if (!state.playbackPending || !state.playing) return;
+        state.playbackPending = false;
+        beginTicking();
+        showFootage();
       }
 
       // ---------------------------------------------------------------------------------------------------
@@ -1181,7 +1224,10 @@
       //   stream that falls behind, or is simply out of step, is restarted at the animation's second once the
       //   gap passes a tolerance rather than left drifting away from the pitch beside it;
       // * in the fallback mode there is no clock to read (an <img> has none), so the MJPEG stream is opened at
-      //   the animation's second and left alone until the next seek, speed or layer change moves it.
+      //   the animation's second and left alone until the next seek, speed or layer change moves it;
+      // * a play press holds the animation until the stream's first frame is up (``loadeddata``, or the MJPEG
+      //   <img>'s load), so the encoder's start-up is not baked in as a permanent lag; the hold is capped (see
+      //   ``FOOTAGE_PRIME_TIMEOUT_S``), so a stream that never starts cannot hold playback.
       //
       // The animation's clock is the strip's (0 = first analysed frame); the stream's is the recording's, so
       // ``streamOffset`` is what makes "start at this second" mean the same on both clocks.
@@ -1198,6 +1244,9 @@
       // Video errors before the pane stops trying the encoded stream and drops to the MJPEG one. Safari never
       // gets this far (it starts on MJPEG); this is the net for any other stack that refuses /live.
       const FOOTAGE_VIDEO_FALLBACK_FAILS = 3;
+      // A play press waits this long for the footage's first frame before starting the animation anyway - long
+      // enough for the encoder's own start-up, short enough that a stream that never starts cannot hold playback.
+      const FOOTAGE_PRIME_TIMEOUT_S = 4.0;
 
       function footageEnabled() {
         return Boolean(state.footageBase && state.matchId && state.data);
@@ -1414,6 +1463,10 @@
         }
         if (state.footageRetrying) {
           footageNote.textContent = 'Footage busy on restart - retrying...';
+          return;
+        }
+        if (state.playbackPending) {
+          footageNote.textContent = 'Starting the footage stream - the animation will follow its first frame.';
           return;
         }
         if (state.footageMode === 'mjpeg') {
@@ -1679,6 +1732,7 @@
         } else {
           state.footageRetrying = false;
           state.footageError = true;
+          releasePlayback(); // the pane has given up on the stream: do not hold playback for what will not come
         }
         showFootage();
       }
@@ -1688,6 +1742,9 @@
         state.footageRetrying = false;
         if (state.footageError) {
           state.footageError = false;
+        }
+        if (state.footageMode === 'mjpeg' && state.footageKind === 'stream') {
+          releasePlayback(); // the MJPEG stream's first frame is the release the video gets from loadeddata
         }
         showFootage();
       }
@@ -1705,6 +1762,7 @@
         state.footageRetrying = false;
         state.footageError = false;
         state.footageVideoFails = 0; // a frame played: this browser can take the encoded stream
+        releasePlayback(); // the animation, if it was waiting, starts now - on the anchored second
         showFootage();
       });
       footageVideo.addEventListener('playing', renderFootageVisibility);
