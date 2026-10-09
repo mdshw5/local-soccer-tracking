@@ -1368,7 +1368,7 @@ def identity_section(
         frame = frame[
             ["player", "team", "appearances", "first", "last", "seen_s", "grouped_by", "tracks"]
         ].rename(columns={"seen_s": "seen (s)", "grouped_by": "grouped by"})
-        st.dataframe(frame, hide_index=True, use_container_width=True)
+        st.dataframe(frame, hide_index=True, width="stretch")
 
         by_id = {identity.identity_id: identity for identity in identities}
         choice = st.selectbox(
@@ -1415,7 +1415,7 @@ def identity_section(
                 if thumbnail is None:
                     st.warning("Could not cut a still of this appearance - the footage may not be available.")
                 else:
-                    st.image(str(thumbnail), caption=f"track {chosen.track_id}", use_container_width=True)
+                    st.image(str(thumbnail), caption=f"track {chosen.track_id}", width="stretch")
         # The default length is the appearance's own span, capped, and always a float (see `default_clip_length`:
         # an int default against float bounds is rejected by Streamlit and breaks the page for short appearances).
         # The key carries the appearance: each one gets its own default, so switching from a 50 s appearance to a
@@ -1666,7 +1666,7 @@ def replay_section(
     table = player_table_rows(replay, numbers)
     if only_major:
         table = table[table["seen (s)"] >= 6.0]
-    st.dataframe(table, hide_index=True, use_container_width=True)
+    st.dataframe(table, hide_index=True, width="stretch")
 
     identity_section(library, match_id, segment, replay, numbers)
 
@@ -1699,7 +1699,7 @@ def replay_section(
                 "source": st.column_config.TextColumn("source", disabled=True),
             },
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             key=f"roster_editor::{match_id}",
         )
         if st.button("Save shirt numbers", key=f"save_roster::{match_id}"):
@@ -1995,7 +1995,7 @@ def events_section(
                 direction = pair[event.team] if pair is not None and 0 <= event.team < len(pair) else None
                 aims.append(aiming_goal(direction) if event_play(event.type) == "attacking" else "")
             event_rows = [{**row, "aim": aim} for row, aim in zip(event_rows, aims)]
-        st.dataframe(pd.DataFrame(event_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(event_rows), hide_index=True, width="stretch")
         st.caption(
             f"Reviewed: {counts[VERDICT_TRUE]} true · {counts[VERDICT_FALSE]} false · "
             f"{counts['unreviewed']} still to look at."
@@ -3403,7 +3403,7 @@ are sure of.
                 }
             ),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
         if calibration.excluded:
             st.warning(
@@ -3476,7 +3476,7 @@ else:
             }
             for row in payload["teams"]
         ]
-        st.dataframe(pd.DataFrame(team_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(team_rows), hide_index=True, width="stretch")
         # The momentum curve is not drawn here any more: it is the timeline strip above the pitch, where it sits
         # on the same clock as the events and the replay. A second copy as a chart was a second thing to read.
         st.subheader("Player replay - pitch usage over time")
@@ -3490,8 +3490,8 @@ st.divider()
 st.header("Archive contents")
 rows = library.summaries()
 if rows:
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     pick = st.selectbox("Show artefacts for", [row["match_id"] for row in rows])
-    st.dataframe(pd.DataFrame(library.artifacts(pick)), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(library.artifacts(pick)), hide_index=True, width="stretch")
 else:
     st.info("No matches archived yet.")
