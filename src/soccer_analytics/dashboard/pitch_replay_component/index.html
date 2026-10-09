@@ -246,19 +246,19 @@
       </select>
       <label class="toggle"><input id="loop" type="checkbox" /> loop</label>
       <label class="toggle"><input id="trails" type="checkbox" checked /> trails</label>
-      <label class="toggle"><input id="labels" type="checkbox" checked /> shirts</label>
       <label class="toggle" title="Keep the footage on the same second of the match as the animation"
         ><input id="sync" type="checkbox" checked /> sync footage</label>
       <label class="toggle" title="Match audio (the footage starts muted: browsers block sound until asked)"
         ><input id="sound" type="checkbox" /> sound</label>
-      <span class="group" title="What the annotated footage draws - the pitch markers above are unaffected">
+      <span class="group" title="What the annotated footage draws - the pitch markers above are unaffected except that debug also names their tracks">
         <span class="group-title">footage:</span>
         <label class="toggle"><input id="ov-pitch" type="checkbox" checked /> lines</label>
         <label class="toggle"><input id="ov-boxes" type="checkbox" checked /> boxes</label>
         <label class="toggle"><input id="ov-numbers" type="checkbox" checked /> numbers</label>
         <label class="toggle"><input id="ov-ball" type="checkbox" checked /> ball</label>
         <label class="toggle"><input id="ov-hud" type="checkbox" checked /> clock</label>
-        <label class="toggle" title="Session name, frame counter, track ids and the notes about what was left out"
+        <label class="toggle"
+          title="Session name, frame counter, track ids (on the footage and the pitch markers above) and the notes about what was left out"
           ><input id="ov-debug" type="checkbox" checked /> debug</label>
       </span>
       <label class="toggle"
@@ -389,7 +389,6 @@
         speed: 1,
         loop: false,
         trails: true,
-        labels: true,
         heat: 'off',
         selected: null,
         heatCanvas: null,
@@ -410,7 +409,8 @@
         // Which layers the footage draws. They are named after the stream server's own overlay names (the query
         // parameter calls them pitch/boxes/numbers/ball/hud/debug); the labels above use the words a person
         // would. "hud" is the watching set (teams, clock), "debug" the diagnosing set (session name, frame
-        // counter, track ids, notes).
+        // counter, track ids, notes). Debug is also the one layer the pitch reads: the markers' #track_id labels
+        // are the tracker's own keys - debug information on the stream as well - so they come and go with it.
         footageOverlays: {pitch: true, boxes: true, numbers: true, ball: true, hud: true, debug: true},
         footageKind: '', // what the pane currently shows: '' | 'still' | 'stream'
         // Which transport the pane plays: 'video' is the encoded /live stream (full rate, audio, a measurable
@@ -497,11 +497,13 @@
       }
       function textFor(player) {
         const entry = state.numbers[player.track_id];
-        if (entry && entry.number) return String(entry.number);
+        if (entry && entry.number) return String(entry.number); // a number read off a shirt is a detection, not debug
         // Only label substantial tracks with their id: on real footage the camera loses players out of shot and
-        // they return as new tracks, so there are many short fragments - labelling all of them is noise.
+        // they return as new tracks, so there are many short fragments - labelling all of them is noise. The id
+        // is the tracker's own key - debug information, which the stream prints only under debug too - so it
+        // follows the debug toggle rather than a toggle of its own.
         const major = player.stats && player.stats.observations >= 60;
-        return state.labels && major ? '#' + player.track_id : '';
+        return state.footageOverlays.debug && major ? '#' + player.track_id : '';
       }
       function labelFor(player) {
         const entry = state.numbers[player.track_id] || {};
@@ -1729,10 +1731,6 @@
         state.trails = event.target.checked;
         draw();
       });
-      document.getElementById('labels').addEventListener('change', (event) => {
-        state.labels = event.target.checked;
-        draw();
-      });
       document.getElementById('heat').addEventListener('change', (event) => {
         state.heat = event.target.value;
         rebuildHeatIfNeeded();
@@ -1754,6 +1752,8 @@
       })) {
         document.getElementById(id).addEventListener('change', (event) => {
           state.footageOverlays[name] = event.target.checked;
+          // Debug also names the tracks on the pitch markers, so it redraws the animation as well as the pane.
+          if (name === 'debug') draw();
           // A new set of layers is a new stream (and a new still): reopen from the animation's own second, so
           // the picture changes without the two clocks parting company.
           restartFootage();

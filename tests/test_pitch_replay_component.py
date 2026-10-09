@@ -322,6 +322,23 @@ def test_the_footage_overlay_toggles_choose_the_layers() -> None:
     assert "restartFootage()" in handler, "a new layer set must reopen the footage now"
 
 
+def test_the_markers_track_ids_follow_the_debug_toggle() -> None:
+    """The ``#1234`` on a marker is the tracker's own key, not something read off a shirt: the stream prints
+    track ids only in debug, so the animation's do too - the old "shirts" toggle is gone and debug governs.
+    A *detected* number is a sighting, not debug information, so it stays on either way, exactly as the
+    stream's number chips stay when its debug layer is off.
+    """
+    html = COMPONENT.read_text()
+    assert 'id="labels"' not in html and "state.labels" not in html, "the shirts toggle must be gone"
+    text_fn = html.split("function textFor", 1)[1].split("function labelFor", 1)[0]
+    assert "state.footageOverlays.debug && major" in text_fn, "the track id must follow the debug toggle"
+    assert "entry.number) return" in text_fn, "a detected number must not be caught by the gate"
+    handler = html.split("state.footageOverlays[name] = event.target.checked;", 1)[1]
+    assert "if (name === 'debug') draw();" in handler, (
+        "toggling debug must redraw the pitch, not only reopen the footage"
+    )
+
+
 def test_a_busy_stream_server_is_retried_before_giving_up() -> None:
     """Restarting the footage can lose the race for the server's decode slot (the previous connection's slot is
     only freed when the server notices nobody is reading it): the pane retries with backoff instead of declaring
