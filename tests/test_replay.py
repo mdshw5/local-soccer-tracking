@@ -261,6 +261,68 @@ def test_the_payload_carries_the_measured_kit_colours(replay_case) -> None:
     assert clamped["team_colours"] == [[255, 0, 128], [0, 0, 0]]
 
 
+def test_role_labelled_tracks_survive_the_bystander_filter(replay_case) -> None:
+    """A keeper stands still near one goal, which trips the bystander rule - the role must win.
+
+    Measured on the real game: 15 of 28 role-labelled tracks (keepers, all slow and compact) were being dropped
+    from the payload, so the view could not colour-code people it was not drawing anyway.
+    """
+    _replay, report, segment, detections = replay_case
+    frames = np.arange(0, 300, dtype=np.int64)
+    stationary = stage_b.PlayerTrack(
+        track_id=99999,
+        team=-1,
+        frame=frames,
+        time=540.0 + frames / 5.0,
+        xy=np.tile([50.0, 10.0], (len(frames), 1)),
+        sigma_m=np.ones(len(frames)),
+        speed_kmh=np.zeros(len(frames)),
+        distance_m=0.0,
+    )
+    common = (
+        (PITCH_LENGTH, PITCH_WIDTH),
+        float(segment.meta["fps"]),
+        len(segment.time),
+        detections.aim_xy,
+        list(report.players) + [stationary],
+        ["Team A", "Team B"],
+    )
+    plain = build_replay(*common)
+    assert 99999 not in {p["track_id"] for p in plain["players"]}, "a stationary track must trip the bystander rule"
+
+    with_roles = build_replay(*common, roles={99999: {"role": "goalkeeper", "side": "left"}})
+    entry = next(p for p in with_roles["players"] if p["track_id"] == 99999)
+    assert entry["role"] == {"role": "goalkeeper", "side": "left"}
+    assert with_roles["bystanders_excluded"] == plain["bystanders_excluded"] - 1
+
+
+def test_the_payload_carries_attack_directions(replay_case) -> None:
+    replay, report, segment, detections = replay_case
+    common = (
+        (PITCH_LENGTH, PITCH_WIDTH),
+        float(segment.meta["fps"]),
+        len(segment.time),
+        detections.aim_xy,
+        report.players,
+        ["Team A", "Team B"],
+    )
+    rebuilt = build_replay(*common, attack={"half_frame": 7, "directions": [[1, -1], [-1, 1]]})
+    assert rebuilt["attack"] == {"half_frame": 7, "directions": [[1, -1], [-1, 1]]}
+    assert replay["attack"] is None, "a replay built without directions must not invent them"
+
+
+def test_attack_summary_pairs_directions_per_period() -> None:
+    from soccer_analytics.analysis.event_detection import HalfOrientation
+    from soccer_analytics.dashboard.replay import attack_summary
+
+    orientations = [
+        HalfOrientation(1, {0: "left", 1: "right"}, {0: 1, 1: -1}, {0: 44.7, 1: 51.5}),
+        HalfOrientation(2, {0: "right", 1: "left"}, {0: -1, 1: 1}, {0: 57.3, 1: 56.0}),
+    ]
+    assert attack_summary(orientations, half_frame=10937) == {"half_frame": 10937, "directions": [[1, -1], [-1, 1]]}
+    assert attack_summary([], half_frame=None) is None
+
+
 def test_the_touch_proxy_is_bounded_by_frames_with_an_aim(replay_case) -> None:
     replay, _, _, _ = replay_case
     touches = sum(player["stats"]["touches"] for player in replay["players"])

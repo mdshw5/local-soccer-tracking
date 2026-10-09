@@ -188,6 +188,9 @@ class TeamStyle:
 FALLBACK_BGR = ((60, 60, 230), (230, 130, 60))
 OTHER_BGR = (150, 150, 150)
 FORECAST_BGR = (0, 200, 255)  # amber: "this position is the scan's forecast across a miss"
+# Roles are colour-coded rather than spelled into the chips (the user's call), matching the pane's ring
+# colours so the two views name the same person the same way. BGR order, unlike the pane's hex.
+ROLE_BGR = {"referee": (247, 85, 168), "goalkeeper": (11, 158, 245)}  # #a855f7, #f59e0b
 PITCH_BGR = (0, 200, 255)
 INK = (30, 30, 30)
 PAPER = (245, 245, 245)
@@ -393,6 +396,11 @@ class AnnotatedMatch:
         boxes = {int(track): np.asarray(array, dtype=np.float64) for track, array in boxes.items()}
         self._players = players
         self.boxed_tracks: set[int] = set()
+        # The payload's role labels (referee/goalkeeper), if the build had them; boxes for these tracks draw in
+        # their role colour instead of the team colour, so a viewer can tell the officials from the sides.
+        self.roles: dict[int, str] = {
+            int(player["track_id"]): str(player["role"]) for player in players if player.get("role")
+        }
         players_by_frame: list[list[tuple]] = [[] for _ in range(self.frame_count)]
         for player in players:
             track_id, team = int(player["track_id"]), int(player["team"])
@@ -730,7 +738,13 @@ class AnnotatedMatch:
         for x1, y1, x2, y2, track_id, team in (self.players_by_frame[index] if players is None else players):
             left, top = int(x1 * width), int(y1 * width)
             right, bottom = int(x2 * width), int(y2 * width)
-            colour = self.teams[team].bgr if 0 <= team < len(self.teams) else OTHER_BGR
+            role = self.roles.get(track_id)
+            if role in ROLE_BGR:
+                colour = ROLE_BGR[role]
+            elif 0 <= team < len(self.teams):
+                colour = self.teams[team].bgr
+            else:
+                colour = OTHER_BGR
             if boxes:
                 thickness = max(2, int(round(3 * scale)))
                 cv2.rectangle(frame, (left, top), (right, bottom), INK, thickness + 2)
@@ -796,6 +810,14 @@ class AnnotatedMatch:
         for team, style in enumerate(self.teams):
             cv2.rectangle(frame, (pad, y - int(13 * scale)), (pad + int(18 * scale), y + int(2 * scale)), style.bgr, -1)
             _outline_text(frame, style.name, (pad + int(26 * scale), y), PAPER, font)
+            y += int(21 * scale)
+        # A role colour nobody can name is decoration: the key is drawn only when such a box is on screen.
+        for role in ("goalkeeper", "referee"):
+            if role not in self.roles.values():
+                continue
+            cv2.rectangle(frame, (pad, y - int(13 * scale)), (pad + int(18 * scale), y + int(2 * scale)),
+                          ROLE_BGR[role], -1)
+            _outline_text(frame, role, (pad + int(26 * scale), y), PAPER, font)
             y += int(21 * scale)
 
         # ``source_time`` is the recording's clock, whose zero is the start of the recording; subtracting

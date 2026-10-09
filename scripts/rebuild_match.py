@@ -37,7 +37,7 @@ from soccer_analytics.analysis import stage_b
 from soccer_analytics.analysis.library import MatchLibrary
 from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
 from soccer_analytics.analysis.stage_a import load_segment
-from soccer_analytics.dashboard.replay import build_replay, track_boxes, track_boxes
+from soccer_analytics.dashboard.replay import build_replay, roles_and_attack, track_boxes, track_boxes
 
 BALL_TRACK_FILE = "ball_track.json"
 
@@ -79,7 +79,7 @@ def main() -> int:
     detections = project_segment(segment, calibration, poses=(q, focal))
     print(f"projected {len(detections.frame)} detections ({time.time() - started:.0f}s)", flush=True)
 
-    report, _assignment = stage_b.build_report(
+    report, assignment = stage_b.build_report(
         detections,
         pitch_length_m=record.pitch_length_m,
         pitch_width_m=record.pitch_width_m,
@@ -87,6 +87,9 @@ def main() -> int:
     )
     print(f"tracked {len(report.players)} players ({time.time() - started:.0f}s)", flush=True)
 
+    roles, attack = roles_and_attack(
+        report, detections, assignment, segment=segment, pitch_length_m=record.pitch_length_m
+    )
     replay = build_replay(
         (record.pitch_length_m, record.pitch_width_m),
         float(segment.meta["fps"]),
@@ -97,6 +100,8 @@ def main() -> int:
         ball=_ball_for_replay(segment_dir, calibration, q, focal),
         team_colours=[metrics.kit_rgb for metrics in report.teams],
         camera_xy=detections.camera_xy,
+        roles=roles,
+        attack=attack,
     )
     boxes = track_boxes(report.players)
     boxed = len(boxes)

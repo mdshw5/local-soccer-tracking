@@ -107,6 +107,7 @@ from soccer_analytics.dashboard.replay import (
     event_from_tag,
     player_table_rows,
     repeated_manual_tag,
+    roles_and_attack,
     track_boxes,
 )
 from soccer_analytics.dashboard.stream import configured_base, configured_port, is_reachable
@@ -618,7 +619,7 @@ def _build_report_and_replay(
             calibration,
             on_progress=lambda fraction: advance(0.40 * fraction, "Projecting detections to the pitch..."),
         )
-        report, _assignment = stage_b.build_report(
+        report, assignment = stage_b.build_report(
             detections,
             pitch_length_m=length_m,
             pitch_width_m=width_m,
@@ -629,6 +630,7 @@ def _build_report_and_replay(
         )
         advance(0.88, "Building the replay...")
         ball = _ball_track_for_replay(segment_dir, calibration, q, focal)
+        roles, attack = roles_and_attack(report, detections, assignment, segment=segment, pitch_length_m=length_m)
         replay = build_replay(
             (length_m, width_m),
             float(segment.meta["fps"]),
@@ -639,6 +641,8 @@ def _build_report_and_replay(
             ball=ball,
             team_colours=[metrics.kit_rgb for metrics in report.teams],
             camera_xy=detections.camera_xy,
+            roles=roles,
+            attack=attack,
         )
         advance(0.97, "Saving the report and the replay...")
         st.session_state["report"] = {

@@ -345,6 +345,10 @@
       const AIM_COLOUR = '#fde047';
       const CAMERA_COLOUR = '#38bdf8';
       const BALL_COLOUR = '#f8fafc';
+      // Role colour-coding: the referee and goalkeepers are marked with a fixed-colour ring instead of a text
+      // label. One keeper's kit on the real game read "red" in the colour descriptor while being orange to the
+      // eye, so the role rides a colour the kit maths cannot muddy; the legend names the two ring colours.
+      const ROLE_COLOURS = {referee: '#a855f7', goalkeeper: '#f59e0b'};
       const MARGIN_M = 3.5; // room around the pitch for goals and breathing space
       const TRAIL_SECONDS = 4.0;
       const HEAT_RADIUS_M = 2.6;
@@ -719,6 +723,44 @@
         return null;
       }
 
+      function drawAttackArrows(frame) {
+        // One arrow per team, drawn inside the goal mouth that team DEFENDS and pointing the way it attacks -
+        // the defended end is where a team lines up, and the arrow leaves it. The payload's ``attack`` carries
+        // one [team0, team1] direction pair per period (+1 = toward +x) and the frame the second period starts
+        // on, measured by dashboard/replay.roles_and_attack from the same orientations the event detector uses;
+        // a payload from before that existed has no ``attack`` and simply draws nothing.
+        const attack = state.data.attack;
+        if (!attack || !attack.directions || !attack.directions.length) return;
+        let period = 0;
+        if (attack.half_frame !== null && attack.half_frame !== undefined && frame >= attack.half_frame) period = 1;
+        const pair = attack.directions[Math.min(period, attack.directions.length - 1)];
+        if (!pair) return;
+        const g = geometry();
+        const pitch = state.data.pitch;
+        const y = pitch[1] / 2;
+        for (let team = 0; team < pair.length; team++) {
+          const dir = pair[team];
+          if (!dir) continue;
+          const colour = teamColour(team);
+          const start = dir > 0 ? 2.0 : pitch[0] - 2.0;
+          const end = dir > 0 ? 10.0 : pitch[0] - 10.0;
+          ctx.strokeStyle = colour;
+          ctx.fillStyle = colour;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.moveTo(g.x(start), g.y(y));
+          ctx.lineTo(g.x(end), g.y(y));
+          ctx.stroke();
+          const head = 1.9; // metres
+          ctx.beginPath();
+          ctx.moveTo(g.x(end), g.y(y));
+          ctx.lineTo(g.x(end - dir * head), g.y(y - head * 0.75));
+          ctx.lineTo(g.x(end - dir * head), g.y(y + head * 0.75));
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+
       function draw() {
         if (!state.data || !state.pitchCanvas) return;
         const dpr = window.devicePixelRatio || 1;
@@ -801,6 +843,7 @@
         }
 
         const radius = Math.max(4.0, 0.85 * g.scale);
+        drawAttackArrows(frame);
         for (const player of state.data.players) {
           const p = positionOf(player, frame, frac);
           if (!p) continue;
@@ -815,6 +858,18 @@
           ctx.lineWidth = player.track_id === state.selected ? 3 : 1.4;
           ctx.strokeStyle = player.track_id === state.selected ? '#ffffff' : 'rgba(15,23,42,0.85)';
           ctx.stroke();
+
+          // Role colour-coding (referee / goalkeeper): a fixed-colour ring around the marker, so the roles are
+          // readable without text and without trusting the kit descriptor, which the real keepers occasionally
+          // fool. The legend names both colours when the payload carries any role.
+          const roleColour = player.role ? ROLE_COLOURS[player.role.role] : null;
+          if (roleColour) {
+            ctx.beginPath();
+            ctx.arc(px, py, radius + 2.4, 0, Math.PI * 2);
+            ctx.strokeStyle = roleColour;
+            ctx.lineWidth = 2.2;
+            ctx.stroke();
+          }
 
           const text = textFor(player);
           if (text) {
@@ -1592,9 +1647,23 @@
               `<span><span class="chip" style="background:${eventColour(type)}"></span>${type}</span>`
           )
           .join('');
+        const hasRole = (roleName) => state.data.players.some((p) => p.role && p.role.role === roleName);
+        const roleChips =
+          (hasRole('referee')
+            ? `<span><span class="chip" style="background:${ROLE_COLOURS.referee}"></span>referee (ring)</span>`
+            : '') +
+          (hasRole('goalkeeper')
+            ? `<span><span class="chip" style="background:${ROLE_COLOURS.goalkeeper}"></span>goalkeeper (ring)</span>`
+            : '');
         legend.innerHTML =
           chips +
           (other ? `<span><span class="chip" style="background:${OTHER_COLOUR}"></span>other (${other})</span>` : '') +
+          roleChips +
+          (state.data.attack
+            ? `<span><span class="chip" style="background:${TEAM_COLOURS[0]}"></span>` +
+              `<span class="chip" style="background:${TEAM_COLOURS[1]}"></span>` +
+              `arrows = attacking direction (swaps at half-time)</span>`
+            : '') +
           `<span><span class="chip" style="background:${AIM_COLOUR}"></span>ball proxy (camera aim)</span>` +
           (state.data.camera
             ? `<span><span class="chip" style="background:${CAMERA_COLOUR}"></span>camera position &amp; direction</span>`

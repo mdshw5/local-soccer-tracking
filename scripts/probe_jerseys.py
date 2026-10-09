@@ -103,7 +103,7 @@ def track_mode(args: argparse.Namespace) -> int:
             print(f"t{tid}: not in the replay payload / no boxes")
             continue
         hs = (box[:, 3] - box[:, 1]) * 1920.0
-        picks = [i for i in range(len(hs)) if hs[i] >= 100.0]
+        picks = [i for i in range(len(hs)) if hs[i] >= 60.0]  # 60px is the kit-descriptor floor; colours read fine there
         picks.sort(key=lambda i: -hs[i])
         picks = picks[: max(8, args.picks * 3)]
         if len(picks) > args.picks:

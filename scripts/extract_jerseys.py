@@ -264,7 +264,11 @@ def main() -> int:
             seen_pairs: set[tuple[int, int]] = set()
             for track_id, items in refine_targets.items():
                 lookup: dict[int, int] = {}
-                for row in selected[track_id]:
+                # The track's FULL observation list, not its selected crops: the frames this phase is looking for
+                # are exactly the ones the selection did not pick (building this from `selected` skips every
+                # neighbour, because a neighbour is by definition not selected - the first shipped version of this
+                # phase found zero frames and silently did nothing).
+                for row in assignment.tracks[track_id]:
                     lookup.setdefault(int(detections.frame[row]), int(row))
                 extras = 0
                 for item in sorted(items, key=lambda candidate: -candidate.confidence):
@@ -282,8 +286,13 @@ def main() -> int:
                             break
                     if extras >= REFINE_MAX_FRAMES:
                         break
+            # Report the phase even when it collected nothing: a silent zero is indistinguishable from the phase
+            # not running at all, which is exactly how its first version hid a lookup bug.
+            print(
+                f"[jerseys] second look: {sum(len(v) for v in wanted_refine.values())} frames around {len(refine_targets)} tracks",
+                flush=True,
+            )
             if wanted_refine:
-                print(f"[jerseys] second look: {sum(len(v) for v in wanted_refine.values())} frames around {len(refine_targets)} tracks", flush=True)
                 clusters: list[list[int]] = []
                 for frame_index in sorted(wanted_refine):
                     if clusters and frame_index - clusters[-1][-1] <= 2 * REFINE_SPAN_FRAMES:

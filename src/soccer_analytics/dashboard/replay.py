@@ -17,6 +17,9 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from soccer_analytics.analysis import event_detection, stage_b
+from soccer_analytics.analysis import game as game_lib
+from soccer_analytics.analysis import roles as roles_lib
 from soccer_analytics.analysis.events import EVENT_TYPES, Event
 from soccer_analytics.analysis.stage_b import PlayerTrack
 from soccer_analytics.dashboard.reports import team_name
@@ -128,6 +131,46 @@ def _kit_colour(entry: Sequence[int] | None) -> list[int] | None:
     return [int(min(255, max(0, channel))) for channel in entry]
 
 
+def attack_summary(orientations, *, half_frame: int | None) -> dict | None:
+    """The component's attack directions: one ``[team0, team1]`` pair per period, +1 toward +x, -1 toward -x.
+
+    ``half_frame`` is the first frame of the second period in analysis frames, or None for a match without
+    marked halves (one pair then covers the whole window). The pairs come from
+    ``event_detection.team_orientations``, the same measurement the event detector uses to tell a clearance from
+    a shot - so the arrows on the animation and the event labels cannot disagree about who attacks which way.
+    """
+    if not orientations:
+        return None
+    directions = []
+    for orientation in sorted(orientations, key=lambda item: item.half):
+        pair = orientation.attack_direction
+        directions.append([int(pair[0]), int(pair[1])] if 0 in pair and 1 in pair else None)
+    return {"half_frame": None if half_frame is None else int(half_frame), "directions": directions}
+
+
+def roles_and_attack(report, detections, assignment, *, segment, pitch_length_m: float):
+    """Role labels and attack directions for the replay payload, from the tracks the report was built on.
+
+    One place so the dashboard build and ``rebuild_match.py`` cannot ship different versions of the same
+    analysis: roles come from ``analysis.roles`` (referee by range, keepers by the goal pockets) and the
+    directions from ``analysis.event_detection.team_orientations``, measured per half against the game's own
+    kick-off/half-time marks when the segment belongs to a marked game.
+    """
+    fps = float(segment.meta.get("fps", 5.0))
+    start_s = float(segment.meta.get("start_s", 0.0))
+    game_record = game_lib.find_for_video(str(segment.meta.get("video") or ""))
+    bounds = game_record.bounds() if game_record is not None else None
+
+    def kit_evidence(track_id: int):
+        rows = assignment.tracks.get(int(track_id))
+        return stage_b._track_kit_evidence(detections, rows) if rows is not None else None
+
+    roles = roles_lib.classify_roles(report.players, pitch_length_m=pitch_length_m, kit_evidence=kit_evidence)
+    orientations = event_detection.team_orientations(report.players, pitch_length_m, half_bounds=bounds)
+    half_frame = int(round((bounds[1] - start_s) * fps)) if bounds is not None else None
+    return roles, attack_summary(orientations, half_frame=half_frame)
+
+
 def build_replay(
     pitch: tuple[float, float],
     fps: float,
@@ -138,6 +181,8 @@ def build_replay(
     ball: tuple[np.ndarray, np.ndarray] | None = None,
     team_colours: Sequence[Sequence[int] | None] | None = None,
     camera_xy: Sequence[float] | None = None,
+    roles: dict[int, dict] | None = None,
+    attack: dict | None = None,
 ) -> dict:
     """Assemble the replay payload from tracks, the per-frame camera aim (ball proxy) and the ball track.
 
@@ -157,6 +202,11 @@ def build_replay(
     ``camera_xy`` is the camera's own ground position (its X/Y, ignoring height). The replay draws a line from it
     to the aim point each frame, so the direction the camera is pointing is visible on the pitch. It is ``None``
     when the caller has no calibration to give one.
+
+    ``roles`` labels the few non-team people the build could identify (``{"role": "referee"}``, or a keeper with
+    its goal ``side``), attached per track so the view can colour-code them; ``attack`` is the compact per-half
+    direction pair from :func:`attack_summary`, so the view can point each team at the goal it attacks. Both are
+    optional and absent from payloads built before this existed.
     """
     aim = [
         [_round(x), _round(y)] if np.isfinite(x) and np.isfinite(y) else None
@@ -177,8 +227,15 @@ def build_replay(
 
     # Who was on the ball each frame, by proximity to the camera's aim point (the same proxy stage_b uses).
     # Bystanders are excluded first: they are not players, and counting their proximity to the aim point
-    # would credit touches to people who cannot touch a ball.
-    field_players = [track for track in players if not _is_bystander(track)]
+    # would credit touches to people who cannot touch a ball. Role-labelled tracks are never bystanders,
+    # however still they stand: keepers hang around one goal and drift little, which trips the "small AND still"
+    # rule measured on sideline crowds - but a keeper is exactly who must be drawn (15 of 28 role tracks were
+    # being dropped from the payload before this).
+    field_players = [
+        track
+        for track in players
+        if (roles is not None and int(track.track_id) in roles) or not _is_bystander(track)
+    ]
     by_frame: dict[int, list[tuple[int, float, float]]] = {}
     for track in field_players:
         for frame, position in zip(track.frame, track.xy):
@@ -200,27 +257,28 @@ def build_replay(
     for track in sorted(field_players, key=lambda item: int(item.track_id)):
         speed = np.asarray(track.speed_kmh, dtype=np.float64)
         moving = speed[speed > 0.5]
-        out_players.append(
-            {
-                "track_id": int(track.track_id),
-                "team": int(track.team),
-                "frames": [int(f) for f in track.frame],
-                "xy": [[_round(x), _round(y)] for x, y in track.xy],
-                "speed": [_round(s) for s in speed],
-                "stats": {
-                    "observations": int(len(track.frame)),
-                    "time_s": _round(len(track.frame) / max(fps, 1e-6)),
-                    "first_t": _round(track.time[0]) if len(track.time) else 0.0,
-                    "last_t": _round(track.time[-1]) if len(track.time) else 0.0,
-                    "distance_m": _round(track.distance_m),
-                    "top_speed_kmh": _round(float(speed.max())) if len(speed) else 0.0,
-                    "mean_speed_kmh": _round(float(moving.mean())) if len(moving) else 0.0,
-                    "mean_x": _round(float(np.mean(track.xy[:, 0]))),
-                    "mean_y": _round(float(np.mean(track.xy[:, 1]))),
-                    "touches": int(touches.get(int(track.track_id), 0)),
-                },
-            }
-        )
+        entry = {
+            "track_id": int(track.track_id),
+            "team": int(track.team),
+            "frames": [int(f) for f in track.frame],
+            "xy": [[_round(x), _round(y)] for x, y in track.xy],
+            "speed": [_round(s) for s in speed],
+            "stats": {
+                "observations": int(len(track.frame)),
+                "time_s": _round(len(track.frame) / max(fps, 1e-6)),
+                "first_t": _round(track.time[0]) if len(track.time) else 0.0,
+                "last_t": _round(track.time[-1]) if len(track.time) else 0.0,
+                "distance_m": _round(track.distance_m),
+                "top_speed_kmh": _round(float(speed.max())) if len(speed) else 0.0,
+                "mean_speed_kmh": _round(float(moving.mean())) if len(moving) else 0.0,
+                "mean_x": _round(float(np.mean(track.xy[:, 0]))),
+                "mean_y": _round(float(np.mean(track.xy[:, 1]))),
+                "touches": int(touches.get(int(track.track_id), 0)),
+            },
+        }
+        if roles is not None and int(track.track_id) in roles:
+            entry["role"] = dict(roles[int(track.track_id)])
+        out_players.append(entry)
 
     return {
         "pitch": [_round(pitch[0]), _round(pitch[1])],
@@ -233,6 +291,7 @@ def build_replay(
         "camera": camera,
         "ball": ball_out,
         "players": out_players,
+        "attack": attack,
         # How many tracked people were judged bystanders (touchline coaches, photographers, spectators) and
         # left out of ``players``. The view draws the field of play only; the count keeps the exclusion honest
         # - the page can say how many tracked people are not shown rather than silently shrinking the world.

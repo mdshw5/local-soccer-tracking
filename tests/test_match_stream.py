@@ -25,6 +25,7 @@ from soccer_analytics.dashboard.stream import (
     AnnotatedMatch,
     MatchStreamServer,
     OVERLAY_NAMES,
+    ROLE_BGR,
     StreamError,
     TeamStyle,
     ball_stamps,
@@ -270,6 +271,38 @@ def test_each_player_box_lands_on_its_recorded_pixels_in_the_team_colour(stream_
     painted = np.all(frame[top : bottom + 1, left : right + 1] == expected, axis=-1)
     # The rectangle's own perimeter at this size is ~4*(w+h) pixels; the chip (same colour) can only add more.
     assert painted.sum() >= 3 * ((right - left) + (bottom - top))
+
+
+def test_officials_are_colour_coded_by_role_not_by_side(stream_case) -> None:
+    """A goalkeeper draws in the role colour wherever the team colour would have put it, and the HUD names
+    that colour only when such a player is on screen - an unnamed colour key is decoration.
+
+    The role rides the replay payload, where the pipeline classified it from goal-pocket behaviour (kit colour
+    was too noisy to trust); a payload from before roles existed draws exactly the team colours it always did.
+    """
+    _segment, _calibration, _q, _focal, replay, boxes = stream_case
+    player = next(p for p in replay["players"] if boxes.get(str(p["track_id"])) is not None)
+    x1, y1, x2, y2 = (float(v) for v in boxes[str(player["track_id"])][0])
+    index = int(player["frames"][0])
+    left, right = sorted((round(x1 * 640), round(x2 * 640)))
+    top, bottom = sorted((round(y1 * 640), round(y2 * 640)))
+    keeper = dict(player, role="goalkeeper")
+    match = _annotated(stream_case, players=[keeper])
+    assert match.roles == {int(player["track_id"]): "goalkeeper"}, "the payload's role is what is read"
+    role_bgr = tuple(int(v) for v in ROLE_BGR["goalkeeper"])
+
+    frame = np.full((360, 640, 3), 60, dtype=np.uint8)
+    match.render(frame, index, pitch=False, boxes=True, numbers=False, ball=False, hud=False, debug=False)
+    assert tuple(int(v) for v in frame[(top + bottom) // 2, left]) == role_bgr, "the box wears the role colour"
+
+    keyed = np.full((360, 640, 3), 60, dtype=np.uint8)
+    match.render(keyed, index, pitch=False, boxes=False, numbers=False, ball=False, hud=True, debug=False)
+    assert np.count_nonzero(np.all(keyed == np.array(role_bgr), axis=-1)) > 0, "the HUD keys the colour"
+
+    plain = _annotated(stream_case, players=[player])
+    bare = np.full((360, 640, 3), 60, dtype=np.uint8)
+    plain.render(bare, index, pitch=False, boxes=True, numbers=False, ball=False, hud=True, debug=False)
+    assert np.count_nonzero(np.all(bare == np.array(role_bgr), axis=-1)) == 0, "no role in the payload: none drawn"
 
 
 def test_the_box_and_number_layers_switch_independently(stream_case) -> None:

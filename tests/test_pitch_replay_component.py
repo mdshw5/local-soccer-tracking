@@ -116,6 +116,28 @@ def test_the_camera_direction_line_is_drawn_from_the_camera_position() -> None:
     assert "cam[0] - MARGIN_M" in html and "cam[1] - MARGIN_M" in html
 
 
+def test_roles_are_colour_coded_and_named_in_the_legend() -> None:
+    """Referee and goalkeepers wear fixed-colour rings; the legend names the colours, not the markers.
+
+    The kit descriptor is not trusted for this: measured on the real game one keeper's kit read "red" while
+    being orange to the eye. Role identity rides the payload's ``role`` field and a colour the maths cannot
+    muddy - and the user asked for colour coding, not text labels.
+    """
+    html = COMPONENT.read_text()
+    assert "ROLE_COLOURS" in html and "referee:" in html and "goalkeeper:" in html
+    assert "player.role" in html, "the marker ring must read the role the payload carries"
+    assert "referee (ring)" in html and "goalkeeper (ring)" in html, "the legend must name the ring colours"
+
+
+def test_attack_arrows_carry_each_teams_direction_and_swap_at_half_time() -> None:
+    """The arrows point the way each team attacks, drawn at the goal it defends, and swap on the payload's
+    second-period frame; a payload from before directions existed simply draws nothing."""
+    html = COMPONENT.read_text()
+    assert "function drawAttackArrows(" in html and "drawAttackArrows(frame)" in html
+    assert "attack.directions" in html and "attack.half_frame" in html
+    assert "attacking direction" in html, "the legend must say what the arrows mean"
+
+
 def test_the_timeline_strip_draws_momentum_and_events() -> None:
     """The strip above the pitch combines the momentum curve with the event markers, and seeks on click.
 
