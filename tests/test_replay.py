@@ -11,7 +11,14 @@ import pytest
 
 from soccer_analytics.analysis import stage_b
 from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
-from soccer_analytics.dashboard.replay import build_replay, event_from_tag, player_table_rows, repeated_manual_tag
+from soccer_analytics.dashboard.replay import (
+    aiming_goal,
+    build_replay,
+    event_from_tag,
+    event_play,
+    player_table_rows,
+    repeated_manual_tag,
+)
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration, pitch_to_pixels
 from synthetic_match import PITCH_LENGTH, PITCH_WIDTH, simulate_match
 
@@ -321,6 +328,24 @@ def test_attack_summary_pairs_directions_per_period() -> None:
     ]
     assert attack_summary(orientations, half_frame=10937) == {"half_frame": 10937, "directions": [[1, -1], [-1, 1]]}
     assert attack_summary([], half_frame=None) is None
+
+
+def test_an_events_play_is_its_types_meaning_not_a_guess() -> None:
+    """A clearance is a defensive act wherever it is played from, a shot is an attack - and the types that can
+    sit on either side of the story (a foul, a substitution) stay blank rather than being forced onto one."""
+    assert event_play("goal") == "attacking" and event_play("shot") == "attacking"
+    assert event_play("corner") == "attacking" and event_play("penalty") == "attacking"
+    assert event_play("clearance") == "defensive" and event_play("tackle") == "defensive"
+    assert event_play("save") == "defensive" and event_play("block") == "defensive"
+    assert event_play("foul") == "" and event_play("substitution") == "" and event_play("other") == ""
+
+
+def test_the_aim_names_the_goal_mouth_in_the_animations_own_frame() -> None:
+    """Direction +1 is toward +x, which the pane draws on the right - the same frame the arrows use - and a
+    half the payload has no direction for says nothing rather than guessing which goal was being attacked."""
+    assert aiming_goal(1) == "toward the right goal"
+    assert aiming_goal(-1) == "toward the left goal"
+    assert aiming_goal(None) == "" and aiming_goal(0) == ""
 
 
 def test_the_touch_proxy_is_bounded_by_frames_with_an_aim(replay_case) -> None:

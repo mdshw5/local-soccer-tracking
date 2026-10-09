@@ -103,8 +103,10 @@ from soccer_analytics.dashboard.reports import (
     team_name,
 )
 from soccer_analytics.dashboard.replay import (
+    aiming_goal,
     build_replay,
     event_from_tag,
+    event_play,
     player_table_rows,
     repeated_manual_tag,
     roles_and_attack,
@@ -1911,7 +1913,9 @@ def events_section(
         "inferred from the ball scan and the player tracks once both exist. Saves and blocks stay yours to tag: a "
         "keeper's save and a shot wide look the same to a ball track. The detector is deliberately strict - it "
         "would rather miss a call than invent one - so every candidate carries a note saying what it measured, "
-        "and the weak ones are yours to reject."
+        "and the weak ones are yours to reject. Each row also says whether the act was attacking or defensive by "
+        "its type, and - for the attacks - which goal the acting team was attacking then, from the same measured "
+        "directions the arrows on the pitch use."
     )
     if events.events:
         counts = events.review_counts()
@@ -1932,6 +1936,9 @@ def events_section(
             {
                 **{key: value for key, value in event.to_json().items() if key != "video"},
                 "team": "unspecified" if event.team < 0 else team_name(event.team, team_names),
+                # Whether the act was an attack or a defence is the event type's own meaning - no game clock
+                # needed, so the column is there for every archive.
+                "play": event_play(event.type),
             }
             for event in shown
         ]
@@ -1948,6 +1955,32 @@ def events_section(
             event_rows = [
                 {**row, "match clock": _match_clock_for(event) or "-"} for row, event in zip(event_rows, shown)
             ]
+            # Whether the act was an attack or a defence, and - for the attacks - which goal mouth the acting
+            # team was attacking then. The play is the event type's own meaning; the aim comes from the replay
+            # payload's measured per-half directions, so the table, the arrows on the pitch and the detector
+            # cannot disagree about who was going which way. A payload from before directions existed - or an
+            # event whose own recording cannot be placed on the game's clock - leaves the aim blank.
+            attack = (library.load_replay(match_id) or {}).get("attack") or {}
+            directions_by_half = attack.get("directions") or []
+
+            def _half_of_event(event: Event) -> int | None:
+                on_game = game_lib.game_time(
+                    game_record_here, event.time_s, event.video or game_record_here.output
+                )
+                return None if on_game is None else game_record_here.half_of(on_game)
+
+            aims = []
+            for event in shown:
+                half = _half_of_event(event)
+                # ``directions`` is one entry per half in order, and the game's halves are numbered from 1.
+                pair = (
+                    directions_by_half[half - 1]
+                    if half is not None and 0 <= half - 1 < len(directions_by_half)
+                    else None
+                )
+                direction = pair[event.team] if pair is not None and 0 <= event.team < len(pair) else None
+                aims.append(aiming_goal(direction) if event_play(event.type) == "attacking" else "")
+            event_rows = [{**row, "aim": aim} for row, aim in zip(event_rows, aims)]
         st.dataframe(pd.DataFrame(event_rows), hide_index=True, use_container_width=True)
         st.caption(
             f"Reviewed: {counts[VERDICT_TRUE]} true · {counts[VERDICT_FALSE]} false · "

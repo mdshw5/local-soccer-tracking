@@ -81,11 +81,21 @@ class Status:
         self.payload = {"state": "running", "crops_total": total, "crops_done": 0, "readings": 0, "started": time.time()}
 
     def update(self, **kwargs) -> None:
+        """Update the progress file - and never let its failure end the scan it reports on.
+
+        The file is diagnostics: a dashboard reads it, and nothing the scan computes depends on it. On the real
+        game a mid-scan migration moved the analysis directory out from under a 90-minute run and the write's
+        FileNotFoundError aborted the whole scan at 12,475 of 14,602 crops - the readings were thrown away with
+        it. A report that cannot be filed is worth a one-line warning, not the work.
+        """
         self.payload.update(kwargs)
         self.payload["updated"] = time.time()
         tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self.payload))
-        tmp.replace(self.path)
+        try:
+            tmp.write_text(json.dumps(self.payload))
+            tmp.replace(self.path)
+        except OSError as exc:
+            print(f"[jerseys] warning: could not write the status file ({type(exc).__name__}: {exc})", flush=True)
 
 
 def main() -> int:

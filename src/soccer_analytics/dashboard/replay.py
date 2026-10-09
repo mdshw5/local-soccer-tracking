@@ -148,6 +148,35 @@ def attack_summary(orientations, *, half_frame: int | None) -> dict | None:
     return {"half_frame": None if half_frame is None else int(half_frame), "directions": directions}
 
 
+# What kind of act an event is, by its type: an attack on the opponent's goal or a defence of its own. The
+# classification is the type's own meaning, not a guess from where it happened - a clearance is a defensive act
+# wherever it is played from. The types that straddle both stay out of both sets: a fouled attacker is neither
+# an attack nor a defence, and a blank is more honest than a forced answer.
+ATTACKING_EVENT_TYPES = frozenset(("goal", "shot", "corner", "penalty"))
+DEFENSIVE_EVENT_TYPES = frozenset(("clearance", "tackle", "save", "block"))
+
+
+def event_play(event_type: str) -> str:
+    """``"attacking"``, ``"defensive"`` or ``""`` for the types that are neither (foul, substitution, other)."""
+    if event_type in ATTACKING_EVENT_TYPES:
+        return "attacking"
+    if event_type in DEFENSIVE_EVENT_TYPES:
+        return "defensive"
+    return ""
+
+
+def aiming_goal(direction: int | None) -> str:
+    """The goal mouth a team attacks when its measured direction at the time was ``direction``.
+
+    The pane draws the pitch with the ``x=0`` goal on the left and measures ``attack`` directions in the same
+    frame, so the mapping is one sign - and the label says which mouth to watch in the animation's own terms.
+    ``None`` (no measurement for that half) stays blank; zero is not a direction this pipeline emits.
+    """
+    if direction is None or direction == 0:
+        return ""
+    return "toward the left goal" if direction < 0 else "toward the right goal"
+
+
 def roles_and_attack(report, detections, assignment, *, segment, pitch_length_m: float):
     """Role labels and attack directions for the replay payload, from the tracks the report was built on.
 
