@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import http.client
 import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -28,10 +29,12 @@ from soccer_analytics.dashboard.stream import (
 )
 from soccer_analytics.dashboard.video import (
     ClipCache,
+    VideoError,
     clip_key,
     encode_clip,
     encoder_command,
     iter_live_chunks,
+    pick_encoder,
 )
 
 NO_LAYERS = {name: False for name in OVERLAY_NAMES}
@@ -45,6 +48,8 @@ def _match(
     focal=None,
     frame_count: int = 100,
     native: tuple[int, int, float] = (1920, 1080, 30.0),
+    video: Path | None = None,
+    start_s: float = 100.0,
 ) -> AnnotatedMatch:
     """A match assembled from hand-written observations - the leanest way to test interpolation."""
     tracks: dict[int, tuple[list[int], list[list[float]]]] = {}
@@ -59,9 +64,9 @@ def _match(
     boxes = {track_id: np.asarray(positions, dtype=np.float64) for track_id, (_f, positions) in tracks.items()}
     return AnnotatedMatch(
         match_id="synthetic",
-        video=Path("/nonexistent/synthetic.mp4"),
+        video=Path(video) if video is not None else Path("/nonexistent/synthetic.mp4"),
         fps=5.0,
-        start_s=100.0,
+        start_s=start_s,
         frame_count=frame_count,
         native=native,
         pitch=(105.0, 68.0),
@@ -182,6 +187,71 @@ def test_the_live_command_fragments_and_the_clip_command_seeks() -> None:
     assert "libx264" in clip and "medium" in clip, "the CPU fallback gets the denser preset"
 
 
+def test_the_source_audio_rides_along_and_retimes_with_the_rate() -> None:
+    """Audio is the recording's own soundtrack, seeked to the same second as the video window; a content rate
+    stretches it with atempo (never resamples it into chipmunks), and the output is bounded by -t so a short
+    soundtrack cannot truncate the clip. No source, no audio - and no ``-an`` on the command would leave the
+    silent case unmapped rather than silent."""
+    with_sound = encoder_command(
+        width=1280,
+        height=720,
+        fps=30.0,
+        output="pipe:1",
+        live=True,
+        encoder="h264_nvenc",
+        keyframe_s=1.0,
+        rate=2.0,
+        source="/archive/game.mp4",
+        audio=True,
+        audio_start_s=1460.0,
+        audio_duration_s=10.0,
+    )
+    assert with_sound[with_sound.index("-framerate") + 1] == "60", "the muxer's clock runs fps*rate per source second"
+    assert with_sound[with_sound.index("-ss") + 1] == "1460.000"
+    assert "/archive/game.mp4" in with_sound and "1:a:0?" in with_sound, "the optional map keeps a silent source working"
+    assert with_sound[with_sound.index("-c:a") + 1] == "aac"
+    assert with_sound[with_sound.index("-filter:a") + 1] == "atempo=2.0000", "2x is one atempo stage"
+    assert with_sound[with_sound.index("-t") + 1] == "5.000", "ten source seconds at 2x are five output seconds"
+    assert "-shortest" not in with_sound and "-an" not in with_sound
+
+    silent = encoder_command(
+        width=1280, height=720, fps=30.0, output="pipe:1", live=True, encoder="h264_nvenc", keyframe_s=1.0
+    )
+    assert "-an" in silent and "-t" not in silent
+
+    quarter = encoder_command(
+        width=1280,
+        height=720,
+        fps=30.0,
+        output="pipe:1",
+        live=True,
+        encoder="h264_nvenc",
+        keyframe_s=1.0,
+        rate=0.25,
+        source="/archive/game.mp4",
+        audio=True,
+    )
+    assert quarter[quarter.index("-framerate") + 1] == "7.5"
+    assert quarter[quarter.index("-filter:a") + 1].count("atempo") >= 2, "0.25x needs two halving stages"
+
+
+def test_the_hevc_variant_is_tagged_for_apple_players() -> None:
+    """HEVC in MP4 is only accepted by QuickTime/Safari as hvc1, where ffmpeg's default is hev1 - the tag is
+    what makes the smaller file playable on the whole Apple line, and it costs nothing anywhere else."""
+    hevc = encoder_command(
+        width=1920, height=1080, fps=60.0, output="x.mp4", live=False, encoder="hevc_nvenc", keyframe_s=2.0
+    )
+    assert hevc[hevc.index("-tag:v") + 1] == "hvc1"
+    h264 = encoder_command(
+        width=1920, height=1080, fps=60.0, output="x.mp4", live=False, encoder="h264_nvenc", keyframe_s=2.0
+    )
+    assert "-tag:v" not in h264, "the tag is an HEVC-only concern"
+    cpu = encoder_command(
+        width=1920, height=1080, fps=60.0, output="x.mp4", live=False, encoder="libx265", keyframe_s=2.0
+    )
+    assert "libx265" in cpu and cpu[cpu.index("-crf") + 1] == "25", "the CPU HEVC fallback gets its own CRF"
+
+
 def test_a_clip_key_changes_with_any_parameter_that_changes_the_picture() -> None:
     """The cache key is the encode's identity: a different window, rate, size or layer set is a different file,
     and repeating every parameter reuses the one that exists."""
@@ -191,6 +261,9 @@ def test_a_clip_key_changes_with_any_parameter_that_changes_the_picture() -> Non
     assert clip_key("m", 11.0, 2.0, 30.0, 1920, layers) != key
     assert clip_key("m", 10.0, 2.0, 30.0, 1280, layers) != key
     assert clip_key("m", 10.0, 2.0, 30.0, 1920, {**layers, "ball": False}) != key
+    assert clip_key("m", 10.0, 2.0, 30.0, 1920, layers, rate=2.0) != key, "a faster cut is a different file"
+    assert clip_key("m", 10.0, 2.0, 30.0, 1920, layers, audio=False) != key, "sound and silence differ"
+    assert clip_key("m", 10.0, 2.0, 30.0, 1920, layers, codec="hevc") != key, "the codec is part of the identity"
 
 
 def test_the_clip_cache_expires_by_count_and_by_age(tmp_path) -> None:
@@ -216,7 +289,22 @@ class _FakeClipEncoder:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def __call__(self, match, *, start_s, duration_s, fps, width, overlays, output, encoder=None, reader_factory=None):
+    def __call__(
+        self,
+        match,
+        *,
+        start_s,
+        duration_s,
+        fps,
+        width,
+        overlays,
+        output,
+        encoder=None,
+        reader_factory=None,
+        rate=1.0,
+        audio=True,
+        codec="h264",
+    ):
         self.calls.append(
             {
                 "start_s": start_s,
@@ -224,6 +312,9 @@ class _FakeClipEncoder:
                 "fps": fps,
                 "width": width,
                 "overlays": dict(overlays),
+                "rate": rate,
+                "audio": audio,
+                "codec": codec,
             }
         )
         output.write_bytes(b"MOCKMP4-" + f"{width}x{fps:g}".encode())
@@ -253,7 +344,8 @@ def test_a_clip_is_encoded_once_then_served_with_ranges(tmp_path) -> None:
     try:
         host, port = server.server_address
         connection = http.client.HTTPConnection(host, port, timeout=15)
-        connection.request("GET", "/video/synthetic.mp4?duration=2&fps=30&width=1920")
+        url = "/video/synthetic.mp4?duration=2&fps=30&width=1920&rate=2&audio=0"
+        connection.request("GET", url)
         response = connection.getresponse()
         body = response.read()
         assert response.status == 200
@@ -263,19 +355,17 @@ def test_a_clip_is_encoded_once_then_served_with_ranges(tmp_path) -> None:
         assert len(encoder.calls) == 1
         assert encoder.calls[0]["start_s"] == match.start_s
         assert encoder.calls[0]["duration_s"] == pytest.approx(2.0)
+        assert encoder.calls[0]["rate"] == pytest.approx(2.0), "the speed rides through to the encode"
+        assert encoder.calls[0]["audio"] is False, "audio can be turned off per request"
 
-        connection.request(
-            "GET", "/video/synthetic.mp4?duration=2&fps=30&width=1920", headers={"Range": "bytes=2-5"}
-        )
+        connection.request("GET", url, headers={"Range": "bytes=2-5"})
         partial = connection.getresponse()
         assert partial.status == 206
         assert partial.getheader("Content-Range") == f"bytes 2-5/{len(body)}"
         assert partial.read() == body[2:6]
         assert len(encoder.calls) == 1, "a range request must not re-encode"
 
-        connection.request(
-            "GET", "/video/synthetic.mp4?duration=2&fps=30&width=1920", headers={"Range": "bytes=9999-"}
-        )
+        connection.request("GET", url, headers={"Range": "bytes=9999-"})
         assert connection.getresponse().status == 416
         connection.close()
     finally:
@@ -296,6 +386,7 @@ def test_the_clip_defaults_are_the_sources_own_rate_and_resolution(tmp_path) -> 
         assert connection.getresponse().status == 200
         assert encoder.calls[0]["width"] == 1920
         assert encoder.calls[0]["fps"] == pytest.approx(30.0)
+        assert encoder.calls[0]["audio"] is True, "the match's audio rides along by default"
         connection.close()
     finally:
         server.shutdown()
@@ -309,9 +400,32 @@ class _FakeLiveChunks:
         self.wait_stop = wait_stop
 
     def __call__(
-        self, match, *, start_s, fps, width, overlays, control=None, encoder=None, reader_factory=None, pace=True
+        self,
+        match,
+        *,
+        start_s,
+        fps,
+        width,
+        overlays,
+        control=None,
+        encoder=None,
+        reader_factory=None,
+        pace=True,
+        rate=1.0,
+        audio=True,
+        codec="h264",
     ):
-        self.calls.append({"start_s": start_s, "fps": fps, "width": width, "control": control})
+        self.calls.append(
+            {
+                "start_s": start_s,
+                "fps": fps,
+                "width": width,
+                "control": control,
+                "rate": rate,
+                "audio": audio,
+                "codec": codec,
+            }
+        )
         if not self.wait_stop:
             yield from self.chunks
             return
@@ -331,13 +445,16 @@ def test_the_live_endpoint_streams_fragmented_mp4_and_registers_its_stop_token(t
     try:
         host, port = server.server_address
         connection = http.client.HTTPConnection(host, port, timeout=15)
-        connection.request("GET", "/live/synthetic.mp4?fps=30&width=1280&token=tok-1")
+        connection.request("GET", "/live/synthetic.mp4?fps=30&width=1280&rate=2&audio=0&codec=hevc&token=tok-1")
         response = connection.getresponse()
         assert response.status == 200
         assert response.getheader("Content-Type") == "video/mp4"
         assert response.read() == b"onetwo"
         assert live.calls[0]["width"] == 1280
         assert live.calls[0]["fps"] == pytest.approx(30.0)
+        assert live.calls[0]["rate"] == pytest.approx(2.0), "the animation's speed rides through to the encode"
+        assert live.calls[0]["audio"] is False, "audio can be turned off per request"
+        assert live.calls[0]["codec"] == "hevc", "the codec choice reaches the encoder"
         assert isinstance(live.calls[0]["control"], StreamControl), "the token must reach the stream"
         connection.close()
     finally:
@@ -383,7 +500,8 @@ def test_the_play_page_picks_the_element_each_format_plays_in(tmp_path) -> None:
         assert "duration=10&format=clip" in page, "the nav re-asks for a 10s clip without doubling the parameter"
         connection.request("GET", "/play/synthetic?format=live&fps=30")
         page = connection.getresponse().read().decode()
-        assert "<video" in page and "/live/synthetic.mp4?fps=30" in page
+        assert "<video" in page and "/live/synthetic.mp4?fps=30&token=" in page
+        assert "sendBeacon" in page, "a page that navigates away must end its own live encoder"
         connection.request("GET", "/play/synthetic")
         page = connection.getresponse().read().decode()
         assert "<img" in page and "/stream/synthetic.mjpg" in page
@@ -470,6 +588,84 @@ def test_a_live_stream_really_emits_a_fragmented_mp4_and_ends_when_stopped(tmp_p
     elapsed = time.monotonic() - started
     assert stopped[4:8] == b"ftyp"
     assert elapsed < 5.0, "a stopped stream must not wait out the window"
+
+
+@needs_ffmpeg
+def test_the_matchs_audio_really_rides_along_in_a_clip(tmp_path) -> None:
+    """The end of the audio path, against ffmpeg itself: a real (tiny, generated) recording with a tone is
+    seeked alongside the video window, so the clip a viewer gets is the match, sound and all - and ``audio=0``
+    really leaves it silent."""
+    from soccer_analytics.ingest.ffmpeg_reader import probe_video
+
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=5",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+            "-shortest", "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    match = _match(video=source, start_s=0.0)
+    with_sound = tmp_path / "with.mp4"
+    encode_clip(
+        match,
+        start_s=0.0,
+        duration_s=1.0,
+        fps=5.0,
+        width=96,
+        overlays=dict(NO_LAYERS),
+        output=with_sound,
+        encoder="libx264",
+        reader_factory=_TinyReader,
+        audio=True,
+    )
+    assert probe_video(with_sound).has_audio, "the clip carries the source's soundtrack"
+    muted = tmp_path / "muted.mp4"
+    encode_clip(
+        match,
+        start_s=0.0,
+        duration_s=1.0,
+        fps=5.0,
+        width=96,
+        overlays=dict(NO_LAYERS),
+        output=muted,
+        encoder="libx264",
+        reader_factory=_TinyReader,
+        audio=False,
+    )
+    assert not probe_video(muted).has_audio, "audio=0 leaves the clip silent"
+
+
+@needs_ffmpeg
+def test_the_hevc_variant_really_encodes_when_the_box_can(tmp_path) -> None:
+    """With an HEVC encoder present the clip really comes out as HEVC in an MP4 - the option is wired to the
+    codec, not just to a flag; machines without one skip (the H.264 path covers the mechanics everywhere)."""
+    from soccer_analytics.ingest.ffmpeg_reader import probe_video
+
+    try:
+        encoder = pick_encoder("hevc")
+    except VideoError:
+        pytest.skip("no HEVC encoder on this machine")
+    match = _match()
+    output = tmp_path / "clip_hevc.mp4"
+    encode_clip(
+        match,
+        start_s=match.start_s,
+        duration_s=1.0,
+        fps=5.0,
+        width=96,
+        overlays=dict(NO_LAYERS),
+        output=output,
+        encoder=encoder,
+        codec="hevc",
+        reader_factory=_TinyReader,
+    )
+    probe = probe_video(output)
+    assert probe.codec == "hevc", f"expected HEVC, got {probe.codec}"
+    assert (probe.width, probe.height) == (96, 64)
 
 
 def _stopped_live(match, control):

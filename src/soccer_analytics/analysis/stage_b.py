@@ -24,22 +24,42 @@ from scipy.optimize import linear_sum_assignment
 from soccer_analytics.analysis.kit import DESCRIPTOR_SIZE, kit_rgb
 from soccer_analytics.analysis.projection import PitchDetections, on_pitch_mask
 
-# Physics-limited gating: at 5 fps a player covers < ~1 m per frame, so anything beyond this is not the same person.
-# The gate cannot be generous: in packed play two players can be a metre apart, and the simulation showed that a 6 m
-# gate mixes 33% of tracks. Position alone is not enough there, so appearance (kit colour) is part of the cost.
-MAX_STEP_M = 1.4
+# Physics-limited gating: a player covers a few metres per second at most, so the per-frame gate is a *duration's*
+# worth of sprint - 7 m/s - divided by the analysis rate, not a fixed distance. The gate cannot be generous: in
+# packed play two players can be a metre apart, and the simulation showed that a 6 m gate mixes 33% of tracks (at
+# 5 fps). Position alone is not enough there, so appearance (kit colour) is part of the cost.
+DEFAULT_RATE = 5.0  # the rate every second-based value below was tuned at
+MAX_STEP_PER_S = 7.0  # metres a sprinting player may cover between consecutive samples (1.4 m at 5 fps)
 SIGMA_STEP_FACTOR = 1.5  # extra slack where the position itself is uncertain (far side of the pitch)
 MAX_GATE_M = 3.0
 MAX_AGE_GATE_FACTOR = 1.5  # a track lost for a while may be re-acquired a little further away, but not far
+AGE_GATE_PER_S = 0.5  # the re-acquisition slack added per second of absence (0.1 per frame at 5 fps)
 KIT_COST_WEIGHT = 3.0  # metres of equivalent position error per unit of kit-colour distance
 MIN_KIT_FOR_COST = 0.2  # kit fraction below which the colour descriptor is not trusted
-TRACK_BUFFER = 15  # frames a track survives without a detection (~3 s at 5 fps)
+TRACK_BUFFER_S = 3.0  # seconds a track survives without a detection (15 frames at 5 fps)
+VELOCITY_GAIN = 0.5  # per-frame EMA gain for track velocity at the reference rate; rate-scaled like the ball's
 MIN_TRACK_OBSERVATIONS = 8
 MIN_KIT_OBSERVATIONS = 6
 SPEED_PERCENTILE = 95
 MAX_PLAUSIBLE_SPEED_KMH = 36.0  # faster than any human sprint: a metre of far-side error, not a real speed
 MAX_GAP_FOR_DISTANCE_S = 1.0  # movement across a longer unobserved gap is unknown; do not invent it as distance
 _UNREACHABLE = 1e6  # cost above the gate: used to forbid an assignment rather than to rank it
+
+
+def detection_rate(detections: PitchDetections) -> float:
+    """The sampling rate of a detections array, read back from its own timestamps.
+
+    Stage A stores each analysed frame's source time, so the rate is measured rather than assumed. Every
+    frame-count window in this module is seconds-based and scaled with this value, which keeps the tracking
+    behaviour identical at 5 fps (the historical rate) and correct at 15 fps (the default).
+    """
+    times = np.asarray(detections.time, dtype=np.float64)
+    if len(times) >= 2:
+        steps = np.diff(np.unique(times))
+        dt = float(np.median(steps)) if len(steps) else 0.0
+        if dt > 1e-6:
+            return 1.0 / dt
+    return DEFAULT_RATE
 
 
 @dataclass
@@ -136,6 +156,15 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
     if len(rows) == 0:
         return TrackAssignment(track_id, {}, {}, tracks)
 
+    # Every window here is seconds-based and scaled to the rate the detections were sampled at: 7 m/s of sprint
+    # per second, 3 s of memory, and an EMA that keeps its time constant instead of adapting all the faster for
+    # having more frames.
+    rate = detection_rate(detections)
+    buffer_frames = max(1, int(round(TRACK_BUFFER_S * rate)))
+    max_step_m = MAX_STEP_PER_S / rate
+    age_slack = AGE_GATE_PER_S / rate
+    velocity_gain = 1.0 - (1.0 - VELOCITY_GAIN) ** (DEFAULT_RATE / rate)
+
     frame_of = detections.frame
     states: dict[int, dict] = {}  # id -> last xy, velocity, last frame
     # Stage A's identities are offset into their own space: they arrive as small non-negative ints that mean
@@ -150,7 +179,7 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
         if on_progress is not None and (index % progress_every == 0 or index == len(unique_frames) - 1):
             on_progress((index + 1) / len(unique_frames))
         here = rows[frame_of[rows] == frame]
-        age_out = [tid for tid, st in states.items() if frame - st["frame"] > TRACK_BUFFER]
+        age_out = [tid for tid, st in states.items() if frame - st["frame"] > buffer_frames]
         for tid in age_out:
             del states[tid]
         if not states or len(here) == 0:
@@ -173,8 +202,8 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
         sigma = np.maximum(detections.sigma_m[here], 0.35)
         age = np.array([frame - states[tid]["frame"] for tid in ids])
         position_cost = np.linalg.norm(predicted[:, None, :] - measured[None, :, :], axis=2)
-        gate = np.minimum(MAX_STEP_M + SIGMA_STEP_FACTOR * sigma[None, :], MAX_GATE_M) * np.minimum(
-            1.0 + 0.1 * age, MAX_AGE_GATE_FACTOR
+        gate = np.minimum(max_step_m + SIGMA_STEP_FACTOR * sigma[None, :], MAX_GATE_M) * np.minimum(
+            1.0 + age_slack * age, MAX_AGE_GATE_FACTOR
         )[:, None]
         cost = position_cost + KIT_COST_WEIGHT * _kit_cost(detections, here, ids, states)
         cost = np.where(position_cost <= gate, cost, _UNREACHABLE)
@@ -185,7 +214,7 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
                 continue
             tid, row = ids[i], here[j]
             step = (detections.xy[row] - states[tid]["xy"]) / max(1, frame - states[tid]["frame"])
-            states[tid]["vel"] = 0.5 * states[tid]["vel"] + 0.5 * step
+            states[tid]["vel"] = (1.0 - velocity_gain) * states[tid]["vel"] + velocity_gain * step
             states[tid]["xy"] = detections.xy[row]
             states[tid]["frame"] = int(frame)
             if detections.kit[row, 0] > MIN_KIT_FOR_COST:
@@ -209,10 +238,10 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
                 st = states[hint]
                 gap = frame - st["frame"]
                 jump = np.linalg.norm(detections.xy[row] - (st["xy"] + st["vel"] * gap))
-                allowed = np.minimum(MAX_STEP_M + SIGMA_STEP_FACTOR * max(detections.sigma_m[row], 0.35), MAX_GATE_M)
-                allowed *= min(1.0 + 0.1 * gap, MAX_AGE_GATE_FACTOR)
+                allowed = np.minimum(max_step_m + SIGMA_STEP_FACTOR * max(detections.sigma_m[row], 0.35), MAX_GATE_M)
+                allowed *= min(1.0 + age_slack * gap, MAX_AGE_GATE_FACTOR)
                 if jump <= allowed:
-                    st["vel"] = 0.5 * st["vel"] + 0.5 * ((detections.xy[row] - st["xy"]) / max(1, gap))
+                    st["vel"] = (1.0 - velocity_gain) * st["vel"] + velocity_gain * ((detections.xy[row] - st["xy"]) / max(1, gap))
                     st["xy"] = detections.xy[row]
                     st["frame"] = int(frame)
                     if detections.kit[row, 0] > MIN_KIT_FOR_COST:
@@ -245,9 +274,9 @@ def _track_people(detections: PitchDetections, keep: np.ndarray, on_progress=Non
 # the ends of the pitch), and a player who leaves a tight shot and returns gets a new track. Measured on the real
 # sample: 847 raw tracks, 302 of which start within 6 frames and 4 m of where an earlier track ended - the same
 # players, redetected. Those fragments are reconnected after the fact.
-STITCH_MAX_GAP_FRAMES = 30  # 6 s at 5 fps
+STITCH_MAX_GAP_S = 6.0  # fragments this far apart in time are not stitched (30 frames at 5 fps)
 STITCH_BASE_M = 2.0  # slack at the join, on top of the distance a sprint could cover
-STITCH_SPEED_M_PER_FRAME = 1.4  # a full sprint between two observations (7 m/s at 5 fps)
+STITCH_SPRINT_M_S = 7.0  # a full sprint between two observations (1.4 m per frame at 5 fps)
 STITCH_MAX_KIT_DISTANCE = 0.45  # kit colours (L, a, b, saturation, value) further apart than this never stitch
 STITCH_NO_KIT_FACTOR = 0.6  # with no colour evidence the spatial window tightens
 
@@ -261,16 +290,18 @@ TEAM_LABEL_MIN_MARGIN = 0.35  # how far the winning centre must beat the runner-
 TEAM_LABEL_MIN_HEIGHT = 32.0  # px at 1920: the propagation tier may read these crops; the voting tier may not
 
 
-def _team_min_evidence(frames: int) -> float:
+def _team_min_evidence(frames: int, rate: float = DEFAULT_RATE) -> float:
     """The evidence floor for team clustering, scaled to how long the segment is.
 
     The floor is tuned on a whole-game segment (21.5k frames at 5 fps), where a well-seen player collects hundreds
     of player-sized observations and 36 of them (sqrt = 6) is a trustworthy colour. A short synthetic match (400
     frames) yields ~11 observations per track, so the same absolute floor would leave nothing to cluster. The
-    floor scales with the square root of length between the two: a 400-frame match needs ~9 observations, the
-    whole game needs 36 - and anything longer keeps the whole-game floor.
+    frame count is first normalised to the 5 fps equivalent, so a 15 fps run of the same match weighs the same;
+    the floor then scales with the square root of length: a 400-frame match needs ~9 observations, the whole game
+    needs 36 - and anything longer keeps the whole-game floor.
     """
-    scaled = 6.0 * np.sqrt(max(frames, 1) / 21552.0)
+    equivalent = float(frames) * DEFAULT_RATE / max(float(rate), 1e-6)
+    scaled = 6.0 * np.sqrt(max(equivalent, 1.0) / 21552.0)
     return float(np.clip(scaled, 2.6, 6.0))
 
 
@@ -347,6 +378,9 @@ def _stitch_tracks(detections: PitchDetections, assignment: TrackAssignment) -> 
     tracks = {track_id: np.sort(rows) for track_id, rows in assignment.tracks.items()}
     if len(tracks) < 2:
         return assignment
+    rate = detection_rate(detections)
+    max_gap = max(1, int(round(STITCH_MAX_GAP_S * rate)))
+    sprint_per_frame = STITCH_SPRINT_M_S / rate
     last = {track_id: (int(detections.frame[rows[-1]]), detections.xy[rows[-1]]) for track_id, rows in tracks.items()}
     first = {track_id: (int(detections.frame[rows[0]]), detections.xy[rows[0]]) for track_id, rows in tracks.items()}
     kits = _track_kit_colours(detections, tracks)
@@ -357,7 +391,7 @@ def _stitch_tracks(detections: PitchDetections, assignment: TrackAssignment) -> 
             if before == after:
                 continue
             gap = start_frame - end_frame
-            if gap <= 0 or gap > STITCH_MAX_GAP_FRAMES:
+            if gap <= 0 or gap > max_gap:
                 continue
             distance = float(np.linalg.norm(start_xy - end_xy))
             kit_before, kit_after = kits[before], kits[after]
@@ -365,12 +399,12 @@ def _stitch_tracks(detections: PitchDetections, assignment: TrackAssignment) -> 
                 kit_distance = float(np.linalg.norm(kit_before - kit_after))
                 if kit_distance > STITCH_MAX_KIT_DISTANCE:
                     continue
-                if distance > STITCH_BASE_M + STITCH_SPEED_M_PER_FRAME * gap:
+                if distance > STITCH_BASE_M + sprint_per_frame * gap:
                     continue
                 pair_cost = distance / gap + 2.0 * kit_distance
             else:
                 # No colour evidence on one side: only short, small jumps are believable.
-                if distance > STITCH_BASE_M + STITCH_NO_KIT_FACTOR * STITCH_SPEED_M_PER_FRAME * gap:
+                if distance > STITCH_BASE_M + STITCH_NO_KIT_FACTOR * sprint_per_frame * gap:
                     continue
                 pair_cost = distance / gap + 0.5
             cost[(before, after)] = pair_cost
@@ -442,6 +476,7 @@ def _team_assignment(
     """
     from sklearn.cluster import KMeans
 
+    rate = detection_rate(detections)
     per_track: dict[int, tuple[np.ndarray, float]] = {}
     for tid, rows in assignment.tracks.items():
         evidence = _track_kit_evidence(detections, rows)
@@ -460,7 +495,7 @@ def _team_assignment(
             continue
         if float(np.mean(detections.kit[chosen, 0])) < TEAM_MIN_KIT_FRACTION:
             continue
-        if weight < _team_min_evidence(len(detections.time)):
+        if weight < _team_min_evidence(len(detections.time), rate):
             continue
         strong[tid] = (descriptor, weight)
     if len(strong) < num_teams * 2:

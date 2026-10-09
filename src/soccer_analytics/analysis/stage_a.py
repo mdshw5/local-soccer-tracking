@@ -36,10 +36,12 @@ from soccer_analytics.geometry.camera_motion import (
 )
 from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader, probe_video
 
-ANALYSIS_FPS = 5.0
+# 60 fps and 30 fps sources both divide cleanly by 15, so every analysis sample is an actual source frame - and a
+# 15 fps sample captures a fast pass well inside the ball tracker's association gate.
+ANALYSIS_FPS = 15.0
 MOTION_WIDTH = 960  # motion is estimated on a small copy; detection uses the full analysis frame
 DETECT_WIDTH = 1920
-CHUNK_FRAMES = 300  # 60 s at 5 fps
+CHUNK_FRAMES = 300  # 20 s at 15 fps; small checkpoints, so an interruption loses little
 MIN_PERSON_HEIGHT_PX = 14  # at 1920 wide; smaller boxes are far-side noise
 PERSON_CONF = 0.25
 SCHEMA_VERSION = 2  # v2 adds det_track (BoT-SORT identity per detection)
@@ -48,15 +50,16 @@ MODELS_DIR = REPO_ROOT / "data" / "models"  # where a locally-supplied checkpoin
 
 # BoT-SORT with appearance re-identification. The camera whips between the ends of the pitch and players cross
 # constantly, so IoU/motion association alone mixes identities; the ReID encoder's appearance embedding is what
-# keeps a label on the same shirt through a crossing or a short occlusion. The buffer is sized to the analysis
-# rate: 30 frames is 6 s at 5 fps, the same window Stage B's stitcher uses, so the two layers agree on how long
-# a player may vanish and still be the same person.
+# keeps a label on the same shirt through a crossing or a short occlusion. The buffer is sized in *seconds* and
+# scaled to the analysis rate, the same window Stage B's stitcher uses, so the two layers agree on how long a
+# player may vanish and still be the same person at any frame rate.
+TRACK_BUFFER_S = 6.0
 TRACKER_CONFIG = {
     "tracker_type": "botsort",
     "track_high_thresh": 0.25,
     "track_low_thresh": 0.1,
     "new_track_thresh": 0.25,
-    "track_buffer": 30,
+    # track_buffer is added per rate by tracker_config() - it is a duration, not a frame count.
     "match_thresh": 0.8,
     "fuse_score": True,
     "gmc_method": "sparseOptFlow",
@@ -67,16 +70,24 @@ TRACKER_CONFIG = {
 }
 
 
-def tracker_config_path() -> str:
-    """The BoT-SORT config as a file Ultralytics' tracker loader accepts, written once per process.
+def tracker_config(fps: float) -> dict:
+    """The BoT-SORT config for one analysis rate: the identity buffer is the 6 s window, in frames."""
+    config = dict(TRACKER_CONFIG)
+    config["track_buffer"] = max(1, int(round(TRACK_BUFFER_S * float(fps))))
+    return config
+
+
+def tracker_config_path(fps: float) -> str:
+    """The BoT-SORT config as a file Ultralytics' tracker loader accepts, written once per process and rate.
 
     ``model.track(tracker=...)`` takes a YAML path (or a built-in name); the ReID switches are not predict
-    arguments, so the config has to travel as a file. A temp file per process keeps the repo read-only-friendly,
-    and JSON is valid YAML for a flat mapping, so the same atomic writer the chunks use serves here.
+    arguments, so the config has to travel as a file. A temp file per process and rate keeps the repo
+    read-only-friendly, and JSON is valid YAML for a flat mapping, so the same atomic writer the chunks use
+    serves here.
     """
-    path = Path(tempfile.gettempdir()) / f"soccer_botsort_{os.getpid()}.yaml"
+    path = Path(tempfile.gettempdir()) / f"soccer_botsort_{os.getpid()}_{float(fps):g}.yaml"
     if not path.exists():
-        _write_json_atomic(path, TRACKER_CONFIG)
+        _write_json_atomic(path, tracker_config(fps))
     return str(path)
 
 
@@ -240,7 +251,7 @@ def track_people(model, frame: np.ndarray, config: SegmentConfig, ignore: np.nda
     result = model.track(
         frame,
         persist=True,
-        tracker=tracker_config_path(),
+        tracker=tracker_config_path(config.fps),
         imgsz=config.detect_width,
         conf=config.confidence,
         classes=[0],

@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from soccer_analytics.analysis.stage_a import SegmentConfig, analyse_segment, resolve_weights
+from soccer_analytics.analysis.stage_a import ANALYSIS_FPS, SegmentConfig, analyse_segment, resolve_weights
 
 
 def main() -> int:
@@ -26,7 +26,12 @@ def main() -> int:
     parser.add_argument("--out", required=True, help="output directory for this segment")
     parser.add_argument("--start", type=float, default=0.0, help="start offset in the source video (seconds)")
     parser.add_argument("--duration", type=float, default=0.0, help="seconds to analyse; 0 = to the end of the video")
-    parser.add_argument("--fps", type=float, default=5.0, help="analysis frame rate (detections per second)")
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=ANALYSIS_FPS,
+        help="analysis frame rate (detections per second; default 15 - 60 and 30 fps sources both divide by it)",
+    )
     parser.add_argument("--width", type=int, default=1920, help="analysis frame width for detection")
     parser.add_argument("--chunk-frames", type=int, default=300, help="frames per checkpoint file")
     parser.add_argument(

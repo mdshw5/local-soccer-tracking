@@ -145,7 +145,7 @@ def test_the_footage_follows_the_animation_clock() -> None:
     """
     html = COMPONENT.read_text()
     assert "function footageUrl" in html
-    assert "/stream/" in html and "/frame/" in html, "the stream for playing, the still endpoint for paused"
+    assert "/live/" in html and "/frame/" in html, "the live encoded stream for playing, the still endpoint for paused"
     assert "state.streamOffset" in html, "the strip clock must be translated onto the recording's"
     assert "function scheduleStill" in html and "FOOTAGE_STILL_DEBOUNCE_MS" in html, "scrubbing must be debounced"
     assert "function syncFootage" in html
@@ -158,10 +158,10 @@ def test_a_stream_that_falls_behind_is_restarted_not_left_to_drift() -> None:
     animation. The pane restarts it at the animation's own second once the gap is visible - rate-limited, so a
     decode slower than real time cannot turn the pane into a loop of restarts."""
     html = COMPONENT.read_text()
-    assert "FOOTAGE_DRIFT_TOLERANCE_S" in html, "a restart costs a seek: only correct a visible divergence"
+    assert "FOOTAGE_DRIFT_TOLERANCE_S" in html, "a restart costs an encode: only correct a visible divergence"
     assert "FOOTAGE_MIN_RESTART_INTERVAL_MS" in html, "and never restart more often than this"
     assert "function restartFootage" in html
-    assert "footageStartedAt" in html and "footageWallAt" in html, "the drift is measured against the start"
+    assert "footageVideo.currentTime" in html, "the drift is measured off the video's own clock, not modelled"
 
 
 def test_the_footage_sync_can_be_turned_off() -> None:
@@ -252,19 +252,39 @@ def test_a_repeated_render_does_not_reload_the_still() -> None:
     assert "!failed" in setter, "except when the picture failed to load - that retry has to proceed"
 
 
-def test_the_streams_clock_starts_with_its_first_frame() -> None:
-    """The seek and the first decode cost a second or two. A drift model anchored at the *request* would read as
-    permanently behind the animation and restart a stream playing exactly in step, over and over; anchored at
-    the first frame, the pane's copy of "where the stream is" starts when the picture does."""
+def test_the_panes_clock_comes_from_the_video_itself() -> None:
+    """The pane no longer *infers* where the stream is: a <video> element reports its own timeline, so the drift
+    check compares the animation's clock against a measurement - the stream's zero is the strip second it was
+    asked for, and its clock starts when the first *frame* arrives, not when the request was made."""
     html = COMPONENT.read_text()
-    assert "footageAwaitingFirstFrame" in html
+    assert "footageVideo.currentTime * state.footageRate" in html, "the display position is measured, not modelled"
+    assert "state.footageOpenStrip = state.time" in html, "the stream's zero is the strip second it was asked for"
     opener = html.split("function openFootage", 1)[1].split("function restartFootage", 1)[0]
     assert "state.footageAwaitingFirstFrame = true" in opener, "the wait begins with the request"
-    sync_body = html.split("function syncFootage", 1)[1].split("\n      function ", 1)[0]
-    assert "if (state.footageAwaitingFirstFrame) return" in sync_body, "no drift verdict while the request flies"
-    load_handler = html.split("function onFootageLoad", 1)[1].split("bindFootage(footage);", 1)[0]
+    load_handler = html.split("footageVideo.addEventListener('loadeddata'", 1)[1]
     assert "state.footageAwaitingFirstFrame = false" in load_handler, "frame one ends the wait"
-    assert "state.footageStartedAt = state.time" in load_handler, "and re-anchors the stream's clock"
+    assert "state.footageOpenStrip = state.time" in load_handler, (
+        "the encoder's start-up second is re-anchored away, or a stream in step reads as permanently behind"
+    )
+    sync_body = html.split("function syncFootage", 1)[1].split("\n      function ", 1)[0]
+    assert "state.footageAwaitingFirstFrame || footageVideo.readyState < 2" in sync_body, (
+        "no drift verdict before the first frame can arrive"
+    )
+
+
+def test_the_playing_footage_is_full_motion_video_with_optional_sound() -> None:
+    """While the animation plays, the pane plays the encoded live stream - full frame rate and the match's own
+    audio - in a <video> element; the still stays up until the stream's first frame, so an encoder start-up does
+    not flash black. The sound starts off (browsers block audible autoplay) and the box is the gesture that
+    allows it."""
+    html = COMPONENT.read_text()
+    assert '<video id="footage-video"' in html, "the live stream needs a video element"
+    assert "function openLiveVideo" in html and "function closeLiveVideo" in html
+    assert "footageVideo.src = url" in html and "footageVideo.load()" in html, "clearing the src aborts the fetch"
+    assert "const FOOTAGE_FPS = 30" in html
+    assert "&fps=${FOOTAGE_FPS}&rate=${state.speed}" in html, "the live URL carries the pane's own rate"
+    assert "readyState >= 2" in html, "the still gives way only once the stream has a frame"
+    assert 'id="sound"' in html and "footageVideo.muted = !state.footageSound" in html
 
 
 def test_the_moment_jump_follows_changing_sequences_only() -> None:

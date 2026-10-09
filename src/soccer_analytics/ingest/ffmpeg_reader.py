@@ -110,6 +110,7 @@ class FFmpegFrameReader:
         start_s: float = 0.0,
         duration_s: float | None = None,
         prefer_gpu: bool = True,
+        skip_frame: str | None = None,
     ):
         if fps <= 0:
             raise ValueError("fps must be > 0")
@@ -121,12 +122,18 @@ class FFmpegFrameReader:
         self.start_s = start_s
         self.duration_s = duration_s
         self.prefer_gpu = prefer_gpu
+        # An ffmpeg decoder option ("nokey" = keyframes only): the fast path a whole-game navigator video is
+        # built with, where one picture per second is enough and decoding everything would take the footage's
+        # own length. Nothing that needs real motion should set this.
+        self.skip_frame = skip_frame
         self.out_width = _even(width)
         self.out_height = _even(self.out_width * self.probe.height / self.probe.width)
         self.used_gpu: bool | None = None
 
     def _command(self, use_gpu: bool) -> list[str]:
         command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
+        if self.skip_frame:
+            command += ["-skip_frame", self.skip_frame]
         if use_gpu:
             command += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         command += ["-ss", f"{self.start_s:.3f}", "-i", str(self.path), "-an"]

@@ -4,10 +4,10 @@ The tracker (`analysis.ball`) is the logic; this is the process that feeds it a 
 decided, frame by frame, where the rest of the pipeline can pick it up. It is the same shape as the whistle scan:
 its own process, a status file the dashboard polls, and a result beside the segment.
 
-The scan is expensive - two detectors at 4K, about 0.2 s per frame under load on this machine, so roughly an hour
-for a whole game - and it is checkpointed for exactly that reason: every ``CHECKPOINT_EVERY`` frames the records
-*and* the tracker's state are written atomically, and a rerun resumes from the last checkpoint instead of starting
-the hour again.
+The scan is expensive - two detectors at 4K, about 0.13 s per frame on this machine under load - and it is
+checkpointed for exactly that reason: every ``CHECKPOINT_SECONDS`` of frames the records *and* the tracker's
+state are written atomically, and a rerun resumes from the last checkpoint instead of starting the hour again.
+At the 15 fps analysis rate a whole game is 2-3 hours, so a rerun that does not start from zero matters.
 
 What a frame's record means is the tracker's state, and the states are not interchangeable:
 
@@ -47,8 +47,8 @@ STATUS_FILE = "ball_scan.json"
 WINDOW_PX = 1600  # the crop scanned around the prediction while tracking, at 4K
 WINDOW_IMGSZ = 1280
 FULL_IMGSZ = 2560
-FULL_EVERY = 25  # periodic full-frame scan while tracking: a safety net against the prediction drifting wrong
-CHECKPOINT_EVERY = 600  # 2 min at 5 fps
+FULL_EVERY_SECONDS = 5.0  # periodic full-frame scan while tracking: a safety net against the prediction drifting wrong
+CHECKPOINT_SECONDS = 120.0  # wall-clock cadence of the resume checkpoint, in frames at the scan's rate
 COCO_BALL_CLASS = 32
 COCO_WEIGHTS = "yolov8s.pt"
 WORLD_WEIGHTS = "yolov8s-worldv2.pt"
@@ -202,11 +202,15 @@ def _scan_track(
         status.update(force=True, message=f"Resuming after {len(records)} frames")
 
     track = (
-        BallTrack.from_json(tracker_state, aspect=aspect)
+        BallTrack.from_json(tracker_state, aspect=aspect, rate=fps)
         if tracker_state
-        else BallTrack(aspect=aspect)
+        else BallTrack(aspect=aspect, rate=fps)
     )
     resume_at = len(records)
+    # Frame-count cadences in *seconds*, at this scan's own rate: more frames per second must not mean either a
+    # sparser safety net or a sparser checkpoint.
+    full_every = max(1, int(round(FULL_EVERY_SECONDS * fps)))
+    checkpoint_every = max(1, int(round(CHECKPOINT_SECONDS * fps)))
 
     def save(complete: bool) -> dict:
         payload = {
@@ -248,13 +252,15 @@ def _scan_track(
         blank_overlays(frame)
 
         predicted = track.predict(step)
-        # The window scan carries the track while the ball is plausibly near its prediction: tracking, or one
-        # coasted frame. Beyond that the ball could be anywhere, and only a full-frame scan can find it and
-        # re-learn the velocity; the periodic full scan is the safety net while tracking.
+        # The window scan carries the track while the ball is plausibly near its prediction: tracking, or coasting
+        # for about 0.2 s (a couple of frames at 15 fps). Beyond that the ball could be anywhere, and only a
+        # full-frame scan can find it and re-learn the velocity; the periodic full scan is the safety net while
+        # tracking.
+        coast_window = max(1, int(round(0.2 * fps)))
         window_ok = predicted is not None and (
-            track.status == "tracking" or (track.status == "coasting" and track.coasted <= 1)
+            track.status == "tracking" or (track.status == "coasting" and track.coasted <= coast_window)
         )
-        full = not window_ok or k % FULL_EVERY == FULL_EVERY - 1
+        full = not window_ok or k % full_every == full_every - 1
         if full:
             detections = detector(frame, FULL_IMGSZ, (0, 0))
         else:
@@ -276,7 +282,7 @@ def _scan_track(
                 progress=done / total_frames,
                 message=f"Scanning for the ball ({done}/{total_frames}, ~{max(1, int(left / 60))} min left)",
             )
-        if processed % CHECKPOINT_EVERY == 0:
+        if processed % checkpoint_every == 0:
             save(complete=False)
             status.update(force=True, progress=(resume_at + processed) / total_frames, message="Checkpoint written")
 

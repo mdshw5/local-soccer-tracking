@@ -1687,7 +1687,7 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
             only = Path(planned_game.clips[0].path)
             st.write(f"Already one game video: {only.name} - {total_minutes:.0f} min")
             st.caption(
-                "Used as it stands. The game metadata, the marking proxy and the half-time marks all live in "
+                "Used as it stands. The game metadata and the half-time marks live in "
                 f"`{expected_dir.name}` beside it, not in the video itself, so the file is never written to."
             )
         else:
@@ -1713,8 +1713,8 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
                 subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 st.session_state["step1_flash"] = (
                     "success",
-                    "Combining the clips in the background, then building the marking proxy from keyframes (a couple "
-                    "of minutes for a full game). Refresh in a moment.",
+                    "Combining the clips in the background (a couple of minutes for a full game). "
+                    "Refresh in a moment.",
                 )
 
             build_state = game_lib.read_build_state(expected_dir)
@@ -1757,54 +1757,71 @@ if game_record is not None:
         st.warning(f"The marks cannot be used yet: {mark_problem}.")
 
     game_proxy = game_lib.proxy_path(game_directory)
-    game_build_state = game_lib.read_build_state(game_directory)
-    if not game_proxy.exists():
-        if game_build_state.get("state") == "running":
-            st.info(
-                "Building the low-resolution marking proxy. It is built from keyframes alone - one picture per "
-                "second - so a whole game takes a couple of minutes rather than the length of the footage."
-            )
-        elif game_build_state.get("state") == "error":
-            st.error(f"The proxy build failed: {game_build_state.get('error')}")
-        else:
-            st.info("The marking proxy has not been built yet; start the build in the section above.")
+    mark_port = configured_port()
+    stream_ready = is_reachable(mark_port)
+    if stream_ready:
+        # The marking video is produced on demand by the footage stream - the same encoder machinery as the
+        # replay pane's video, with no overlays to draw. No proxy build step: the file lands at the old proxy
+        # path the first time it is asked for, and is served from there afterwards. The component composes the
+        # URL from the dashboard's own host and the stream port (a forwarded or LAN host, not localhost), the
+        # same way the replay pane does.
+        game_video_url = ""
+        mark_stream_args = {
+            "game_id": game_record.game_id,
+            "stream_port": mark_port,
+            "stream_base": configured_base(),
+        }
     else:
-        game_proxy_url = _served_video_url(game_proxy, coordinates=f"game::{game_record.game_id}")
-        if game_proxy_url is None:
-            st.warning("Could not serve the marking proxy to the browser, so the marks cannot be set here.")
-        else:
-            mark_result = GAME_TIMELINE_COMPONENT(
-                proxy_url=game_proxy_url,
-                marks={"start": game_record.start_s, "half": game_record.half_s, "end": game_record.end_s},
-                key=f"game_marks::{game_record.game_id}",
-                default=None,
+        # Offline fallback: a proxy that already exists (built before this change, or by an earlier request) is
+        # served through Streamlit's own media endpoint, so marking keeps working without the stream server.
+        game_video_url = _served_video_url(game_proxy, coordinates=f"game::{game_record.game_id}") or ""
+        mark_stream_args = {}
+    if not game_video_url and not stream_ready:
+        st.info(
+            "The marking video is prepared on demand by the footage stream. Start "
+            f"`scripts/run_match_stream.py --port {mark_port}` and it appears here - a couple of minutes the "
+            "first time, cached beside the game afterwards."
+        )
+    else:
+        if stream_ready and not game_proxy.exists():
+            st.caption(
+                "The marking video is being prepared on first use (a couple of minutes for a full game - it is "
+                "a keyframe-only encode, the same as the old proxy build); it is cached beside the game "
+                "afterwards."
             )
-            marks_seen = st.session_state.setdefault("game_marks_seen", {})
-            if isinstance(mark_result, dict) and str(mark_result.get("action")) == "mark":
-                # The component's value is sticky, so it comes back on every later run: only a sequence number
-                # newer than the last one handled is a new press. That is why the key itself never changes - a
-                # remount would throw the playback position away in the middle of marking.
-                sequence = int(mark_result.get("seq") or 0)
-                if sequence > int(marks_seen.get(game_record.game_id, 0)):
-                    which = str(mark_result.get("mark") or "")
-                    if which in game_lib.MARKS:
-                        at = float(mark_result.get("time") or 0.0)
-                        game_record.set_mark(which, at)
-                        game_record.save(game_directory)
-                        marks_seen[game_record.game_id] = sequence
-                        # The marks define the analysed window, so apply it now rather than waiting for the radio
-                        # to be touched: marking kick-off and full-time is exactly how the window is chosen.
-                        if game_record.bounds() is not None:
-                            selection = str(
-                                st.session_state.get(
-                                    f"game_window::{game_record.game_id}", game_lib.WINDOW_WHOLE
-                                )
+        mark_result = GAME_TIMELINE_COMPONENT(
+            proxy_url=game_video_url,
+            **mark_stream_args,
+            marks={"start": game_record.start_s, "half": game_record.half_s, "end": game_record.end_s},
+            key=f"game_marks::{game_record.game_id}",
+            default=None,
+        )
+        marks_seen = st.session_state.setdefault("game_marks_seen", {})
+        if isinstance(mark_result, dict) and str(mark_result.get("action")) == "mark":
+            # The component's value is sticky, so it comes back on every later run: only a sequence number
+            # newer than the last one handled is a new press. That is why the key itself never changes - a
+            # remount would throw the playback position away in the middle of marking.
+            sequence = int(mark_result.get("seq") or 0)
+            if sequence > int(marks_seen.get(game_record.game_id, 0)):
+                which = str(mark_result.get("mark") or "")
+                if which in game_lib.MARKS:
+                    at = float(mark_result.get("time") or 0.0)
+                    game_record.set_mark(which, at)
+                    game_record.save(game_directory)
+                    marks_seen[game_record.game_id] = sequence
+                    # The marks define the analysed window, so apply it now rather than waiting for the radio
+                    # to be touched: marking kick-off and full-time is exactly how the window is chosen.
+                    if game_record.bounds() is not None:
+                        selection = str(
+                            st.session_state.get(
+                                f"game_window::{game_record.game_id}", game_lib.WINDOW_WHOLE
                             )
-                            window_start, window_end = game_record.window(selection)
-                            st.session_state[f"start_s::{chosen}"] = float(window_start)
-                            st.session_state[f"length_s::{chosen}"] = float(window_end - window_start)
-                        st.session_state["step1_flash"] = ("success", f"Marked {which} at {_clock(at)}.")
-                        st.rerun()
+                        )
+                        window_start, window_end = game_record.window(selection)
+                        st.session_state[f"start_s::{chosen}"] = float(window_start)
+                        st.session_state[f"length_s::{chosen}"] = float(window_end - window_start)
+                    st.session_state["step1_flash"] = ("success", f"Marked {which} at {_clock(at)}.")
+                    st.rerun()
 
     st.write(
         "  ".join(
@@ -1916,25 +1933,31 @@ def _same_window(meta: dict) -> bool:
 
 
 window_conflict = existing_meta is not None and not _same_window(existing_meta)
+fps_conflict = existing_meta is not None and abs(float(existing_meta.get("fps", config.fps)) - config.fps) > 1e-6
 
 info_col, run_col = st.columns([2, 1])
 with info_col:
-    if window_conflict:
+    if window_conflict or fps_conflict:
+        stored = (
+            f"{_clock(float(existing_meta['start_s']))} to {_clock(float(existing_meta['end_s']))} "
+            f"at {float(existing_meta.get('fps', 5.0)):g} fps"
+        )
         st.warning(
-            f"This video already has results for **{_clock(float(existing_meta['start_s']))} to "
-            f"{_clock(float(existing_meta['end_s']))}**. There is one output directory per video, and a different "
-            "window cannot be resumed into the same one - running again will move the existing results aside "
-            "(renamed, not deleted)."
+            f"This video already has results for **{stored}**. There is one output directory per video, and a "
+            "different window or analysis rate cannot be resumed into the same one - running again (this run: "
+            f"{_clock(window_start)} to {_clock(window_end)} at {config.fps:g} fps) will move the existing "
+            "results aside (renamed, not deleted)."
         )
     _stage_a_status(segment_dir, watch_key=f"stage_a_watch::{chosen}")
 with run_col:
     def _run_analysis() -> None:
         """Spawn the pass from the callback, which runs before the page is drawn again - one run, not two."""
         archived_note = ""
-        if existing_meta is not None and not _same_window(existing_meta):
-            # `analyse_segment` refuses to mix windows in one output directory, so the old results move aside under
-            # a timestamped name. Renaming (rather than deleting) means putting the earlier analysis back is a
-            # rename away, which matters because re-analysis of the same footage is what created the conflict.
+        if existing_meta is not None and (not _same_window(existing_meta) or fps_conflict):
+            # `analyse_segment` refuses to mix windows or analysis rates in one output directory, so the old
+            # results move aside under a timestamped name. Renaming (rather than deleting) means putting the
+            # earlier analysis back is a rename away, which matters because re-analysis of the same footage is
+            # what created the conflict.
             archived = segment_dir.with_name(f"{segment_dir.name}_superseded_{time.strftime('%Y%m%d_%H%M%S')}")
             segment_dir.rename(archived)
             archived_note = f" The previous results are at `data/segments/{archived.name}`."

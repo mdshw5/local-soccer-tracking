@@ -141,7 +141,16 @@
     Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
       const args = event.detail.args || {};
       marks = args.marks || {start: null, half: null, end: null};
-      const url = typeof args.proxy_url === 'string' ? args.proxy_url : '';
+      // The marking video can arrive two ways: a direct URL (a prebuilt proxy through Streamlit's media
+      // endpoint, or the game route URL), or - when the footage stream is running - composed here from the
+      // dashboard's own host, so the browser reaches the stream server the same way the replay pane does
+      // (a forwarded or LAN host, not a hard-coded localhost).
+      let url = typeof args.proxy_url === 'string' ? args.proxy_url : '';
+      if (!url && args.game_id) {
+        const port = Number(args.stream_port) || 8510;
+        const base = (args.stream_base || '') || `${location.protocol}//${location.hostname}:${port}`;
+        url = `${base}/game/${args.game_id}.mp4`;
+      }
       if (url && video.getAttribute('src') !== url) {
         // Re-setting the same URL would restart playback, so only a changed proxy reloads the element.
         video.setAttribute('src', url);

@@ -105,7 +105,7 @@ CLEARANCE_HORIZON_S = 3.0  # the window the travel is measured over
 MAX_BALL_SPEED_MS = 45.0  # faster than any struck ball: a measurement error, not motion
 STATIC_MIN_S = 1.0  # a ball has to be still for this long to count as "at rest", not just slow for a frame
 MAX_STEP_S = 1.0  # a gap longer than this is not a velocity: the ball was not seen in between
-SPEED_WINDOW_S = 0.4  # the look-back window the net displacement is measured over (2 frames at 5 fps)
+SPEED_WINDOW_S = 0.4  # the look-back window the net displacement is measured over (a couple of frames either rate)
 MIN_STRAIGHTNESS = 0.7  # net displacement / path length below which the motion is jitter, not travel
 SPIKE_FACTOR = 4.0  # how far from the local median a position may sit before it is a spike
 PITCH_MARGIN_M = 3.0  # a ball a little outside the lines is real; kilometres away is a projection failure
@@ -128,6 +128,7 @@ TACKLE_STOP_SPEED_KMH = 2.0  # a player who was running and is now this slow has
 TACKLE_MOVE_SPEED_KMH = 12.0  # ... having been at least this fast a moment before (a run, not a jog)
 TACKLE_WINDOW_S = 1.5
 TACKLE_BALL_CHANGE_MS = 10.0  # the ball's own speed has to change by this much at the challenge
+ATTRIBUTION_LAG_S = 0.4  # "a moment before" look-back/search tolerance (2 frames at the 5 fps tuning rate)
 MIN_EVENT_GAP_S = 3.0  # two events of the same type closer than this are one event
 
 
@@ -347,6 +348,20 @@ def _players_by_frame(players: list[PlayerTrack]) -> dict[int, list[tuple[int, i
     return by_frame
 
 
+def _lag_frames(motion: BallMotion) -> int:
+    """An "a moment before/around" tolerance in frames, scaled to the analysis rate.
+
+    ``ATTRIBUTION_LAG_S`` was a couple of frames at the 5 fps the detectors were tuned at; at 15 fps the same
+    wall-clock tolerance is six frames, which is the point - the ball and the player are still detected a few
+    tenths of a second apart, not a couple of frames apart.
+    """
+    if motion.frames < 2:
+        return 2
+    dt = float(np.median(np.diff(motion.times)))
+    rate = 1.0 / dt if dt > 1e-6 else 5.0
+    return max(1, int(round(ATTRIBUTION_LAG_S * rate)))
+
+
 def _nearest_player(
     by_frame: dict[int, list[tuple[int, int, float, float]]],
     frame: int,
@@ -551,8 +566,12 @@ def _goals(
         reset = _centre_reset_after(motion, length_m, width_m, frame)
         if reset is None:
             continue
-        # The scorer is the player nearest the ball a moment *before* it crossed the line.
-        scorer = _nearest_player(by_frame, max(0, frame - 2), tuple(motion.xy[frame]), ATTRIBUTION_RADIUS_M)
+        # The scorer is the player nearest the ball a moment *before* it crossed the line (0.4 s back, scaled to
+        # the analysis rate), searched either side of that moment.
+        lag = _lag_frames(motion)
+        scorer = _nearest_player(
+            by_frame, max(0, frame - lag), tuple(motion.xy[frame]), ATTRIBUTION_RADIUS_M, search=lag
+        )
         track_id = scorer[0] if scorer else None
         team = scorer[1] if scorer else -1
         out.append(
@@ -631,7 +650,8 @@ def _shots(
             # Closer to the goal than it started, by distance - the sign of the difference is not the question.
             if abs(goal_x - motion.xy[end, 0]) >= abs(goal_x - x):
                 continue
-        shooter = _nearest_player(by_frame, max(0, origin - 2), (x, y), ATTRIBUTION_RADIUS_M)
+        lag = _lag_frames(motion)
+        shooter = _nearest_player(by_frame, max(0, origin - lag), (x, y), ATTRIBUTION_RADIUS_M, search=lag)
         track_id = shooter[0] if shooter else None
         out.append(
             Event(
@@ -678,7 +698,8 @@ def _corners(
         kick = _first_fast_after(motion, end, KICK_SPEED_MS, window_s=3.0)
         if kick is None:
             continue
-        taker = _nearest_player(by_frame, max(0, kick - 2), tuple(motion.xy[kick]), ATTRIBUTION_RADIUS_M)
+        lag = _lag_frames(motion)
+        taker = _nearest_player(by_frame, max(0, kick - lag), tuple(motion.xy[kick]), ATTRIBUTION_RADIUS_M, search=lag)
         track_id = taker[0] if taker else None
         out.append(
             Event(
@@ -731,7 +752,8 @@ def _penalties(
         )
         if whistle is None:
             continue
-        taker = _nearest_player(by_frame, max(0, kick - 2), tuple(motion.xy[kick]), ATTRIBUTION_RADIUS_M)
+        lag = _lag_frames(motion)
+        taker = _nearest_player(by_frame, max(0, kick - lag), tuple(motion.xy[kick]), ATTRIBUTION_RADIUS_M, search=lag)
         track_id = taker[0] if taker else None
         out.append(
             Event(
@@ -812,8 +834,12 @@ def _clearances(
         orientation = _orientation_for(orientations, float(motion.times[origin]), half_bounds)
         if orientation is None or not orientation.defending_goal:
             continue
-        # The player nearest the ball just before the kick decides whose clearance it is.
-        player = _nearest_player(by_frame, max(0, origin - 2), tuple(motion.xy[origin]), ATTRIBUTION_RADIUS_M)
+        # The player nearest the ball just before the kick decides whose clearance it is (0.4 s back, scaled to
+        # the analysis rate).
+        lag = _lag_frames(motion)
+        player = _nearest_player(
+            by_frame, max(0, origin - lag), tuple(motion.xy[origin]), ATTRIBUTION_RADIUS_M, search=lag
+        )
         if player is None:
             continue
         team = player[1]
@@ -883,10 +909,11 @@ def _tackles(
             if distance > TACKLE_RADIUS_M:
                 continue
             # The ball's own motion has to change around the challenge: a player stopping beside a still ball is
-            # just standing, not tackling. The change is measured over a couple of frames either side, because the
-            # ball and the player are not always detected on the same frame.
-            before = motion.speed[max(0, frame - 2)]
-            after = motion.speed[min(motion.frames - 1, frame + 2)]
+            # just standing, not tackling. The change is measured over about 0.4 s either side (scaled to the
+            # analysis rate), because the ball and the player are not always detected on the same frame.
+            lag = _lag_frames(motion)
+            before = motion.speed[max(0, frame - lag)]
+            after = motion.speed[min(motion.frames - 1, frame + lag)]
             changed = (
                 np.isfinite(before)
                 and np.isfinite(after)

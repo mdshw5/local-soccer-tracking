@@ -95,6 +95,16 @@
         border-radius: 6px;
         background: #000;
       }
+      /* The live stream's element: the pane gives it the same box the still has, so switching between them
+         does not move the layout. */
+      #footage-video {
+        display: block;
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: contain;
+        border-radius: 6px;
+        background: #000;
+      }
       #footage-empty {
         border: 1px dashed #374151;
         border-radius: 6px;
@@ -175,6 +185,8 @@
       <label class="toggle"><input id="labels" type="checkbox" checked /> shirts</label>
       <label class="toggle" title="Keep the footage on the same second of the match as the animation"
         ><input id="sync" type="checkbox" checked /> sync footage</label>
+      <label class="toggle" title="Match audio (the footage starts muted: browsers block sound until asked)"
+        ><input id="sound" type="checkbox" /> sound</label>
       <span class="group" title="What the annotated footage draws - the pitch markers above are unaffected">
         <span class="group-title">footage:</span>
         <label class="toggle"><input id="ov-pitch" type="checkbox" checked /> lines</label>
@@ -182,7 +194,7 @@
         <label class="toggle"><input id="ov-numbers" type="checkbox" checked /> numbers</label>
         <label class="toggle"><input id="ov-ball" type="checkbox" checked /> ball</label>
         <label class="toggle"><input id="ov-hud" type="checkbox" checked /> clock</label>
-        <label class="toggle" title="Session name, frame counter and the notes about what was left out"
+        <label class="toggle" title="Session name, frame counter, track ids and the notes about what was left out"
           ><input id="ov-debug" type="checkbox" checked /> debug</label>
       </span>
       <label class="toggle"
@@ -199,11 +211,12 @@
         <div id="stage"><canvas id="canvas"></canvas></div>
       </div>
       <div id="footage-pane">
+        <video id="footage-video" muted playsinline style="display: none"></video>
         <img id="footage" alt="annotated match footage" style="display: none" />
         <div id="footage-empty">
           The annotated match stream is not configured. Start it with
           <b>python scripts/run_match_stream.py --port 8510</b> and it will play here in step with the animation:
-          a still of the moment while the animation is paused, the live stream while it plays.
+          a still of the moment while the animation is paused, full-motion video while it plays.
         </div>
         <div id="footage-note"></div>
       </div>
@@ -297,17 +310,18 @@
         // Which layers the footage draws. They are named after the stream server's own overlay names (the query
         // parameter calls them pitch/boxes/numbers/ball/hud/debug); the labels above use the words a person
         // would. "hud" is the watching set (teams, clock), "debug" the diagnosing set (session name, frame
-        // counter, notes).
+        // counter, track ids, notes).
         footageOverlays: {pitch: true, boxes: true, numbers: true, ball: true, hud: true, debug: true},
         footageKind: '', // what the pane currently shows: '' | 'still' | 'stream'
         footageSeq: 0, // cache-buster per stream start
         footageToken: '', // identifies the live stream to the server's /stop endpoint
+        footageSound: false, // the stream's audio: off until asked for (browsers block sound otherwise)
         footageError: false,
         footageRetrying: false, // a load failed and a retry is scheduled
         footageRetry: 0,
         footageRetryTimer: null,
-        footageStartedAt: 0, // strip time the current stream was started at
-        footageWallAt: 0, // performance.now() of that start, for the drift check
+        footageOpenStrip: 0, // strip second the current stream was opened at (its own timeline's zero)
+        footageRate: 1, // the content speed baked into the current stream's timestamps
         footageAwaitingFirstFrame: false, // a stream was asked for; its clock starts when frame one arrives
         footageLastRestartAt: 0,
         footageStillTimer: null,
@@ -329,6 +343,7 @@
       const pitchPane = document.getElementById('pitch-pane');
       const footagePane = document.getElementById('footage-pane');
       let footage = document.getElementById('footage');
+      const footageVideo = document.getElementById('footage-video');
       const footageEmpty = document.getElementById('footage-empty');
       const footageNote = document.getElementById('footage-note');
 
@@ -855,20 +870,23 @@
       // ---------------------------------------------------------------------------------------------------
       // The annotated footage beside the pitch.
       //
-      // The pane is the match stream (``scripts/run_match_stream.py``): MJPEG of the analysed window with the
-      // pitch model, the detection boxes and the shirt numbers drawn on it. An MJPEG connection only ever moves
-      // forward - it cannot be seeked - so the animation stays the master clock and the pane follows it:
+      // The pane is the match's encoded stream (``/live/<match>.mp4``, from ``dashboard/video.py``): H.264 of
+      // the analysed window with the pitch model, the detection boxes and the shirt numbers drawn on it, at
+      // the source's full frame rate (interpolated between analysis samples) and with the match's own audio.
+      // A live stream still only moves forward, so the animation stays the master clock and the pane follows:
       //
-      // * paused, the pane shows one annotated still of the animation's exact second, so scrubbing the animation
-      //   scrubs the footage with it (one still request per pause in the scrub, not one per pixel);
-      // * playing, it opens a stream at the animation's second and speed. A stream that falls behind - the
-      //   decode is capped by how fast the 4K footage decodes - is restarted at the animation's second once the
-      //   gap passes a tolerance, rather than left drifting away from the pitch beside it.
+      // * paused, the pane shows one annotated still of the animation's exact second (``/frame``), so scrubbing
+      //   the animation scrubs the footage with it (one still request per pause in the scrub, not per pixel);
+      // * playing, it opens the live stream at the animation's second. A <video> element reports where it is
+      //   (``currentTime``), so the pane can *measure* the footage's position instead of inferring it - and a
+      //   stream that falls behind, or is simply out of step, is restarted at the animation's second once the
+      //   gap passes a tolerance rather than left drifting away from the pitch beside it.
       //
       // The animation's clock is the strip's (0 = first analysed frame); the stream's is the recording's, so
       // ``streamOffset`` is what makes "start at this second" mean the same on both clocks.
       // ---------------------------------------------------------------------------------------------------
-      const FOOTAGE_DRIFT_TOLERANCE_S = 2.0; // an MJPEG restart costs a seek: only correct a visible divergence
+      const FOOTAGE_FPS = 30; // full motion for the pane; 60 outruns this box's render at 1280 with overlays
+      const FOOTAGE_DRIFT_TOLERANCE_S = 2.0; // a restart costs an encode: only correct a visible divergence
       const FOOTAGE_MIN_RESTART_INTERVAL_MS = 4000; // never restart more often than this, or a slow decode loops
       const FOOTAGE_STILL_DEBOUNCE_MS = 180; // scrubbing fires an event per pixel; one still per pause in them
       // A restart can lose the race for the server's decode slot (the previous connection's slot is only freed
@@ -896,10 +914,12 @@
         if (kind === 'still') {
           return `${state.footageBase}/frame/${state.matchId}.jpg?t=${source.toFixed(1)}&width=${width}&overlays=${overlayParam()}`;
         }
+        // The live encoded stream: full frame rate, the match's audio, the same layers. ``rate`` is the
+        // animation's speed baked into the stream's timeline, so the pane and the pitch run at one pace.
         return (
-          `${state.footageBase}/stream/${state.matchId}.mjpg` +
-          `?start=${source.toFixed(1)}&rate=${state.speed}&width=${width}&overlays=${overlayParam()}` +
-          `&token=${state.footageToken}&_=${++state.footageSeq}`
+          `${state.footageBase}/live/${state.matchId}.mp4` +
+          `?start=${source.toFixed(1)}&fps=${FOOTAGE_FPS}&rate=${state.speed}&width=${width}` +
+          `&overlays=${overlayParam()}&token=${state.footageToken}&_=${++state.footageSeq}`
         );
       }
 
@@ -909,10 +929,9 @@
       }
 
       function replaceFootageImage() {
-        // Removing the ``src`` of a live MJPEG <img> is not enough to stop the fetch: Chromium keeps *draining*
-        // the connection while the element exists, so every restart would leave a decode running here (and on
-        // the server, holding one of its slots) with nobody watching it. Clearing the src aborts the fetch and
-        // the fresh element starts the next one; the detached node is then free to be collected.
+        // Swapping the element (not merely clearing its src) aborts an in-flight still fetch, so a scrub that
+        // supersedes a still does not leave its decode running on the server for nobody. The detached node is
+        // free to be collected with the aborted request attached to it.
         footage.removeAttribute('src');
         const next = document.createElement('img');
         next.id = 'footage';
@@ -932,6 +951,36 @@
         if (kind && url === footage.getAttribute('src') && !failed) return;
         replaceFootageImage();
         if (kind) footage.src = url;
+        renderFootageVisibility();
+      }
+
+      function openLiveVideo(url) {
+        // The live encoded stream in the pane's <video> element. The still stays on screen until the stream's
+        // first frame is decoded (``loadeddata``), so an encoder start-up does not flash black. Unlike an MJPEG
+        // <img>, a <video> really does abort its fetch when the source is cleared - the stop token below is
+        // belt and braces, kept because a half-open connection on this server costs a decode slot.
+        footageVideo.muted = !state.footageSound;
+        footageVideo.src = url;
+        const started = footageVideo.play();
+        if (started && started.catch) started.catch(() => {}); // the policy will allow it: muted, or after a click
+      }
+
+      function closeLiveVideo() {
+        state.footageAwaitingFirstFrame = false;
+        footageVideo.removeAttribute('src');
+        footageVideo.load(); // aborts the fetch in the browser, not only in the pane
+        footageVideo.style.display = 'none';
+      }
+
+      function renderFootageVisibility() {
+        // The pane shows exactly one of: the live video (playing and ready), the still (paused or before the
+        // stream's first frame), or the "not configured" note.
+        const enabled = footageEnabled();
+        const live = enabled && state.playing && state.footageKind === 'stream' && footageVideo.readyState >= 2;
+        footageVideo.style.display = live ? 'block' : 'none';
+        footage.style.display = enabled && !live ? 'block' : 'none';
+        footageEmpty.style.display = enabled ? 'none' : 'block';
+        resyncFootageBtn.disabled = !enabled;
       }
 
       function newFootageToken() {
@@ -939,9 +988,9 @@
       }
 
       function stopFootageStream() {
-        // Tell the server to end the stream this pane is abandoning. A browser will not abort an MJPEG fetch on
-        // command - Chromium keeps *draining* it after the <img> is replaced or even detached, a decoder running
-        // for a picture nobody sees - so the deterministic end is the server closing the connection itself.
+        // Tell the server to end the stream this pane is abandoning: a superseded stream must not keep a decode
+        // and an encode running for a viewer that has moved on. The server's write watchdog and the pagehide
+        // beacon cover the cases this call cannot reach.
         const token = state.footageToken;
         state.footageToken = '';
         if (!token) return;
@@ -950,23 +999,28 @@
 
       function closeFootageStream() {
         stopFootageStream();
-        if (state.footageKind === 'stream') setFootageSource('', '');
+        if (state.footageKind === 'stream') {
+          state.footageKind = '';
+          closeLiveVideo();
+        }
       }
 
       function openFootage() {
-        // The seek the pane cannot do: drop the current connection and open a new one at the animation's second.
+        // Seeking the pane means reopening it - a stream is never seeked, it is replaced at the animation's
+        // second - so every path that moves the animation ends here.
         if (!footageEnabled()) return;
         stopFootageStream();
-        state.footageStartedAt = state.time;
-        state.footageWallAt = performance.now();
         state.footageLastRestartAt = performance.now();
         if (state.playing) {
           state.footageToken = newFootageToken();
+          state.footageKind = 'stream';
+          state.footageOpenStrip = state.time;
+          state.footageRate = state.speed;
           state.footageAwaitingFirstFrame = true;
-          setFootageSource('stream', footageUrl('stream', state.time));
+          openLiveVideo(footageUrl('live', state.time));
         } else {
-          // Paused: stop the push (a stream left running would walk away from the animation) and fetch the still.
-          if (state.footageKind === 'stream') setFootageSource('', '');
+          // Paused: a stream left running would walk away from the animation; a still is the exact second.
+          closeLiveVideo();
           scheduleStill();
         }
       }
@@ -996,11 +1050,13 @@
             return;
           }
           if (!state.footageSync) return; // streaming, uncoupled: nothing corrects it
-          if (state.footageAwaitingFirstFrame) return; // the request is in flight; its clock starts with frame one
-          // The animation's clock is the truth. Restart when the stream has visibly parted from it, at most
-          // once per minimum interval - a decode slower than real time would otherwise loop on restarts.
-          const elapsed = (performance.now() - state.footageWallAt) / 1000;
-          const drift = Math.abs(state.time - (state.footageStartedAt + elapsed * state.speed));
+          if (state.footageAwaitingFirstFrame || footageVideo.readyState < 2) return; // no clock yet: nothing to compare
+          // The animation's clock is the truth - and the video element reports where the footage actually is
+          // (its own timeline started at ``footageOpenStrip``), so the comparison is a measurement, not a model.
+          // Restart when they have visibly parted, at most once per minimum interval - a render slower than the
+          // asked-for rate would otherwise loop on restarts.
+          const displayed = state.footageOpenStrip + footageVideo.currentTime * state.footageRate;
+          const drift = Math.abs(state.time - displayed);
           if (
             drift > FOOTAGE_DRIFT_TOLERANCE_S &&
             performance.now() - state.footageLastRestartAt >= FOOTAGE_MIN_RESTART_INTERVAL_MS
@@ -1014,11 +1070,8 @@
       }
 
       function showFootage() {
-        const enabled = Boolean(state.footageBase && state.matchId);
-        footage.style.display = enabled ? 'block' : 'none';
-        footageEmpty.style.display = enabled ? 'none' : 'block';
-        resyncFootageBtn.disabled = !enabled;
-        if (!enabled) {
+        renderFootageVisibility();
+        if (!footageEnabled()) {
           footageNote.textContent = '';
           return;
         }
@@ -1031,7 +1084,7 @@
           return;
         }
         footageNote.textContent = state.footageSync
-          ? 'Annotated footage in step with the animation: a still while paused, the stream while playing.'
+          ? 'Annotated footage in step with the animation: a still while paused, full-motion video while playing.'
           : 'Sync is off, so the footage streams on its own and is not restarted when the animation moves.';
       }
 
@@ -1268,21 +1321,39 @@
       function onFootageLoad() {
         state.footageRetry = 0;
         state.footageRetrying = false;
-        // The stream's clock starts with its first *frame*, not with the request that asked for it: the seek
-        // and the first decode cost a second or two, and a model anchored at the request would read as
-        // permanently behind the animation - tripping the drift restart on a stream that is perfectly in step.
-        if (state.footageKind === 'stream' && state.footageAwaitingFirstFrame) {
-          state.footageAwaitingFirstFrame = false;
-          state.footageStartedAt = state.time;
-          state.footageWallAt = performance.now();
-        }
         if (state.footageError) {
           state.footageError = false;
-          showFootage();
         }
+        showFootage();
       }
 
       bindFootage(footage);
+      footageVideo.addEventListener('error', onFootageError);
+      footageVideo.addEventListener('loadeddata', () => {
+        // The stream's first frame is decoded: its timeline is real now, and the still gives way to it. The
+        // stream's zero is re-anchored to the animation's current second here, because an encoder takes a
+        // second or two to start: a model anchored at the *request* would read as permanently behind (the
+        // stream cannot skip ahead to recoup it) and trip the drift restart on a stream that is in step.
+        state.footageOpenStrip = state.time;
+        state.footageAwaitingFirstFrame = false;
+        state.footageRetry = 0;
+        state.footageRetrying = false;
+        state.footageError = false;
+        showFootage();
+      });
+      footageVideo.addEventListener('playing', renderFootageVisibility);
+      footageVideo.addEventListener('emptied', renderFootageVisibility);
+
+      document.getElementById('sound').addEventListener('change', (event) => {
+        state.footageSound = event.target.checked;
+        footageVideo.muted = !state.footageSound;
+        // The click is the gesture the autoplay policy wants, and it is what lets the restarts - which happen
+        // without a gesture - stay audible; until it, the pane is muted and therefore always allowed to play.
+        if (state.footageSound && state.footageKind === 'stream') {
+          const started = footageVideo.play();
+          if (started && started.catch) started.catch(() => {});
+        }
+      });
 
       window.addEventListener('pagehide', () => {
         // The last chance to say goodbye: without it the server would keep this stream decoding until its write

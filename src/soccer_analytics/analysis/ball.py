@@ -50,20 +50,26 @@ def blank_overlays(frame: np.ndarray) -> np.ndarray:
 # v is also divided by the width). At 4K one normalised unit is 3840 px; the comments give the 4K equivalents.
 MIN_SIZE = 0.003  # ~12 px across; smaller is grass texture, a line speck, or detector noise
 MAX_SIZE = 0.06  # ~230 px; larger is a player, a bib, a bottle - something the detector latched onto
+
+# Frame-count windows are derived from seconds at the tracker's own rate (see BallTrack.__post_init__), so the
+# tracker behaves the same at 5, 15 or any other analysis rate. Spatial gates stay in normalised units: a higher
+# rate shrinks the per-frame displacement, so the same gate tightens naturally in time.
 GATE = 0.045  # ~170 px; how far from the prediction a detection may sit and still be the same ball
-MAX_COAST = 12  # 2.4 s at the analysis rate; longer without a detection and the track is better declared lost
+COAST_SECONDS = 2.4  # longer without a detection and the track is better declared lost
 ACQUIRE_CONF = 0.25  # a detection this confident may start or restart a track from a full-frame scan
 MARGIN = 0.02  # ~77 px; the band outside the frame within which a prediction still counts as "at the edge"
 
 # The camera step explains only camera motion; a ball being passed moves relative to the world on top of it, and at
-# the analysis rate a hard pass covers half a frame between frames - far past any gate that is tight enough to keep
+# the reference rate a hard pass covers half a frame between frames - far past any gate that is tight enough to keep
 # a white shoe out. So the tracker also learns the ball's own image velocity and predicts with it. Measured on the
 # real game (t=690-694, a ball being passed around): without this the track re-acquires a *moving* ball by
 # teleporting every second frame; with it, the window scan keeps the ball in view through the pass.
-VELOCITY_GAIN = 0.5  # EMA gain on the innovation (the part of the motion the camera step did not explain)
+VELOCITY_GAIN = 0.5  # EMA gain per frame at the reference rate; scaled by rate to keep the same time constant
+VELOCITY_GAIN_REFERENCE_FPS = 5.0  # the rate every window in this section was tuned at
 SPEED_GATE = 0.35  # extra gate per unit of speed: a fast ball's next position is genuinely uncertain by more
-MAX_SPEED = 0.2  # ~770 px/frame at 4K; faster than any pass the 5 fps window can follow, so cap rather than trust
-REENTRY_VELOCITY_FRAMES = 8  # a re-entry within this many coasted frames is a moving ball, not a fresh sighting
+MAX_SPEED_PER_S = 1.0  # normalised units/second (~3800 px/s at 4K) - faster than any pass, so cap, don't trust it
+REENTRY_VELOCITY_SECONDS = 1.6  # a re-entry within this long is a moving ball, not a fresh sighting
+MAX_COAST = round(COAST_SECONDS * VELOCITY_GAIN_REFERENCE_FPS)  # 12 frames at the reference rate (tests import it)
 
 
 @dataclass
@@ -81,12 +87,14 @@ class BallTrack:
     """
 
     aspect: float  # frame height / width, to know where the picture's edges are
+    rate: float = VELOCITY_GAIN_REFERENCE_FPS  # analysis frames per second; frame-count windows scale with it
     gate: float = GATE
-    max_coast: int = MAX_COAST
+    max_coast: int = 0  # 0 = derive from COAST_SECONDS at `rate` (12 frames at the 5 fps reference)
     acquire_conf: float = ACQUIRE_CONF
-    velocity_gain: float = VELOCITY_GAIN
+    velocity_gain: float = 0.0  # 0 = derive from VELOCITY_GAIN with the same time constant at any `rate`
     speed_gate: float = SPEED_GATE
-    max_speed: float = MAX_SPEED
+    max_speed: float = 0.0  # 0 = derive from MAX_SPEED_PER_S at `rate` (0.2 per frame at 5 fps)
+    reentry_velocity_frames: int = 0  # 0 = derive from REENTRY_VELOCITY_SECONDS at `rate`
     status: str = "lost"
     x: float | None = None
     y: float | None = None
@@ -97,6 +105,24 @@ class BallTrack:
     # a velocity).
     vx: float = 0.0
     vy: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Turn the second-based windows into frames at this track's rate, once per track.
+
+        Every window above is calibrated in seconds; this is where an analysis rate meets them. At the 5 fps
+        reference the derived values are exactly the tuned ones (coast 12 frames, re-entry 8, max speed 0.2);
+        at 15 fps the same *durations* apply - 36 frames of coast, 24 of re-entry, a third of the per-frame
+        speed cap - and the velocity EMA keeps its ~0.29 s time constant instead of adapting three times faster.
+        """
+        self.rate = float(self.rate)
+        if self.max_coast <= 0:
+            self.max_coast = max(1, int(round(COAST_SECONDS * self.rate)))
+        if self.velocity_gain <= 0.0:
+            self.velocity_gain = 1.0 - (1.0 - VELOCITY_GAIN) ** (VELOCITY_GAIN_REFERENCE_FPS / self.rate)
+        if self.max_speed <= 0.0:
+            self.max_speed = MAX_SPEED_PER_S / self.rate
+        if self.reentry_velocity_frames <= 0:
+            self.reentry_velocity_frames = max(1, int(round(REENTRY_VELOCITY_SECONDS * self.rate)))
 
     def predict(self, step: np.ndarray | None) -> tuple[float, float] | None:
         """Where the last position lands this frame with only the camera *and the learned velocity* at play.
@@ -179,7 +205,7 @@ class BallTrack:
                     # A re-entry after a *short* coast is a sample of a moving ball: the displacement across the
                     # gap, per frame, is a velocity estimate. Over a longer gap it is a fresh sighting, not a
                     # measurement of motion - a jump is not a velocity.
-                    if self.coasted + 1 <= REENTRY_VELOCITY_FRAMES:
+                    if self.coasted + 1 <= self.reentry_velocity_frames:
                         gap = self.coasted + 1
                         innovation = (
                             (best_det[1] - prediction[0]) / gap,
@@ -250,11 +276,15 @@ class BallTrack:
             "coasted": self.coasted,
             "vx": self.vx,
             "vy": self.vy,
+            "rate": self.rate,
         }
 
     @classmethod
-    def from_json(cls, payload: dict, *, aspect: float) -> "BallTrack":
-        track = cls(aspect=aspect)
+    def from_json(cls, payload: dict, *, aspect: float, rate: float | None = None) -> "BallTrack":
+        """Rebuild a checkpointed track. ``rate`` is the rate the *scan* runs at and wins over the stored one:
+        a checkpoint from an older scan (or from before rates were stored) must still resume correctly."""
+        stored = payload.get("rate")
+        track = cls(aspect=aspect, rate=float(rate) if rate is not None else float(stored or VELOCITY_GAIN_REFERENCE_FPS))
         track.status = str(payload.get("status", "lost"))
         track.x = payload.get("x")
         track.y = payload.get("y")

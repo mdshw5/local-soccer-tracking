@@ -33,7 +33,7 @@ import numpy as np
 from soccer_analytics.ingest.ffmpeg_reader import FFmpegError, probe_video, run_ffmpeg_with_progress
 
 PROXY_WIDTH = 960  # wide enough to pick out pitch markings while scrubbing, small enough to seek instantly
-PROXY_FPS = 10.0  # twice the analysis rate, so a scrub never skips an analysed frame
+PROXY_FPS = 30.0  # twice the 15 fps analysis rate, so a scrub never skips an analysed frame
 PROXY_FILE = "proxy.mp4"
 PROXY_DIR = "scrubber"  # sits under the segment directory, so it invalidates when the segment is rebuilt
 BUILD_STATE_FILE = "scrubber_build.json"

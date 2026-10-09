@@ -55,12 +55,12 @@ def default_game() -> str:
 
 GAME = default_game()
 SEGMENT = "data/segments/game_16-28-37.784_32823901638__whole_game_541_4851"
-FPS = 5.0
+DEFAULT_FPS = 5.0  # only used when the segment's meta predates the rate being stored
 COCO_BALL_CLASS = 32
 WINDOW_PX = 1600  # the window scanned around the prediction while tracking, at 4K
 WINDOW_IMGSZ = 1280
 FULL_IMGSZ = 2560
-MARK_EVERY = 15  # frames between marked stills (3 s at 5 fps)
+MARK_EVERY_SECONDS = 3.0  # wall-clock gap between the marked stills
 
 COLOURS = {"tracking": (80, 220, 80), "coasting": (60, 190, 240), "out_of_view": (70, 70, 230), "lost": (150, 150, 150)}
 
@@ -93,21 +93,24 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     segment = load_segment(args.segment)
-    print(f'segment: {len(segment.time)} frames, {segment.time[0]:.1f}s - {segment.time[-1]:.1f}s, aspect {segment.aspect:.4f}')
+    fps = float(segment.meta.get("fps", DEFAULT_FPS))
+    full_every = max(1, int(round(5.0 * fps)))
+    mark_every = max(1, int(round(MARK_EVERY_SECONDS * fps)))
+    print(f'segment: {len(segment.time)} frames, {segment.time[0]:.1f}s - {segment.time[-1]:.1f}s, aspect {segment.aspect:.4f}, {fps:g} fps')
 
     coco = YOLO("yolov8s.pt")
     world = YOLO("yolov8s-worldv2.pt")
     world.set_classes(["soccer ball", "white ball"])
 
-    track = BallTrack(aspect=segment.aspect)
+    track = BallTrack(aspect=segment.aspect, rate=fps)
     records: list[dict] = []
     marks: list[np.ndarray] = []
     t0 = time.perf_counter()
     scans = {"window": 0, "full": 0}
 
-    reader = FFmpegFrameReader(Path(args.video), fps=FPS, width=3840, start_s=args.start_s, duration_s=args.duration_s)
+    reader = FFmpegFrameReader(Path(args.video), fps=fps, width=3840, start_s=args.start_s, duration_s=args.duration_s)
     for count, (t, frame) in enumerate(reader.frames()):
-        idx = int(round((t - float(segment.time[0])) * FPS))
+        idx = int(round((t - float(segment.time[0])) * fps))
         step = segment.step[idx] if 0 <= idx < len(segment.step) else None
         blank_overlays(frame)
 
@@ -119,9 +122,9 @@ def main() -> None:
         # frame - and only a full-frame scan can find it and re-learn the velocity; a periodic full scan is the
         # safety net against the prediction quietly drifting wrong.
         window_ok = predicted is not None and (
-            track.status == "tracking" or (track.status == "coasting" and track.coasted <= 1)
+            track.status == "tracking" or (track.status == "coasting" and track.coasted <= max(1, int(round(0.2 * fps))))
         )
-        if window_ok and count % 25 != 24:
+        if window_ok and count % full_every != full_every - 1:
             scans["window"] += 1
             cx = int(np.clip(predicted[0] * frame.shape[1], WINDOW_PX / 2, frame.shape[1] - WINDOW_PX / 2))
             cy = int(np.clip(predicted[1] * frame.shape[1], WINDOW_PX / 2, frame.shape[0] - WINDOW_PX / 2))
@@ -137,7 +140,7 @@ def main() -> None:
             state = track.update(dets, step=step, full_frame=True)
 
         records.append({"t": round(t, 3), "idx": idx, **state})
-        if count % MARK_EVERY == 0:
+        if count % mark_every == 0:
             small = cv2.resize(frame, (1920, 1080), interpolation=cv2.INTER_AREA)
             if state["u"] is not None:
                 px = int(state["u"] * 1920)

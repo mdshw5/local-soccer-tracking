@@ -200,8 +200,12 @@ This is the central design decision, and it is what makes the dashboard usable i
 
 **Stage A** (`analysis/stage_a.py`) is heavy, GPU-bound and run once per segment. It decodes the video, recovers
 camera motion frame by frame, detects people and records a compact kit-colour descriptor for each one. It writes
-chunk files that let it resume, and a `status.json` the dashboard polls. Measured on the real footage: **2.11x
-realtime** (10.55 analysed frames per second), 36 detections per frame, ~0.9 MB per 150 analysed frames.
+chunk files that let it resume, and a `status.json` the dashboard polls. It samples at **15 fps by default** (both
+60 and 30 fps camera files divide by it), and every frame-count window downstream — BoT-SORT's identity buffer,
+the tracker's gates, the ball scan's coast windows, the offline stitcher — is derived from seconds at the rate the
+segment was built with, so an older 5 fps segment keeps its tuned behaviour. Measured on the real footage: ~12
+analysed frames per second of processing (~90 minutes for a 72-minute game at 15 fps), 36 detections per frame,
+and chunk files that grow linearly with the rate.
 
 **Stage B** (`analysis/stage_b.py`) is cheap and re-runnable in seconds. It projects stored detections to the pitch
 using the current calibration, tracks players, assigns teams and computes the metrics — no video decoding. Re-clicking

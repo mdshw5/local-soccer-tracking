@@ -50,6 +50,17 @@ class VideoError(RuntimeError):
     """An encode that could not start, keep up, or finish - the route turns it into an error response."""
 
 
+# The encoder candidates per codec, best first. ``codec=hevc`` is an explicit choice, not the default: HEVC in
+# MP4 is smaller at equal quality on this hardware, but browsers only play it where the platform decodes it
+# (Chromium on this box does not), so the compatible H.264 stays the default and HEVC is for downloads and
+# players that know it.
+ENCODERS = {
+    "h264": ("h264_nvenc", "libx264"),
+    "hevc": ("hevc_nvenc", "libx265"),
+}
+CODECS = tuple(ENCODERS)
+
+
 class _NeverStops:
     stopped = False
 
@@ -57,27 +68,60 @@ class _NeverStops:
 _NEVER_STOPPED = _NeverStops()
 
 
-@lru_cache(maxsize=1)
-def pick_encoder() -> str:
-    """The H.264 encoder this ffmpeg can actually open: NVENC when the driver takes it, else CPU x264.
+@lru_cache(maxsize=4)
+def pick_encoder(codec: str = "h264") -> str:
+    """The encoder this ffmpeg can actually open for a codec: the GPU one when the driver takes it, else CPU.
 
     Probed with two tiny frames rather than assumed: a machine with an NVIDIA card but no encode permission
-    (or a filled session table) must fall back to a working encoder, not fail every request. Cached: the answer
-    cannot change while the process lives.
+    (or a filled session table) must fall back to a working encoder, not fail every request. Cached per codec:
+    the answer cannot change while the process lives.
     """
-    for encoder in ("h264_nvenc", "libx264"):
+    candidates = ENCODERS.get(codec, ENCODERS["h264"])
+    for encoder in candidates:
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "nullsrc=size=64x64:rate=10",
+            # 320x240, not a thumbnail: HEVC's NVENC refuses frames below its minimum size (64x64 fails with
+            # "dimensions are less than the minimum supported value"), which would silently pick the CPU encoder.
+            "-f", "lavfi", "-i", "nullsrc=size=320x240:rate=10",
             "-frames:v", "2", "-c:v", encoder, "-f", "null", "-",
         ]
         if subprocess.run(command, capture_output=True).returncode == 0:
             return encoder
-    raise VideoError("no usable H.264 encoder (tried h264_nvenc and libx264)")
+    raise VideoError(f"no usable {codec} encoder available (tried {', '.join(candidates)})")
+
+
+def _atempo_chain(rate: float) -> str:
+    """The audio tempo filter chain for a content rate: ``atempo`` only accepts 0.5-2.0 per stage.
+
+    Slowing down and speeding up must not turn the match into chipmunks, so the audio is retimed by stretching
+    it rather than resampling it; 4x is two 2x stages, 0.25x two halves.
+    """
+    remaining = max(0.25, min(8.0, float(rate)))
+    stages = []
+    while remaining > 2.0:
+        stages.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5:
+        stages.append("atempo=0.5")
+        remaining /= 0.5
+    stages.append(f"atempo={remaining:.4f}")
+    return ",".join(stages)
 
 
 def encoder_command(
-    *, width: int, height: int, fps: float, output: str, live: bool, encoder: str, keyframe_s: float
+    *,
+    width: int,
+    height: int,
+    fps: float,
+    output: str,
+    live: bool,
+    encoder: str,
+    keyframe_s: float,
+    rate: float = 1.0,
+    source: str | Path | None = None,
+    audio: bool = False,
+    audio_start_s: float = 0.0,
+    audio_duration_s: float | None = None,
 ) -> list[str]:
     """The ffmpeg invocation both encoders share: raw BGR frames in, H.264 MP4 out.
 
@@ -85,23 +129,54 @@ def encoder_command(
     a clip gets the index at the front instead (``faststart``), which is what makes it seekable, and a slower,
     denser tune. The keyframe interval doubles as the fragment interval for a live stream: about a second of
     video per fragment is what keeps a viewer near the live edge without chopping the stream into confetti.
+
+    ``rate`` is the *content* speed: the muxer's clock runs ``fps * rate`` per source second, so a 2x request
+    plays twice as fast in any player - the audio, when asked for, is retimed to match (``atempo``), and the
+    writer paces to the same product. ``source``/``audio`` add the match's own soundtrack from the recording,
+    seek-together with the video window; ``1:a:0?`` keeps a source without an audio track working, and the
+    output is bounded by ``-t`` (the window over the rate) rather than ``-shortest``: a soundtrack shorter than
+    the video must not truncate the clip, and one longer must not extend a live stream past its window in a
+    silent tail.
     """
     if encoder.endswith("nvenc"):
         quality = ["-preset", "p4", "-tune", "ll" if live else "hq", "-rc", "vbr", "-cq", "23"]
+    elif "265" in encoder or "hevc" in encoder:
+        quality = ["-preset", "veryfast" if live else "medium", "-crf", "25"]
     else:
         quality = ["-preset", "veryfast" if live else "medium", "-crf", "20"]
-    gop = max(1, int(round(fps * keyframe_s)))
+    has_audio = bool(audio and source is not None)
+    output_rate = max(1.0, float(fps) * float(rate))
+    gop = max(1, int(round(output_rate * keyframe_s)))
     finishing = (
         ["-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", output]
         if live
         else ["-movflags", "+faststart", "-f", "mp4", output]
     )
-    return [
+    command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-framerate", f"{fps:g}", "-i", "pipe:0",
-        "-an", "-c:v", encoder, *quality, "-pix_fmt", "yuv420p", "-g", str(gop), "-keyint_min", str(gop),
-        *finishing,
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-framerate", f"{output_rate:g}",
+        "-i", "pipe:0",
     ]
+    if has_audio:
+        command += ["-ss", f"{float(audio_start_s):.3f}", "-i", str(source)]
+    command += ["-map", "0:v:0"]
+    if has_audio:
+        command += ["-map", "1:a:0?"]
+        if abs(float(rate) - 1.0) > 1e-6:
+            command += ["-filter:a", _atempo_chain(rate)]
+        command += ["-c:a", "aac", "-b:a", "128k"]
+        if audio_duration_s is not None:
+            command += ["-t", f"{max(0.1, float(audio_duration_s) / max(0.01, float(rate))):.3f}"]
+    else:
+        command += ["-an"]
+    command += [
+        "-c:v", encoder, *quality, "-pix_fmt", "yuv420p", "-g", str(gop), "-keyint_min", str(gop),
+    ]
+    if "265" in encoder or "hevc" in encoder:
+        # ffmpeg tags HEVC as hev1 by default; QuickTime and Safari only accept hvc1, and it costs nothing.
+        command += ["-tag:v", "hvc1"]
+    command += finishing
+    return command
 
 
 class _StderrTail:
@@ -136,11 +211,44 @@ def _chain(first, rest):
     yield from rest
 
 
-def _start(encoder: str, *, fps: float, width: int, height: int, output: str, live: bool, keyframe_s: float):
+def _start(
+    encoder: str,
+    *,
+    fps: float,
+    width: int,
+    height: int,
+    output: str,
+    live: bool,
+    keyframe_s: float,
+    rate: float = 1.0,
+    source: str | Path | None = None,
+    audio: bool = False,
+    audio_start_s: float = 0.0,
+    audio_duration_s: float | None = None,
+):
     command = encoder_command(
-        width=width, height=height, fps=fps, output=output, live=live, encoder=encoder, keyframe_s=keyframe_s
+        width=width,
+        height=height,
+        fps=fps,
+        output=output,
+        live=live,
+        encoder=encoder,
+        keyframe_s=keyframe_s,
+        rate=rate,
+        source=source,
+        audio=audio,
+        audio_start_s=audio_start_s,
+        audio_duration_s=audio_duration_s,
     )
     return subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _audio_source(match, audio: bool) -> str | None:
+    """The recording to take the soundtrack from, or None - a simulated match has no file behind it."""
+    if not audio:
+        return None
+    video = Path(match.video)
+    return str(video) if video.exists() else None
 
 
 def _first_frame(reader):
@@ -162,6 +270,10 @@ def encode_clip(
     output: Path,
     encoder: str | None = None,
     reader_factory=FFmpegFrameReader,
+    rate: float = 1.0,
+    audio: bool = True,
+    codec: str = "h264",
+    skip_frame: str | None = None,
     on_progress=None,
 ) -> int:
     """Encode ``[start_s, start_s + duration_s]`` of the annotated match into ``output``; returns frame count.
@@ -169,15 +281,33 @@ def encode_clip(
     The frame size is taken from the first decoded frame rather than computed: the height follows the source's
     aspect, and the reader owns that decision - a raw-video pipe that disagrees with the frames it receives
     corrupts the encode. Encoding to a file means nothing has to drain the encoder's output, so this is a
-    straight loop: decode, draw, write.
+    straight loop: decode, draw, write. The match's own audio rides along when the recording is there.
+
+    ``skip_frame`` (a decoder input option, "nokey") is for the whole-game navigator videos, where one picture
+    per second is enough and decoding every frame would take the footage's own length. Only readers that accept
+    it are given it.
     """
-    encoder = encoder or pick_encoder()
-    reader = reader_factory(match.video, fps=fps, width=width, start_s=start_s, duration_s=duration_s)
+    encoder = encoder or pick_encoder(codec)
+    reader_kwargs: dict = {"fps": fps, "width": width, "start_s": start_s, "duration_s": duration_s}
+    if skip_frame:
+        reader_kwargs["skip_frame"] = skip_frame
+    reader = reader_factory(match.video, **reader_kwargs)
     first, rest = _first_frame(reader)
     _timestamp, frame = first
     height, actual_width = frame.shape[:2]
     process = _start(
-        encoder, fps=fps, width=actual_width, height=height, output=str(output), live=False, keyframe_s=2.0
+        encoder,
+        fps=fps,
+        width=actual_width,
+        height=height,
+        output=str(output),
+        live=False,
+        keyframe_s=2.0,
+        rate=rate,
+        source=_audio_source(match, audio),
+        audio=audio,
+        audio_start_s=start_s,
+        audio_duration_s=duration_s,
     )
     stderr = _StderrTail(process.stderr)
     written = 0
@@ -214,6 +344,9 @@ def iter_live_chunks(
     encoder: str | None = None,
     reader_factory=FFmpegFrameReader,
     pace: bool = True,
+    rate: float = 1.0,
+    audio: bool = True,
+    codec: str = "h264",
 ):
     """Yield the annotated match as a fragmented MP4, chunk by chunk, until the window ends or ``control`` stops.
 
@@ -223,7 +356,7 @@ def iter_live_chunks(
     the viewer, buffered in the player). ``control`` is the MJPEG stream's ``StreamControl``, so ``/stop`` ends
     both kinds of stream the same way.
     """
-    encoder = encoder or pick_encoder()
+    encoder = encoder or pick_encoder(codec)
     end_s = match.start_s + match.frame_count / match.fps
     stop = control if control is not None else _NEVER_STOPPED
     reader = reader_factory(
@@ -233,13 +366,24 @@ def iter_live_chunks(
     _timestamp, frame = first
     height, actual_width = frame.shape[:2]
     process = _start(
-        encoder, fps=fps, width=actual_width, height=height, output="pipe:1", live=True, keyframe_s=1.0
+        encoder,
+        fps=fps,
+        width=actual_width,
+        height=height,
+        output="pipe:1",
+        live=True,
+        keyframe_s=1.0,
+        rate=rate,
+        source=_audio_source(match, audio),
+        audio=audio,
+        audio_start_s=start_s,
+        audio_duration_s=max(0.1, end_s - start_s),
     )
     stderr = _StderrTail(process.stderr)
     failures: list[Exception] = []
 
     def produce() -> None:
-        period = 1.0 / max(0.01, fps)
+        period = 1.0 / max(0.01, fps * max(0.01, rate))  # the muxer's clock runs fps*rate per source second
         next_frame_at = time.monotonic()
         try:
             for timestamp, frame in _chain(first, rest):
@@ -285,10 +429,23 @@ def iter_live_chunks(
         raise VideoError(f"the encoder failed: {stderr.text() or failures[0]}")
 
 
-def clip_key(match_id: str, start_s: float, duration_s: float, fps: float, width: int, overlays: dict) -> str:
+def clip_key(
+    match_id: str,
+    start_s: float,
+    duration_s: float,
+    fps: float,
+    width: int,
+    overlays: dict,
+    rate: float = 1.0,
+    audio: bool = True,
+    codec: str = "h264",
+) -> str:
     """The identity of an encode: any difference in any of these is a different file."""
     layers = ",".join(sorted(name for name, on in overlays.items() if on))
-    return f"{match_id}-{start_s:.2f}-{duration_s:.2f}-{fps:g}-{width}-{layers or 'none'}"
+    return (
+        f"{match_id}-{start_s:.2f}-{duration_s:.2f}-{fps:g}x{rate:g}-{width}-{codec}"
+        f"-{layers or 'none'}-{'aud' if audio else 'mute'}"
+    )
 
 
 def _file_name(key: str) -> str:

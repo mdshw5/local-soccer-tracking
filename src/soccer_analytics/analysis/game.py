@@ -32,9 +32,9 @@ GAMES_ROOT = REPO_ROOT / "data" / "games"
 
 MANIFEST_FILE = "game.json"
 BUILD_STATE_FILE = "build.json"
-PROXY_FILE = "scrubber/proxy.mp4"  # same layout as a segment's scrubber, built by the same code
-PROXY_WIDTH = 640  # only has to be watchable enough to spot kick-off and the final whistle
-PROXY_FPS = 4.0
+PROXY_FILE = "scrubber/proxy.mp4"  # where the marking video is cached, beside the game's manifest
+PROXY_WIDTH = 640  # the marking navigator's default size: watchable enough to spot kick-off and the final whistle
+PROXY_FPS = 4.0  # its default frame rate (a long game decodes keyframes only, so ~1 picture/second either way)
 
 MARKS = ("start", "half", "end")
 HALF_LABELS = {1: "1st half", 2: "2nd half"}

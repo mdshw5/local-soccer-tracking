@@ -33,6 +33,7 @@ from soccer_analytics.dashboard.stream import (
     configured_port,
     is_reachable,
     iter_annotated_frames,
+    load_numbers,
     parse_overlays,
     streamable_matches,
 )
@@ -95,16 +96,20 @@ def _annotated(stream_case, *, numbers=None, numbers_note=None, ball_records=(),
 # The label chip
 # --------------------------------------------------------------------------------------------------------------
 def test_a_known_shirt_number_is_the_headline_and_the_track_stays_visible() -> None:
-    """A person watching calls the player by their number; the tables and clips key them by track id - both show."""
-    assert chip_text(73, "Smith", 12) == ("73 Smith", "track 12")
-    assert chip_text(9, "", 12) == ("9", "track 12")
+    """A person watching calls the player by their number; the tables and clips key them by track id - the
+    number is the headline either way, and the track id joins it only in the debug layer."""
+    assert chip_text(73, "Smith", 12) == ("73 Smith", ""), "a viewer does not need the tracker's key"
+    assert chip_text(73, "Smith", 12, debug=True) == ("73 Smith", "track 12")
+    assert chip_text(9, "", 12, debug=True) == ("9", "track 12")
 
 
 def test_without_a_number_the_track_id_can_never_look_like_a_worn_number() -> None:
-    """``#12`` is a tracking identity, not a shirt - the hash is what keeps the two apart when nobody has named the
-    player yet, which on this footage is the common case."""
-    assert chip_text(None, "", 12) == ("#12", "")
-    assert chip_text(None, "Smith", 12) == ("Smith", "track 12")
+    """``#12`` is a tracking identity, not a shirt - the hash keeps the two apart, and the whole thing is debug
+    information: without the debug layer an unidentified, unnamed player gets no chip at all."""
+    assert chip_text(None, "", 12, debug=True) == ("#12", "")
+    assert chip_text(None, "", 12) == ("", ""), "debug off: the box alone is the honest label"
+    assert chip_text(None, "Smith", 12) == ("Smith", ""), "a name is not read off a shirt: it needs no debug"
+    assert chip_text(None, "Smith", 12, debug=True) == ("Smith", "track 12")
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -173,7 +178,26 @@ def test_the_identities_map_follows_the_number_assignment(stream_case) -> None:
     track = int(replay["players"][0]["track_id"])
     numbers = merge_numbers([track], manual={track: {"number": 7, "name": "Smith"}})
     match = _annotated(stream_case, numbers=numbers)
-    assert match.identities[track] == ("7 Smith", f"track {track}")
+    assert match.identities[track] == ("7 Smith", ""), "the watching view: the number and the name"
+    assert match.debug_identities[track] == ("7 Smith", f"track {track}"), "the debug view adds the track id"
+
+
+def test_the_displayed_number_comes_from_the_jersey_scan_not_the_roster() -> None:
+    """A number drawn on the footage is a claim about what the camera saw: only a jersey detection supplies one.
+    A manual roster entry still names the player - names are not read off a shirt - but its number is not
+    evidence, so it must not end up on a chip the scan never backed."""
+
+    class _Library:
+        def load_jerseys(self, _match_id):
+            return {"suggestions": {"7": {"number": 9}}}
+
+        def load_roster(self, _match_id):
+            return {7: {"number": 99, "name": "Smith"}, 8: {"name": "Jones"}}
+
+    numbers, _jerseys = load_numbers(_Library(), "m", [7, 8, 9])
+    assert numbers[7] == {"number": 9, "name": "Smith", "source": "scan"}, "the detection wins over the roster"
+    assert numbers[8] == {"number": None, "name": "Jones", "source": "roster"}, "a name without a number is fine"
+    assert 9 not in numbers, "neither scan nor roster said anything about this track"
 
 
 def test_a_live_refresh_moves_the_chips_to_the_new_numbers(stream_case) -> None:
@@ -182,13 +206,15 @@ def test_a_live_refresh_moves_the_chips_to_the_new_numbers(stream_case) -> None:
     _segment, *_rest, replay, _boxes = stream_case
     track = int(replay["players"][0]["track_id"])
     match = _annotated(stream_case, notes=["static note"])
-    assert match.identities[track] == (f"#{track}", "")
+    assert match.identities[track] == ("", ""), "unknown and no debug: no chip"
+    assert match.debug_identities[track] == (f"#{track}", "")
     assert match.notes == ["static note"]
-    match.refresh_numbers(merge_numbers([track], manual={track: {"number": 7, "name": "Smith"}}), None)
-    assert match.identities[track] == ("7 Smith", f"track {track}")
+    match.refresh_numbers({track: {"number": 7, "name": "Smith"}}, None)
+    assert match.identities[track] == ("7 Smith", "")
+    assert match.debug_identities[track] == ("7 Smith", f"track {track}")
     assert match.notes == ["static note"], "trusted numbers add no note"
     match.refresh_numbers({}, "shirt numbers look stale: made up for the test")
-    assert match.identities[track] == (f"#{track}", "")
+    assert match.identities[track] == ("", "")
     assert match.notes == ["static note", "shirt numbers look stale: made up for the test"]
 
 
@@ -253,7 +279,9 @@ def test_the_box_and_number_layers_switch_independently(stream_case) -> None:
     player = next(p for p in replay["players"] if boxes.get(str(p["track_id"])) is not None)
     x1, y1, x2, y2 = (float(v) for v in boxes[str(player["track_id"])][0])
     index = int(player["frames"][0])
-    match = _annotated(stream_case, players=[player])
+    match = _annotated(
+        stream_case, players=[player], numbers={int(player["track_id"]): {"number": 9}}
+    )
     left, right = sorted((round(x1 * 640), round(x2 * 640)))
     top, bottom = sorted((round(y1 * 640), round(y2 * 640)))
     expected = match.teams[int(player["team"])].bgr
@@ -316,6 +344,25 @@ def test_the_debug_layer_carries_the_diagnostics_and_switches_off_alone(stream_c
     assert changed(debug_only, *top_left) > 0, "the session name is the debug layer's"
     assert changed(debug_only, *below_clock) > 0, "the frame counter is the debug layer's"
     assert changed(debug_only, *bottom_left) > 0, "the notes are the debug layer's"
+
+
+def test_a_track_id_chip_is_debug_information(stream_case) -> None:
+    """The tracker's id is how the tables key a player, not what a viewer calls them: with debug off, a player
+    the scan has no number for draws no chip - the box alone says "a person" - and the id appears only when the
+    debug layer asks for it."""
+    _segment, _calibration, _q, _focal, replay, boxes = stream_case
+    player = next(p for p in replay["players"] if boxes.get(str(p["track_id"])) is not None)
+    index = int(player["frames"][0])
+    match = _annotated(stream_case, players=[player])
+    blank = np.full((360, 640, 3), 60, dtype=np.uint8)
+    quiet = blank.copy()
+    match.render(quiet, index, pitch=False, boxes=False, numbers=True, ball=False, hud=False, debug=False)
+    assert np.array_equal(quiet, blank), "debug off and no number read: there is no chip to draw"
+    corners = blank.copy()
+    match.render(corners, index, pitch=False, boxes=False, numbers=False, ball=False, hud=False, debug=True)
+    chipped = blank.copy()
+    match.render(chipped, index, pitch=False, boxes=False, numbers=True, ball=False, hud=False, debug=True)
+    assert np.count_nonzero(np.any(chipped != corners, axis=2)) > 0, "the debug layer shows the track id"
 
 
 def test_a_seen_ball_is_marked_where_the_scan_put_it_and_a_forecast_rings_differently(stream_case) -> None:

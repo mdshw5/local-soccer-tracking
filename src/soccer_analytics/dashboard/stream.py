@@ -39,14 +39,16 @@ from urllib.parse import parse_qs, urlparse
 import cv2
 import numpy as np
 
+from soccer_analytics.analysis import game as game_lib
 from soccer_analytics.analysis.identity import numbers_are_stale
-from soccer_analytics.analysis.jerseys import merge_numbers
 from soccer_analytics.analysis.library import MatchLibrary
 from soccer_analytics.analysis.projection import segment_poses
 from soccer_analytics.analysis.stage_a import load_segment
 from soccer_analytics.dashboard.pitch_clicks import pitch_marking_polylines
+from soccer_analytics.dashboard.timeline import proxy_skip_frame
 from soccer_analytics.dashboard.video import (
     ClipCache,
+    CODECS,
     DEFAULT_CLIP_SECONDS,
     DEFAULT_LIVE_WIDTH,
     MAX_CLIP_SECONDS,
@@ -202,20 +204,23 @@ def _text_bgr(colour: tuple[int, int, int]) -> tuple[int, int, int]:
     return INK if luminance > 150 else PAPER
 
 
-def chip_text(number, name: str, track_id: int) -> tuple[str, str]:
+def chip_text(number, name: str, track_id: int, *, debug: bool = False) -> tuple[str, str]:
     """The label chip's two lines for one player: what they are called, and how to find them in the tables.
 
-    A known shirt number is what a person watching calls the player, so it is the headline; the track id stays
-    as a small second line either way, because that is the key every dashboard table and clip uses. With no
-    number, the track id *is* the headline - ``#1234`` can never be mistaken for a worn number.
+    The number is a jersey *detection* (only the scan supplies one - see :func:`load_numbers`): a number drawn on
+    the footage is a claim about what the camera saw. The track id is the tracker's own key - it is how every
+    table and clip names the player, but a viewer calls them by their number - so it is debug information: with
+    ``debug`` it heads an unidentified player's chip (``#1234``, which can never be mistaken for a worn number)
+    and sits under an identified one (``track 1234``); without it, a player with neither a number nor a name gets
+    no chip at all, and the box alone says the one thing that is known.
     """
     name = (name or "").strip()
+    detail = f"track {track_id}" if debug else ""
     if number:
-        main = f"{int(number)} {name}".strip()
-        return main, f"track {track_id}"
+        return f"{int(number)} {name}".strip(), detail
     if name:
-        return name, f"track {track_id}"
-    return f"#{track_id}", ""
+        return name, detail
+    return (f"#{track_id}", "") if debug else ("", "")
 
 
 def ball_stamps(records: list[dict], frame_count: int) -> np.ndarray:
@@ -237,15 +242,30 @@ def ball_stamps(records: list[dict], frame_count: int) -> np.ndarray:
 
 
 def load_numbers(library: MatchLibrary, match_id: str, track_ids) -> tuple[dict[int, dict], dict]:
-    """The match's shirt numbers per track (roster wins over the OCR scan), plus the raw scan payload.
+    """Shirt numbers per track for the footage, plus the raw scan payload.
+
+    The number a chip draws comes from the jersey scan only: a number on the footage is a claim about what the
+    camera saw, and only a detection saw it. A manual roster entry still supplies the player's *name* (a name is
+    not read off a shirt), and the staleness note is recomputed from the same scan payload the numbers came
+    from, so a running stream can never disagree with itself.
 
     One reader for the two callers that need the same answer: the initial load, and the per-request refresh that
     keeps a running stream in step with roster edits made in the dashboard beside it.
     """
     jerseys = library.load_jerseys(match_id)
     suggestions = {int(track): entry for track, entry in (jerseys.get("suggestions") or {}).items()}
-    roster = library.load_roster(match_id)
-    return merge_numbers(list(track_ids), auto=suggestions, manual=roster), jerseys
+    roster = {int(track): entry for track, entry in (library.load_roster(match_id) or {}).items()}
+    numbers: dict[int, dict] = {}
+    for track_id in track_ids:
+        track = int(track_id)
+        suggestion = suggestions.get(track) or {}
+        manual = roster.get(track) or {}
+        detected = suggestion.get("number")
+        name = str(manual.get("name") or "").strip()
+        if not detected and not name:
+            continue
+        numbers[track] = {"number": detected, "name": name, "source": "scan" if detected else "roster"}
+    return numbers, jerseys
 
 
 def numbers_note(match_dir: Path, jerseys: dict, numbers: dict[int, dict], player_ids) -> str | None:
@@ -398,10 +418,13 @@ class AnnotatedMatch:
         mapping is built before the swap, so a frame rendering concurrently keeps a consistent dict either way.
         """
         identities: dict[int, tuple[str, str]] = {}
+        debug_identities: dict[int, tuple[str, str]] = {}
         for track_id in self.boxed_tracks:
             entry = numbers.get(track_id) or {}
             identities[track_id] = chip_text(entry.get("number"), entry.get("name"), track_id)
+            debug_identities[track_id] = chip_text(entry.get("number"), entry.get("name"), track_id, debug=True)
         self.identities = identities
+        self.debug_identities = debug_identities
         self.notes = self._static_notes + ([numbers_note] if numbers_note else [])
 
     # ----------------------------------------------------------------------------------------------------------
@@ -604,7 +627,7 @@ class AnnotatedMatch:
         if pitch:
             self._draw_pitch(frame, index)
         if boxes or numbers:
-            self._draw_players(frame, index, boxes=boxes, numbers=numbers)
+            self._draw_players(frame, index, boxes=boxes, numbers=numbers, debug=debug)
         if ball:
             self._draw_ball(frame, index)
         if hud:
@@ -640,7 +663,9 @@ class AnnotatedMatch:
             q, focal = self.pose_at(position)
             self._draw_pitch(frame, earlier, q=q, focal=focal)
         if boxes or numbers:
-            self._draw_players(frame, earlier, boxes=boxes, numbers=numbers, players=self.players_at(position))
+            self._draw_players(
+                frame, earlier, boxes=boxes, numbers=numbers, players=self.players_at(position), debug=debug
+            )
         if ball:
             self._draw_ball(frame, earlier, stamp=self.ball_at(position))
         if hud:
@@ -683,13 +708,22 @@ class AnnotatedMatch:
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
 
     def _draw_players(
-        self, frame: np.ndarray, index: int, *, boxes: bool = True, numbers: bool = True, players=None
+        self,
+        frame: np.ndarray,
+        index: int,
+        *,
+        boxes: bool = True,
+        numbers: bool = True,
+        players=None,
+        debug: bool = False,
     ) -> None:
         """The players' detection boxes and their label chips - two layers, because a viewer may want either.
 
         With boxes off but numbers on, the chips still sit where their box would be: the label without the
         rectangle is exactly the "who is that" view, and it needs no different anchoring. ``players`` overrides
-        the frame's own observations (the full-rate path passes boxes interpolated between samples).
+        the frame's own observations (the full-rate path passes boxes interpolated between samples), and
+        ``debug`` decides whether a track id may appear: a player with no detected number and no name draws no
+        chip at all without it - the box alone is the honest label for "a person, unknown".
         """
         height, width = frame.shape[:2]
         scale = height / 1080.0
@@ -704,7 +738,9 @@ class AnnotatedMatch:
             box_height = abs(bottom - top)
             if not numbers or box_height < 22 * scale:
                 continue  # too small on screen for a readable chip; the box alone carries the detection
-            main, detail = self.identities.get(track_id, (f"#{track_id}", ""))
+            main, detail = (self.debug_identities if debug else self.identities).get(track_id, ("", ""))
+            if not main:
+                continue  # debug off and nothing was read or named: the box is the label
             font = max(0.4, 0.62 * scale)
             small = max(0.35, 0.42 * scale)
             show_detail = bool(detail) and box_height >= 60 * scale
@@ -915,6 +951,24 @@ def streamable_matches(root: str | Path = MATCHES_ROOT) -> list[dict]:
     return rows
 
 
+class GameVideo:
+    """The un-annotated stand-in :func:`encode_clip` needs to encode a whole game video.
+
+    The clip encoder asks its ``match`` for the source path and a ``render_at`` hook; a game's combined video
+    has no overlays to draw - the marks are read *from* this video, before anything is calibrated - so the hook
+    does nothing and the encode is a straight H.264 transcode. That is what replaces the old prebuilt marking
+    proxy (``data/games/<id>/scrubber/proxy.mp4``, built by ``run_build_game.py``): the same file, produced by
+    the same encoder as every other encoded video, when it is first asked for.
+    """
+
+    def __init__(self, video: str | Path, duration_s: float):
+        self.video = str(video)
+        self.duration_s = float(duration_s)
+
+    def render_at(self, frame, timestamp, **_overlays) -> None:  # noqa: ANN001 - the encoder's hook signature
+        return None
+
+
 # --------------------------------------------------------------------------------------------------------------
 # The HTTP surface
 # --------------------------------------------------------------------------------------------------------------
@@ -941,6 +995,7 @@ class MatchStreamServer(ThreadingHTTPServer):
         clip_cache: ClipCache | None = None,
         clip_encoder=encode_clip,
         live_chunks=iter_live_chunks,
+        games_root: str | Path | None = None,
     ):
         super().__init__(server_address, MatchStreamHandler)
         self.root = Path(root)
@@ -954,6 +1009,10 @@ class MatchStreamServer(ThreadingHTTPServer):
         self.clip_cache = clip_cache if clip_cache is not None else ClipCache()
         self.clip_encoder = clip_encoder
         self.live_chunks = live_chunks
+        # Game marking videos (Step 1) live under their own root; the /game/ route builds them on demand.
+        self.games_root = Path(games_root) if games_root is not None else game_lib.GAMES_ROOT
+        self._game_locks: dict[str, threading.Lock] = {}
+        self._game_locks_guard = threading.Lock()
         self.stream_slots = threading.BoundedSemaphore(max_streams)
         self._sessions: dict[str, AnnotatedMatch] = {}
         self._sessions_lock = threading.Lock()
@@ -980,6 +1039,28 @@ class MatchStreamServer(ThreadingHTTPServer):
         with self._controls_lock:
             self._controls.pop(token, None)
 
+    def game_lock(self, game_id: str) -> threading.Lock:
+        """One lock per game, so two simultaneous first requests do not both encode the whole video."""
+        with self._game_locks_guard:
+            return self._game_locks.setdefault(game_id, threading.Lock())
+
+    def game_source(self, game_id: str) -> tuple[Path, float]:
+        """The combined video and its length for a game id; raises :class:`StreamError` when it is not there.
+
+        The id arrives in a URL, so it is validated (a bare name, nothing joined to it) before it ever reaches
+        the filesystem - ``game_dir`` joins it to the games root, and a name is all it may be.
+        """
+        if not game_id or game_id.startswith(".") or game_id != Path(game_id).name or "/" in game_id or "\\" in game_id:
+            raise StreamError(f"bad game id: {game_id!r}")
+        directory = game_lib.game_dir(self.games_root, game_id)
+        if not (directory / game_lib.MANIFEST_FILE).exists():
+            raise StreamError(f"no game {game_id} in {self.games_root}")
+        record = game_lib.GameRecord.load(directory)
+        video = Path(record.output)
+        if not video.exists():
+            raise StreamError(f"the combined video for {game_id} is missing: {video}")
+        return video, float(record.duration_s)
+
     def session(self, match_id: str) -> AnnotatedMatch:
         """The cached overlay for a match, loading it on first demand (a few seconds of segment and chain work).
 
@@ -999,7 +1080,8 @@ class MatchStreamServer(ThreadingHTTPServer):
 
 
 class MatchStreamHandler(BaseHTTPRequestHandler):
-    """Routes: ``/`` index, ``/matches`` JSON, ``/stream/<id>.mjpg``, ``/frame/<id>.jpg``."""
+    """Routes: ``/`` index, ``/matches`` JSON, ``/stream/<id>.mjpg``, ``/frame/<id>.jpg``,
+    ``/live/<id>.mp4``, ``/video/<id>.mp4`` and ``/game/<id>.mp4``."""
 
     server: MatchStreamServer
 
@@ -1028,6 +1110,19 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             return default
         return float(np.clip(value, low, high))
 
+    @staticmethod
+    def _flag(query: dict, key: str, *, default: bool) -> bool:
+        """A boolean query parameter: ``0``/``no``/``off``/``false`` turn it off, anything else leaves it on."""
+        if key not in query:
+            return default
+        return str(query[key]).strip().lower() not in ("0", "no", "off", "false")
+
+    @staticmethod
+    def _codec(query: dict) -> str:
+        """``codec=hevc`` asks for H.265 (smaller files at equal quality, pickier players); else H.264."""
+        value = str(query.get("codec", "h264")).strip().lower()
+        return value if value in CODECS else "h264"
+
     # -- routes -----------------------------------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802 - the base class's name
         parsed = urlparse(self.path)
@@ -1046,6 +1141,8 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
                 self._live(parsed)
             elif parsed.path.startswith("/video/"):
                 self._video(parsed)
+            elif parsed.path.startswith("/game/"):
+                self._game_video(parsed)
             elif parsed.path.startswith("/frame/"):
                 self._frame(parsed)
             else:
@@ -1134,7 +1231,10 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             "(MJPEG, params <code>start=&lt;source seconds&gt;, rate=&lt;speed&gt;, width=&lt;px&gt;, overlays=</code>), "
             "<code>/live/&lt;match&gt;.mp4</code> (the same overlay encoded H.264 and streamed as a fragmented MP4), "
             "<code>/video/&lt;match&gt;.mp4</code> (a bounded, seekable clip: <code>duration=, fps=, width=, "
-            "start=, overlays=</code>; defaults to the source's own frame rate and resolution), "
+            "start=, overlays=, rate=, audio=, codec=h264|hevc</code>; defaults to the source's own frame rate "
+            "and resolution), "
+            "<code>/game/&lt;game&gt;.mp4</code> (the whole combined game, un-annotated, for Step 1 marking: "
+            "<code>width=, fps=</code>; prepared on first request and cached beside the game), "
             "<code>/frame/&lt;match&gt;.jpg?t=</code>, <code>/matches</code>.</p>"
             + "".join(cards)
             + "</body></html>"
@@ -1169,6 +1269,8 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             if key == "rate":
                 rate = value
             params.append(f"{key}={value:g}")
+        if "codec" in query:
+            params.append(f"codec={self._codec(query)}")
 
         def link(target_format: str | None, extra: tuple[tuple[str, str], ...] = ()) -> str:
             overrides = dict(extra)
@@ -1183,16 +1285,26 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
         chosen = query.get("format", "mjpeg")
         if chosen == "clip":
             src = f"/video/{match_id}.mp4" + ("?" + "&".join(params) if params else "")
-            media = f"<video src='{src}' controls autoplay></video>"
-            note = "A clip is encoded when the player asks for it, so the first picture can take a while - after that it seeks freely."
+            media = f"<video src='{src}' controls autoplay muted></video>"
+            note = "A clip is encoded when the player asks for it, so the first picture can take a while - after that it seeks freely. Unmute in the player for the match audio."
+            beacon = ""
         elif chosen == "live":
-            src = f"/live/{match_id}.mp4" + ("?" + "&".join(params) if params else "")
-            media = f"<video src='{src}' controls autoplay></video>"
-            note = "The live encode runs at what this machine can render: 1080p at the source's frame rate keeps up better than 4K."
+            # The live stream gets its own stop token and a goodbye beacon: a browser that navigates away keeps
+            # *draining* a media fetch (the MJPEG pane taught this), so the page must end its own encoder.
+            token = os.urandom(6).hex()
+            src = f"/live/{match_id}.mp4" + ("?" + "&".join(params + [f"token={token}"]))
+            media = f"<video src='{src}' controls autoplay muted></video>"
+            note = "The live encode runs at what this machine can render: 1080p at the source's frame rate keeps up better than 4K. Unmute in the player for the match audio."
+            beacon = (
+                "<script>window.addEventListener('pagehide',()=>{const u=new URL("
+                "document.querySelector('video').src,location);const t=u.searchParams.get('token');"
+                "if(t)navigator.sendBeacon('/stop?token='+encodeURIComponent(t));});</script>"
+            )
         else:
             src = f"/stream/{match_id}.mjpg" + ("?" + "&".join(params) if params else "")
             media = f"<img src='{src}' alt='annotated match stream'>"
             note = ""
+            beacon = ""
         speed = f" at {rate:g}x" if rate != 1.0 else ""
         navigation = (
             f"<a href='{link(None)}'>mjpeg</a>"
@@ -1210,6 +1322,7 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             f"<div class='bar'><b>{match_id}</b>{html.escape(speed)} &middot; {navigation}</div>"
             f"{media}"
             + (f"<div class='note'>{note}</div>" if note else "")
+            + beacon
             + "</body></html>"
         )
         self._send_text(200, body, "text/html; charset=utf-8")
@@ -1295,8 +1408,11 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
         duration = self._float(query, "duration", DEFAULT_CLIP_SECONDS, 0.5, MAX_CLIP_SECONDS)
         start_s = self._float(query, "start", session.start_s, 0.0, window_end)
         duration = min(duration, max(0.5, window_end - start_s))
+        rate = self._float(query, "rate", 1.0, MIN_RATE, MAX_RATE)
+        audio = self._flag(query, "audio", default=True)
+        codec = self._codec(query)
         overlay_layers = parse_overlays(query.get("overlays"))
-        key = clip_key(match_id, start_s, duration, fps, width, overlay_layers)
+        key = clip_key(match_id, start_s, duration, fps, width, overlay_layers, rate, audio, codec)
         path = self.server.clip_cache.lookup(key)
         if path is None:
             if not self.server.stream_slots.acquire(timeout=STREAM_SLOT_WAIT_S):
@@ -1318,6 +1434,9 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
                                 output=target,
                                 encoder=self.server.video_encoder,
                                 reader_factory=self.server.reader_factory,
+                                rate=rate,
+                                audio=audio,
+                                codec=codec,
                             )
                         except VideoError as error:
                             target.unlink(missing_ok=True)
@@ -1327,6 +1446,59 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             finally:
                 self.server.stream_slots.release()
         self._send_file(path, "video/mp4")
+
+    def _game_video(self, parsed) -> None:
+        """The Step 1 marking video: a seekable encode of the whole game, prepared on demand and cached.
+
+        This is the replacement for the prebuilt marking proxy: the same file at the same path, but produced by
+        the same encoder as every other encoded video, when it is first asked for. There is nothing to draw -
+        the marks are read *from* this video - so the encode is a straight transcode, and a long game decodes
+        keyframes only (one picture per second; see ``timeline.proxy_skip_frame``), which is what makes a first
+        request a couple of minutes rather than the length of the footage. A game that already has a proxy (built
+        by an older ``run_build_game``) is served straight from it, byte for byte.
+        """
+        game_id = self._match_id(parsed, ".mp4")
+        query = self._query(parsed)
+        if not game_id or game_id.startswith(".") or game_id != Path(game_id).name or "/" in game_id or "\\" in game_id:
+            self._send_text(404, "bad game id\n")
+            return
+        target = game_lib.proxy_path(game_lib.game_dir(self.server.games_root, game_id))
+        if target.exists():
+            self._send_file(target, "video/mp4")
+            return
+        video, duration = self.server.game_source(game_id)  # StreamError -> do_GET's handler
+        width = int(round(self._float(query, "width", game_lib.PROXY_WIDTH, MIN_WIDTH, MAX_VIDEO_WIDTH))) // 2 * 2
+        fps = self._float(query, "fps", game_lib.PROXY_FPS, 1.0, 120.0)
+        lock = self.server.game_lock(game_id)
+        with lock:
+            if target.exists():  # another request finished the encode while we waited for the lock
+                self._send_file(target, "video/mp4")
+                return
+            if not self.server.stream_slots.acquire(timeout=STREAM_SLOT_WAIT_S):
+                self._send_text(503, "too many concurrent encodes; retry shortly\n")
+                return
+            tmp = target.with_name(target.name + ".tmp")
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                self.server.clip_encoder(
+                    GameVideo(video, duration),
+                    start_s=0.0,
+                    duration_s=duration,
+                    fps=fps,
+                    width=width,
+                    overlays={},
+                    output=tmp,
+                    encoder=self.server.video_encoder,
+                    audio=False,
+                    skip_frame=proxy_skip_frame(duration),
+                )
+                os.replace(tmp, target)
+            except VideoError as error:
+                raise StreamError(f"the marking video could not be built: {error}") from error
+            finally:
+                tmp.unlink(missing_ok=True)  # after a successful os.replace this is a no-op
+                self.server.stream_slots.release()
+        self._send_file(target, "video/mp4")
 
     def _live(self, parsed) -> None:
         """The endless variant of the encoded stream: a fragmented MP4 produced as the frames are rendered.
@@ -1353,6 +1525,9 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             )
             fps = self._float(query, "fps", session.native_fps, 1.0, session.native_fps)
             start_s = self._float(query, "start", session.start_s, 0.0, window_end)
+            rate = self._float(query, "rate", 1.0, MIN_RATE, MAX_RATE)
+            audio = self._flag(query, "audio", default=True)
+            codec = self._codec(query)
             overlay_layers = parse_overlays(query.get("overlays"))
             token = query.get("token", "")[:64]
             control = self.server.register_control(token) if token else None
@@ -1360,6 +1535,10 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "video/mp4")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
+            # The same watchdog as the MJPEG stream: a viewer that stops reading without closing (a browser
+            # navigating away keeps the fetch half-open) blocks the next frame write, and the timeout is what
+            # ends the encode then - the stop beacon usually gets there first.
+            self.connection.settimeout(STREAM_WRITE_TIMEOUT_S)
             chunks = self.server.live_chunks(
                 session,
                 start_s=start_s,
@@ -1370,6 +1549,9 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
                 encoder=self.server.video_encoder,
                 reader_factory=self.server.reader_factory,
                 pace=self.server.pace,
+                rate=rate,
+                audio=audio,
+                codec=codec,
             )
             try:
                 for chunk in chunks:
