@@ -396,14 +396,21 @@ def _game_manifest_for(video: str) -> dict | None:
     """The game manifest whose combined video is ``video``, or ``None`` when the footage is not a combined game.
 
     The manifest is what connects a combined video back to the clips it was built from - and so to the gimbal logs
-    beside those clips. It is found three ways, in order of confidence, because the combined video may have been
-    moved or re-merged since the manifest was written:
+    beside those clips. Candidates are read from every place a manifest may live, because the combined video may
+    have been moved or re-merged since the manifest was written:
 
-    1. the manifest's ``output`` path equals the video's path (the normal case);
-    2. a ``game.json`` sits beside the video (the manifest was copied with it);
-    3. the manifest's ``output`` *basename* equals the video's basename (the video was moved but not renamed).
+    1. a ``game.json`` beside the video (the manifest was copied with it);
+    2. a ``game.json`` in the video's own analysis directory (``<footage>/analysis/<id>/game.json`` - where the
+       game build writes it, next to the footage the clips came from);
+    3. ``data/games/*/game.json`` in the repository (the archive root);
+    and each candidate matches when its ``output`` path equals the video's path, or its basename does (moved but
+    not renamed).
 
-    Returns ``None`` when none match, so the caller keeps the estimated chain.
+    Among the matches, a manifest whose clips name files other than the video itself wins. That is the
+    distinction that matters to the log alignment: a manifest that lists the combined video as its own single
+    clip has no clip information to place the camera logs with, while one listing the source clips connects each
+    log to its start second on the game clock. The first informative candidate wins, else the first candidate,
+    and ``None`` when nothing matches - so the caller keeps the estimated chain.
     """
     if video in _GAME_MANIFEST_CACHE:
         return _GAME_MANIFEST_CACHE[video]
@@ -412,45 +419,85 @@ def _game_manifest_for(video: str) -> dict | None:
     repo_root = Path(__file__).resolve().parents[3]
     games_root = repo_root / "data" / "games"
     video_path = Path(video)
-    found: dict | None = None
 
-    # 2. A manifest beside the video itself (the combined video and its game.json travel together).
-    beside = video_path.parent / "game.json"
-    if beside.exists():
+    def load(path: Path) -> dict | None:
         try:
-            found = json.loads(beside.read_text())
+            return json.loads(path.read_text())
         except (OSError, ValueError):
-            found = None
+            return None
 
-    if found is None and games_root.is_dir():
-        for manifest in games_root.glob("*/game.json"):
-            try:
-                payload = json.loads(manifest.read_text())
-            except (OSError, ValueError):
-                continue
-            output = str(payload.get("output", ""))
-            # 1. Exact path, then 3. same basename (moved but not renamed).
-            if output == video or Path(output).name == video_path.name:
-                found = payload
-                break
-    _GAME_MANIFEST_CACHE[video] = found
-    return found
+    def matches(payload: dict | None) -> bool:
+        if payload is None:
+            return False
+        output = str(payload.get("output", ""))
+        return output == video or Path(output).name == video_path.name
+
+    def informative(payload: dict) -> bool:
+        """Whether the manifest's clips say something about the video's provenance (are not the video itself)."""
+        return any(
+            Path(str(clip.get("path", ""))) != video_path and Path(str(clip.get("path", ""))).name != video_path.name
+            for clip in (payload.get("clips") or [])
+        )
+
+    candidate_paths: list[Path] = [video_path.parent / "game.json"]
+    analysis_root = video_path.parent / "analysis"
+    if analysis_root.is_dir():
+        candidate_paths += sorted(analysis_root.glob("*/game.json"))
+    if games_root.is_dir():
+        candidate_paths += sorted(games_root.glob("*/game.json"))
+
+    found: dict | None = None
+    fallback: dict | None = None
+    for path in candidate_paths:
+        payload = load(path)
+        if not matches(payload):
+            continue
+        if fallback is None:
+            fallback = payload
+        if informative(payload):
+            found = payload
+            break
+    _GAME_MANIFEST_CACHE[video] = found if found is not None else fallback
+    return _GAME_MANIFEST_CACHE[video]
+
+
+def _resolve_clip_path(value: str, base: Path) -> str:
+    """One clip's path as a usable file: absolute when it exists, else resolved against the footage directory.
+
+    Manifests store the source clips relative to the footage folder they sit in, while a moved footage directory
+    keeps the names but changes the prefix - so a bare name is tried beside the combined video before giving up.
+    An untouched value survives, so a manifest that named something unresolvable still reaches the caller as it
+    was written rather than as a silent miss.
+    """
+    path = Path(value)
+    if path.is_absolute() and path.exists():
+        return str(path)
+    candidate = base / path
+    if candidate.exists():
+        return str(candidate)
+    candidate = base / path.name
+    return str(candidate) if candidate.exists() else str(value)
 
 
 def _clips_for_segment(segment) -> tuple[list[str], list[float]]:
     """The clips a segment's footage came from, and where each begins on the segment's own clock.
 
     Two shapes exist. A segment analysed from the *combined game video* names that video, and the game manifest
-    beside it lists the clips and their start seconds. A segment analysed from a *single raw clip* names the clip
-    itself, which begins at 0. Either way the result is a list of clip paths and their start seconds, which is what
-    places the logs on the analysis clock.
+    connecting it to its source clips lists, per clip, the path and the second it begins at in the combined
+    video (paths are resolved against the video's own directory - see :func:`_resolve_clip_path`). A segment
+    analysed from a *single raw clip* names the clip itself, which begins at 0. Either way the result is a list
+    of clip paths and their start seconds, which is what places the logs on the analysis clock.
     """
     video = str(segment.meta.get("video", ""))
     manifest = _game_manifest_for(video)
     if manifest is not None:
         clips = manifest.get("clips") or []
         if clips:
-            return [str(clip["path"]) for clip in clips], [float(clip["start_s"]) for clip in clips]
+            base = Path(video).parent
+            return (
+                [_resolve_clip_path(str(clip["path"]), base) for clip in clips],
+                [float(clip["start_s"]) for clip in clips],
+            )
     return [video], [0.0]
 
 

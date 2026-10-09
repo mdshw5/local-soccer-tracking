@@ -98,15 +98,21 @@ def pitch_marking_lines(length_m: float, width_m: float) -> list[tuple[tuple[flo
 
 
 def _pan_rates(segment, frame_count: int) -> np.ndarray:
-    """|dyaw| per frame from the gimbal log, or zeros when there is no log."""
-    from soccer_analytics.geometry.gimbal_motion import align_log, find_logs_for_clips
+    """|dyaw| per frame from the gimbal log, or zeros when there is no log.
+
+    The clips behind the segment (and their start seconds) come from the same discovery the pose alignment uses,
+    so a combined game's second and third clips get their logs placed on the game clock here too - reading the
+    combined video's own name as the clip would find only the first log.
+    """
+    from soccer_analytics.geometry.gimbal_motion import _clips_for_segment, align_log, find_logs_for_clips
     from soccer_analytics.geometry.gimbal_log import load_gimbal_log
 
     pan = np.zeros(frame_count)
-    pairs = find_logs_for_clips([segment.meta["video"]])
+    clip_paths, clip_starts = _clips_for_segment(segment)
+    pairs = find_logs_for_clips(clip_paths)
     if not pairs:
         return pan
-    logs = [(load_gimbal_log(p), s) for p, s in pairs]
+    logs = [(load_gimbal_log(path), float(start)) for (path, _), start in zip(pairs, clip_starts)]
     aligned = align_log(
         logs, start_s=float(segment.meta["start_s"]), fps=float(segment.meta["fps"]), frame_count=frame_count
     )

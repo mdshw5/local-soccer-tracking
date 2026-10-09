@@ -16,6 +16,7 @@ from soccer_analytics.geometry.gimbal_log import GimbalFrame, load_gimbal_logs, 
 from soccer_analytics.geometry.gimbal_motion import (
     PanModel,
     _GAME_MANIFEST_CACHE,
+    _clips_for_segment,
     _game_manifest_for,
     align_log,
     find_logs_for_clips,
@@ -236,6 +237,101 @@ def test_find_logs_matches_a_clip_to_its_log_by_time_of_day(tmp_path) -> None:
 
 def test_find_logs_returns_none_without_a_log_directory(tmp_path) -> None:
     assert find_logs_for_clips([str(tmp_path / "16:28:37.784.MP4")]) is None
+
+
+def test_manifest_with_real_clips_wins_over_one_listing_the_combined_video(tmp_path) -> None:
+    """A manifest that names the source clips places the logs; one that names only the combined video cannot.
+
+    The game build writes its manifest (with the source clips) into the footage's analysis directory, but an
+    older/other archive manifest may list the combined video as its own single clip - and that one says nothing
+    about where the camera logs go. When both match the video, the one carrying real clips must win; when only
+    the collapsed one exists, it is still returned (the caller falls back to the video itself).
+    """
+    import json
+
+    footage = tmp_path / "footage"
+    footage.mkdir()
+    combined = footage / "game_x.mp4"
+    combined.write_bytes(b"")
+    (footage / "16:28:37.784.MP4").write_bytes(b"")
+    (footage / "16:58:38.391.MP4").write_bytes(b"")
+    # The non-informative manifest sits beside the video (checked first)...
+    (footage / "game.json").write_text(
+        json.dumps({"output": str(combined), "clips": [{"path": str(combined), "start_s": 0.0}]})
+    )
+    # ...and the real one in the analysis directory.
+    analysis = footage / "analysis" / "2026-10-03_game_x"
+    analysis.mkdir(parents=True)
+    (analysis / "game.json").write_text(
+        json.dumps(
+            {
+                "output": str(combined),
+                "clips": [
+                    {"path": "16:28:37.784.MP4", "start_s": 0.0},
+                    {"path": "16:58:38.391.MP4", "start_s": 1800.2},
+                ],
+            }
+        )
+    )
+    _GAME_MANIFEST_CACHE.clear()
+    try:
+        found = _game_manifest_for(str(combined))
+        assert found is not None
+        assert len(found["clips"]) == 2, "the manifest with the source clips must win"
+    finally:
+        _GAME_MANIFEST_CACHE.clear()
+
+    # A video whose only manifest is the collapsed one still gets that manifest (the fallback).
+    solo_dir = tmp_path / "solo"
+    solo_dir.mkdir()
+    solo = solo_dir / "game_solo.mp4"
+    solo.write_bytes(b"")
+    (solo_dir / "game.json").write_text(
+        json.dumps({"output": str(solo), "clips": [{"path": str(solo), "start_s": 0.0}]})
+    )
+    _GAME_MANIFEST_CACHE.clear()
+    try:
+        found = _game_manifest_for(str(solo))
+        assert found is not None and len(found["clips"]) == 1
+    finally:
+        _GAME_MANIFEST_CACHE.clear()
+
+
+def test_clips_for_segment_resolves_relative_clip_paths(tmp_path) -> None:
+    """Clip paths stored relative to the footage folder (how the game build writes them) must come out usable.
+
+    The combined video lives beside the raw clips; the manifest names them bare ("16:28:37.784.MP4"). Unresolved,
+    the log lookup would look for "Chameleon Logs" below the process's own directory and find nothing - so the
+    paths must come back joined to the footage folder, with the start seconds intact.
+    """
+    import json
+    from types import SimpleNamespace
+
+    footage = tmp_path / "footage"
+    footage.mkdir()
+    combined = footage / "game_x.mp4"
+    combined.write_bytes(b"")
+    clips = [("16:28:37.784.MP4", 0.0), ("16:58:38.391.MP4", 1800.2), ("17:28:37.430.MP4", 3599.1)]
+    for name, _start in clips:
+        (footage / name).write_bytes(b"")
+    analysis = footage / "analysis" / "2026-10-03_game_x"
+    analysis.mkdir(parents=True)
+    (analysis / "game.json").write_text(
+        json.dumps(
+            {
+                "output": str(combined),
+                "clips": [{"path": name, "start_s": start} for name, start in clips],
+            }
+        )
+    )
+    segment = SimpleNamespace(meta={"video": str(combined)})
+    _GAME_MANIFEST_CACHE.clear()
+    try:
+        paths, starts = _clips_for_segment(segment)
+        assert [Path(p) for p in paths] == [footage / name for name, _ in clips]
+        assert starts == [0.0, 1800.2, 3599.1]
+    finally:
+        _GAME_MANIFEST_CACHE.clear()
 
 
 def test_game_manifest_is_found_by_path_and_by_basename() -> None:
