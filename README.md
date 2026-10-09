@@ -137,7 +137,9 @@ The dashboard walks through four steps in order, and every step stores its resul
 
    Beside the animation sits the **annotated footage** of the match itself (the stream described further down), kept
    in step with it: a still of the exact second while the animation is paused - so scrubbing the animation scrubs
-   the footage - and a live stream opened at that second and speed while it plays. Above it, **Footage moment to
+   the footage - and a live stream opened at that second and speed while it plays (H.264 with sound where the
+   browser can play it; the MJPEG stream, without sound, in Safari and other WebKit browsers, whose media stack
+   will not play an endless fragmented MP4). Above it, **Footage moment to
    jump to** lists the same tagged and detected events as the strip; picking one and pressing *Jump to this moment*
    moves the animation there and starts both together, so the events are how a review picks its start times. The
    pane needs the stream server (`scripts/run_match_stream.py`); the page says so - and offers to start it - when
@@ -161,7 +163,8 @@ The dashboard walks through four steps in order, and every step stores its resul
 
 ## The annotated match stream
 
-The footage pane beside the pitch is served by a small MJPEG server of its own, which can also be opened directly:
+The footage pane beside the pitch is served by a small stream server of its own - MJPEG, plus the same frames
+encoded as H.264 for the pane's `<video>` - which can also be opened directly:
 
 ```bash
 .venv/bin/python scripts/run_match_stream.py --port 8510
@@ -175,6 +178,14 @@ markings projected back through the same corrected camera chain the report uses 
 field), a box on each tracked player in their measured team colour with a chip showing their shirt number - or
 `#track_id` while nobody has named them - the ball from the segment's scan (a filled dot when a detector saw it, a
 hollow ring where the scan coasted across a miss), and a clock/legend HUD.
+
+The encoded form of the same stream is what the dashboard pane plays where the browser can: `/live/<match_id>.mp4`
+(an endless fragmented MP4: `fps=`, `rate=`, `width=`, `overlays=`, `audio=`), `/video/<match_id>.mp4` (a bounded,
+seekable clip encoded on demand and cached; `duration=` bounds it; `codec=h264|hevc`), and `/game/<game_id>.mp4`
+(the whole combined game, for Step 1 marking). Safari will not play an open-ended fragmented MP4 - Apple's media
+stack wants byte-range support or HLS, and an endless encode has neither - so WebKit-family browsers get the MJPEG
+stream instead; the pane makes the choice itself, and falls back the same way in any browser whose video loads keep
+failing.
 
 The stream draws what the archive already knows and invents nothing: boxes come from the report build (the
 `boxes.npz` beside the replay - a replay without them is refused with the `scripts/rebuild_match.py` command

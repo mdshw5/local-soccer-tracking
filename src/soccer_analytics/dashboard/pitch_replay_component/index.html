@@ -342,6 +342,16 @@
         other: '#9ca3af',
       };
 
+      // WebKit-family browsers (desktop Safari and every iOS browser) do not play the pane's endless fragmented
+      // MP4: their media stack probes with a byte range (Range: bytes=0-1) and expects a 206 with
+      // Content-Range - Apple's documented requirement - which a stream that has no length cannot answer. They
+      // get the MJPEG stream instead, which they have always played. Chromium (Chrome, Edge, Opera) and Gecko
+      // (Firefox) keep the encoded stream; ``onFootageError`` catches anything else that ever refuses it.
+      function webkitFamily() {
+        const ua = navigator.userAgent || '';
+        return /Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\/|OPR\//.test(ua);
+      }
+
       const state = {
         data: null,
         loadedUrl: '',
@@ -375,6 +385,11 @@
         // counter, track ids, notes).
         footageOverlays: {pitch: true, boxes: true, numbers: true, ball: true, hud: true, debug: true},
         footageKind: '', // what the pane currently shows: '' | 'still' | 'stream'
+        // Which transport the pane plays: 'video' is the encoded /live stream (full rate, audio, a measurable
+        // clock); 'mjpeg' is the /stream MJPEG in the pane's own <img> - the fallback for WebKit-family
+        // browsers and for anything whose video loads keep failing.
+        footageMode: webkitFamily() ? 'mjpeg' : 'video',
+        footageVideoFails: 0, // video-element errors since the last decoded frame; a few flip the mode
         footageSeq: 0, // cache-buster per stream start
         footageToken: '', // identifies the live stream to the server's /stop endpoint
         footageSound: false, // the stream's audio: off until asked for (browsers block sound otherwise)
@@ -417,6 +432,13 @@
       const tagButtons = document.getElementById('tag-buttons');
       const tagNote = document.getElementById('tag-note');
       const tagStatus = document.getElementById('tag-status');
+
+      // The MJPEG fallback stream carries no audio; the toggle would silently do nothing, so it says so.
+      if (state.footageMode === 'mjpeg') {
+        const soundToggle = document.getElementById('sound');
+        soundToggle.disabled = true;
+        soundToggle.closest('label').title = 'The MJPEG fallback stream (this browser) has no audio';
+      }
 
       function detectedKit(team) {
         const entry = team >= 0 ? (state.data.team_colours || [])[team] : null;
@@ -1032,6 +1054,11 @@
       // The pane is the match's encoded stream (``/live/<match>.mp4``, from ``dashboard/video.py``): H.264 of
       // the analysed window with the pitch model, the detection boxes and the shirt numbers drawn on it, at
       // the source's full frame rate (interpolated between analysis samples) and with the match's own audio.
+      // Where that stream cannot play, the pane falls back to the MJPEG stream (``/stream/<match>.mjpg``) in
+      // its <img>: a lower frame rate and no audio, but every browser plays it. WebKit-family browsers (desktop
+      // Safari and every iOS browser) start there - their media stack will not play an endless fragmented MP4
+      // (it probes with a byte range and expects a 206/Content-Range, which a stream with no length cannot
+      // give) - and a few video errors flip any other stack to the fallback too (see ``onFootageError``).
       // A live stream still only moves forward, so the animation stays the master clock and the pane follows:
       //
       // * paused, the pane shows one annotated still of the animation's exact second (``/frame``), so scrubbing
@@ -1039,7 +1066,9 @@
       // * playing, it opens the live stream at the animation's second. A <video> element reports where it is
       //   (``currentTime``), so the pane can *measure* the footage's position instead of inferring it - and a
       //   stream that falls behind, or is simply out of step, is restarted at the animation's second once the
-      //   gap passes a tolerance rather than left drifting away from the pitch beside it.
+      //   gap passes a tolerance rather than left drifting away from the pitch beside it;
+      // * in the fallback mode there is no clock to read (an <img> has none), so the MJPEG stream is opened at
+      //   the animation's second and left alone until the next seek, speed or layer change moves it.
       //
       // The animation's clock is the strip's (0 = first analysed frame); the stream's is the recording's, so
       // ``streamOffset`` is what makes "start at this second" mean the same on both clocks.
@@ -1053,6 +1082,9 @@
       // calls the server absent.
       const FOOTAGE_RETRY_LIMIT = 5;
       const FOOTAGE_RETRY_BASE_MS = 1000;
+      // Video errors before the pane stops trying the encoded stream and drops to the MJPEG one. Safari never
+      // gets this far (it starts on MJPEG); this is the net for any other stack that refuses /live.
+      const FOOTAGE_VIDEO_FALLBACK_FAILS = 3;
 
       function footageEnabled() {
         return Boolean(state.footageBase && state.matchId && state.data);
@@ -1072,6 +1104,15 @@
         const width = Math.max(480, Math.min(1600, Math.round(pane * (window.devicePixelRatio || 1))));
         if (kind === 'still') {
           return `${state.footageBase}/frame/${state.matchId}.jpg?t=${source.toFixed(1)}&width=${width}&overlays=${overlayParam()}`;
+        }
+        if (kind === 'mjpeg') {
+          // The fallback: the same overlay as JPEGs in an <img>, at the server's own frame rate. No audio and
+          // no clock to read, but every browser plays it - including the ones that refuse the mp4 below.
+          return (
+            `${state.footageBase}/stream/${state.matchId}.mjpg` +
+            `?start=${source.toFixed(1)}&rate=${state.speed}&width=${width}` +
+            `&overlays=${overlayParam()}&token=${state.footageToken}&_=${++state.footageSeq}`
+          );
         }
         // The live encoded stream: full frame rate, the match's audio, the same layers. ``rate`` is the
         // animation's speed baked into the stream's timeline, so the pane and the pitch run at one pace.
@@ -1133,11 +1174,17 @@
 
       function renderFootageVisibility() {
         // The pane shows exactly one of: the live video (playing and ready), the still (paused or before the
-        // stream's first frame), or the "not configured" note.
+        // stream's first frame), the MJPEG stream, or the "not configured" note. In the MJPEG mode one <img>
+        // carries both the stream and the still - only the video element goes unused.
         const enabled = footageEnabled();
-        const live = enabled && state.playing && state.footageKind === 'stream' && footageVideo.readyState >= 2;
-        footageVideo.style.display = live ? 'block' : 'none';
-        footage.style.display = enabled && !live ? 'block' : 'none';
+        if (state.footageMode === 'mjpeg') {
+          footageVideo.style.display = 'none';
+          footage.style.display = enabled ? 'block' : 'none';
+        } else {
+          const live = enabled && state.playing && state.footageKind === 'stream' && footageVideo.readyState >= 2;
+          footageVideo.style.display = live ? 'block' : 'none';
+          footage.style.display = enabled && !live ? 'block' : 'none';
+        }
         footageEmpty.style.display = enabled ? 'none' : 'block';
         resyncFootageBtn.disabled = !enabled;
       }
@@ -1160,7 +1207,8 @@
         stopFootageStream();
         if (state.footageKind === 'stream') {
           state.footageKind = '';
-          closeLiveVideo();
+          if (state.footageMode === 'mjpeg') replaceFootageImage(); // the <img> is the stream; swap it to abort
+          else closeLiveVideo();
         }
       }
 
@@ -1175,11 +1223,23 @@
           state.footageKind = 'stream';
           state.footageOpenStrip = state.time;
           state.footageRate = state.speed;
-          state.footageAwaitingFirstFrame = true;
-          openLiveVideo(footageUrl('live', state.time));
+          if (state.footageMode === 'mjpeg') {
+            // The MJPEG stream paints into the pane's own <img>: frames appear as they arrive, there is no
+            // clock to wait for and no audio element to feed (see ``syncFootage`` for the missing measurement).
+            state.footageAwaitingFirstFrame = false;
+            closeLiveVideo();
+            setFootageSource('stream', footageUrl('mjpeg', state.time));
+          } else {
+            state.footageAwaitingFirstFrame = true;
+            openLiveVideo(footageUrl('live', state.time));
+          }
         } else {
           // Paused: a stream left running would walk away from the animation; a still is the exact second.
-          closeLiveVideo();
+          if (state.footageMode === 'mjpeg') {
+            if (state.footageKind === 'stream') replaceFootageImage(); // abort the fetch; the still lands next
+          } else {
+            closeLiveVideo();
+          }
           scheduleStill();
         }
       }
@@ -1209,6 +1269,7 @@
             return;
           }
           if (!state.footageSync) return; // streaming, uncoupled: nothing corrects it
+          if (state.footageMode === 'mjpeg') return; // an <img> reports no position: nothing to measure
           if (state.footageAwaitingFirstFrame || footageVideo.readyState < 2) return; // no clock yet: nothing to compare
           // The animation's clock is the truth - and the video element reports where the footage actually is
           // (its own timeline started at ``footageOpenStrip``), so the comparison is a measurement, not a model.
@@ -1240,6 +1301,14 @@
         }
         if (state.footageRetrying) {
           footageNote.textContent = 'Footage busy on restart - retrying...';
+          return;
+        }
+        if (state.footageMode === 'mjpeg') {
+          // Honest about the trade: this stream plays everywhere, but it is the server's own frame rate and
+          // has no sound - the encoded stream is what carries both, and this browser will not play it.
+          footageNote.textContent = state.footageSync
+            ? 'This browser gets the MJPEG footage stream (no audio - it will not play the encoded stream): a still while paused, motion while playing.'
+            : 'Sync is off, so the MJPEG footage (no audio) streams on its own and is not restarted when the animation moves.';
           return;
         }
         footageNote.textContent = state.footageSync
@@ -1457,8 +1526,33 @@
           restartFootage();
         });
       }
-      function onFootageError() {
+      function onFootageError(event) {
         if (!footageEnabled()) return;
+        // The encoded stream can fail where the still (a plain JPEG from the same server) cannot: a browser
+        // whose media stack refuses the endless fragmented MP4 keeps erroring, and retrying the same format
+        // would never succeed. A few video errors are enough to drop to the MJPEG stream for the rest of the
+        // session - but only once a still has actually loaded, so a dead server still reads as "not running"
+        // rather than silently changing what the pane shows.
+        if (event && event.target === footageVideo && state.footageMode === 'video') {
+          state.footageVideoFails = state.footageVideoFails + 1;
+          if (
+            state.footageVideoFails >= FOOTAGE_VIDEO_FALLBACK_FAILS &&
+            footage.complete &&
+            footage.naturalWidth > 0
+          ) {
+            state.footageMode = 'mjpeg';
+            state.footageRetry = 0;
+            state.footageError = false;
+            state.footageRetrying = true;
+            clearTimeout(state.footageRetryTimer);
+            state.footageRetryTimer = setTimeout(() => {
+              state.footageRetryTimer = null;
+              openFootage();
+            }, 250);
+            showFootage();
+            return;
+          }
+        }
         // A restart can lose the race for the server's decode slot - the previous connection's slot is only freed
         // when the server notices nobody is reading it - so retry with backoff before calling the server absent.
         if (state.footageRetry < FOOTAGE_RETRY_LIMIT) {
@@ -1499,6 +1593,7 @@
         state.footageRetry = 0;
         state.footageRetrying = false;
         state.footageError = false;
+        state.footageVideoFails = 0; // a frame played: this browser can take the encoded stream
         showFootage();
       });
       footageVideo.addEventListener('playing', renderFootageVisibility);

@@ -172,7 +172,9 @@ def test_the_footage_follows_the_animation_clock() -> None:
     """
     html = COMPONENT.read_text()
     assert "function footageUrl" in html
-    assert "/live/" in html and "/frame/" in html, "the live encoded stream for playing, the still endpoint for paused"
+    assert (
+        "/live/" in html and "/frame/" in html and "/stream/" in html
+    ), "the live encoded stream for playing, the MJPEG fallback, and the still endpoint for paused"
     assert "state.streamOffset" in html, "the strip clock must be translated onto the recording's"
     assert "function scheduleStill" in html and "FOOTAGE_STILL_DEBOUNCE_MS" in html, "scrubbing must be debounced"
     assert "function syncFootage" in html
@@ -221,7 +223,9 @@ def test_the_footage_overlay_toggles_choose_the_layers() -> None:
         assert f'id="{ident}"' in html, f"a toggle must exist for {ident}"
     assert "state.footageOverlays" in html
     assert "overlays=${overlayParam()}" in html, "the layer set must travel on the URLs"
-    assert html.count("overlays=${overlayParam()}") == 2, "the stream and the still both carry it"
+    assert html.count("overlays=${overlayParam()}") == 3, (
+        "the encoded stream, the MJPEG fallback and the still all carry it"
+    )
     assert "on.length ? on.join(',') : 'none'" in html, "all layers off is spelled none, not empty"
     handler = html.split("state.footageOverlays[name] = event.target.checked;", 1)[1]
     assert "restartFootage()" in handler, "a new layer set must reopen the footage now"
@@ -239,6 +243,62 @@ def test_a_busy_stream_server_is_retried_before_giving_up() -> None:
     assert "state.footageError = true" in error_handler, "only exhausted retries call the server absent"
     load_handler = html.split("function onFootageLoad", 1)[1]
     assert "state.footageRetry = 0" in load_handler, "a frame that arrives clears the retry state"
+
+
+def test_webkit_browsers_get_the_mjpeg_footage_instead_of_the_mp4() -> None:
+    """Safari's media stack will not play the pane's endless fragmented MP4: it probes with ``Range: bytes=0-1``
+    and expects a 206/Content-Range (Apple's documented requirement), which a stream with no length cannot
+    answer - so the pane must not even try it there. WebKit-family browsers (desktop Safari, every iOS browser)
+    start on the MJPEG stream in the pane's <img>; Chromium and Gecko keep the encoded stream."""
+    html = COMPONENT.read_text()
+    assert "function webkitFamily" in html
+    detector = html.split("function webkitFamily", 1)[1].split("}", 1)[0]
+    assert "/Safari\\//" in detector, "Safari identifies itself as WebKit"
+    for rival in ("Chrome\\/", "Chromium\\/", "Edg\\/", "OPR\\/"):
+        assert rival in detector, f"a Chromium browser wearing the Safari token must not match ({rival})"
+    assert "footageMode: webkitFamily() ? 'mjpeg' : 'video'" in html, "the mode is decided up front"
+    mjpeg_block = html.split("if (kind === 'mjpeg')", 1)[1].split("// The live encoded stream", 1)[0]
+    assert "/stream/${state.matchId}.mjpg" in mjpeg_block
+    for param in (
+        "start=${source.toFixed(1)}",
+        "rate=${state.speed}",
+        "&width=${width}",
+        "overlays=${overlayParam()}",
+        "token=${state.footageToken}",
+    ):
+        assert param in mjpeg_block, f"the MJPEG URL is missing {param}"
+
+
+def test_a_browser_that_refuses_the_video_falls_back_to_mjpeg() -> None:
+    """WebKit starts on MJPEG, but any other stack can refuse /live too. After a few video errors - and only
+    once a still has loaded, so a dead server still reads as "not running" - the pane switches to the MJPEG
+    stream itself instead of calling the server absent; a decoded video frame clears the failure count."""
+    html = COMPONENT.read_text()
+    assert "FOOTAGE_VIDEO_FALLBACK_FAILS" in html
+    error_handler = html.split("function onFootageError", 1)[1].split("function onFootageLoad", 1)[0]
+    assert "event.target === footageVideo" in error_handler, "only the video element's failures flip the mode"
+    assert "state.footageMode = 'mjpeg'" in error_handler
+    assert "footage.complete &&" in error_handler and "footage.naturalWidth > 0" in error_handler, (
+        "the still must prove the server is up before the mode is blamed"
+    )
+    loaded = html.split("footageVideo.addEventListener('loadeddata'", 1)[1]
+    assert "state.footageVideoFails = 0" in loaded, "a decoded frame clears the failure count"
+
+
+def test_the_mjpeg_mode_shares_the_pane_image_and_reports_no_clock() -> None:
+    """In the fallback mode the pane's existing <img> carries both the MJPEG stream and the paused still (the
+    video element goes unused), there is no currentTime to measure drift against, and the audio toggle is
+    disabled - the fallback stream has no audio, and the note under the pane says so."""
+    html = COMPONENT.read_text()
+    opener = html.split("function openFootage", 1)[1].split("function restartFootage", 1)[0]
+    assert "setFootageSource('stream', footageUrl('mjpeg', state.time))" in opener
+    sync_body = html.split("function syncFootage", 1)[1].split("\n      function ", 1)[0]
+    assert "state.footageMode === 'mjpeg'" in sync_body, "the drift check belongs to the video's own clock"
+    visibility = html.split("function renderFootageVisibility", 1)[1].split("\n      function ", 1)[0]
+    assert "state.footageMode === 'mjpeg'" in visibility
+    assert "footage.style.display = enabled ? 'block'" in visibility, "the <img> is the stream and the still"
+    assert "soundToggle.disabled = true" in html, "the fallback has no audio: the toggle must say so"
+    assert "no audio" in html, "the pane note must be honest about what the fallback loses"
 
 
 def test_a_superseded_stream_is_aborted_not_just_ignored() -> None:

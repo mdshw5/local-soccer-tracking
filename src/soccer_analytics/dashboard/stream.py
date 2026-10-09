@@ -1294,7 +1294,12 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             token = os.urandom(6).hex()
             src = f"/live/{match_id}.mp4" + ("?" + "&".join(params + [f"token={token}"]))
             media = f"<video src='{src}' controls autoplay muted></video>"
-            note = "The live encode runs at what this machine can render: 1080p at the source's frame rate keeps up better than 4K. Unmute in the player for the match audio."
+            note = (
+                "The live encode runs at what this machine can render: 1080p at the source's frame rate keeps "
+                "up better than 4K. Unmute in the player for the match audio. Safari and other WebKit browsers "
+                "will not play this endless fragmented MP4 (their media stack wants byte ranges or HLS) - use "
+                "the MJPEG link there; the dashboard pane falls back to it automatically."
+            )
             beacon = (
                 "<script>window.addEventListener('pagehide',()=>{const u=new URL("
                 "document.querySelector('video').src,location);const t=u.searchParams.get('token');"
