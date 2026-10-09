@@ -18,7 +18,7 @@ trusting descriptors that the current code would never write.
 
 Usage::
 
-    python scripts/refresh_kit_descriptors.py --segment data/segments/<name> [--limit-chunks 5]
+    python scripts/refresh_kit_descriptors.py --segment <footage>/analysis/<id>/segments/<name> [--limit-chunks 5]
 """
 
 from __future__ import annotations

@@ -21,7 +21,7 @@ The fixed burned-in overlay regions (logo, timestamp) are blanked before every d
 
 Usage::
 
-    python scripts/run_ball_scan.py --segment data/segments/<name> [--force] [--limit-frames 50]
+    python scripts/run_ball_scan.py --segment <footage>/analysis/<id>/segments/<name> [--force] [--limit-frames 50]
 """
 
 from __future__ import annotations

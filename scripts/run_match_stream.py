@@ -33,7 +33,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from soccer_analytics.dashboard.stream import (
     DEFAULT_PORT,
-    MATCHES_ROOT,
     StreamError,
     serve,
     streamable_matches,
@@ -44,7 +43,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="0.0.0.0", help="interface to bind (default: all)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="port to serve on")
-    parser.add_argument("--root", default=str(MATCHES_ROOT), help="matches root (data/matches)")
+    parser.add_argument(
+        "--root",
+        default=None,
+        help="matches root; default: every analysis beside the footage roots (plus the legacy data/matches)",
+    )
     parser.add_argument("--width", type=int, default=1600, help="default decode width in pixels")
     parser.add_argument("--match", action="append", default=[], help="match id to preload (repeatable)")
     parser.add_argument("--list", action="store_true", help="list streamable matches and exit")

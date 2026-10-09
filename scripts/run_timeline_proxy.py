@@ -7,7 +7,8 @@ dashboard then serves as the scrubbable timeline.
 
 Usage::
 
-    python scripts/run_timeline_proxy.py --video /path/match.MP4 --out data/segments/<id> --start 0 --duration 300
+    python scripts/run_timeline_proxy.py --video /path/match.MP4 \
+        --out <footage>/analysis/<id>/segments/<segment> --start 0 --duration 300
 """
 
 from __future__ import annotations

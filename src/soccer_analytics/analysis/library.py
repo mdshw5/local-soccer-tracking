@@ -1,21 +1,29 @@
-"""Match archive: one directory per match holding everything produced for it.
+"""Match archive: everything computed for a match lives beside the footage it was computed from.
 
-Layout::
+``data/matches`` in the repository was the first home for this, and it made an analysis a thing that only existed
+on one machine. The archive now sits with the recording instead::
 
-    data/matches/<match_id>/
-        match.json            this index (sources, segments, calibration, counts)
-        events.json           manual tags + audio candidates
-        report.json           Stage B metrics
-        calibration.json      pitch calibration
-        highlights/*.mp4      reels, each with a .json manifest
+    <footage directory>/
+        16-28-37.784.MP4          the original clips, untouched
+        game_16-28-37.784.mp4     the combined game, also untouched (a stream copy of the clips)
+        analysis/
+            2026-10-03_game_16-28-37.784/        one directory per analysed video, named by recording date + file
+                match.json        this index (sources, segments, format, team names)
+                events.json, report.json, replay.json, calibration.json, highlights/, identities/ ...
+                segments/         the Stage A results (and the ball scan's) for this match's windows
+                game.json         the game manifest and its marking proxy, when this video is a combined game
 
-Keeping artefacts together (rather than one flat output directory) is what makes the archive browsable later, which
-is the point of keeping a season's worth of matches.
+Copying that directory (or the whole footage directory) carries the analysis with it: the recorded paths are
+stored relative to the analysis directory when they sit inside it, and re-pointed at load time, so a moved match
+still opens its own footage and segments. The old ``data/matches`` root stays readable - archives that predate
+this layout keep working until ``scripts/migrate_analysis.py`` moves them next to their videos.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -25,7 +33,129 @@ import numpy as np
 from soccer_analytics.analysis.events import EventLog
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration
 
-MATCHES_ROOT = Path("data/matches")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ANALYSIS_DIRNAME = "analysis"  # the folder each analysed video's match directory lives in
+SEGMENTS_DIRNAME = "segments"  # Stage A results, inside the match directory
+LEGACY_MATCHES_ROOT = REPO_ROOT / "data" / "matches"  # where archives lived before the move beside the footage
+MATCHES_ROOT = LEGACY_MATCHES_ROOT  # kept for callers that still name the old root
+DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def video_roots() -> list[Path]:
+    """Where match footage is looked for: the repo's own ``data/videos``, then the machine's own archives.
+
+    ``SOCCER_VIDEO_ROOTS`` (colon-separated) names the recording archive directories; the default is the author's
+    camera share. Kept in one function so the dashboard, the discovery scan and the stream server agree about
+    which disks hold footage.
+    """
+    extra = os.environ.get("SOCCER_VIDEO_ROOTS", "/srv/storage/home_video/Xbot")
+    roots = [REPO_ROOT / "data" / "videos"]
+    roots += [Path(part).expanduser() for part in extra.split(":") if part.strip()]
+    return roots
+
+
+def discover_videos(roots: list[Path] | None = None) -> list[Path]:
+    """Video files under the footage roots, newest first, so the most recent match is the default.
+
+    Anything under an ``analysis`` directory is excluded: the reels, preview clips and centred clips the tool
+    itself writes are MP4s too, and listing an analysis's own output back as footage to analyse is nonsense.
+    """
+    found: list[Path] = []
+    for root in roots if roots is not None else video_roots():
+        if not root.exists():
+            continue
+        found += [p for p in root.rglob("*.MP4") if ANALYSIS_DIRNAME not in p.parts]
+        found += [p for p in root.rglob("*.mp4") if ANALYSIS_DIRNAME not in p.parts]
+    return sorted(set(found), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def discover_match_manifests(roots: list[Path] | None = None) -> list[Path]:
+    """Every ``analysis/<id>/match.json`` under the footage roots (the self-contained archives)."""
+    found: list[Path] = []
+    for root in roots if roots is not None else video_roots():
+        if root.exists():
+            found += [p for p in root.glob(f"**/{ANALYSIS_DIRNAME}/*/match.json")]
+    return found
+
+
+def analysis_id_for(video: str | Path) -> str:
+    """The analysis directory's name for one video: the recording's date, then the file's own name.
+
+    The date comes from the footage directory's name when it is a ``YYYY-MM-DD`` folder (how the camera share is
+    organised), else from the file's timestamp - so ids sort chronologically by when the match was *played*, not
+    by when someone got round to analysing it, and two teams' matches never share an id by accident.
+    """
+    video = Path(video)
+    if DATE_DIR_RE.match(video.parent.name):
+        date = video.parent.name
+    else:
+        try:
+            date = time.strftime("%Y-%m-%d", time.localtime(video.stat().st_mtime))
+        except OSError:
+            date = time.strftime("%Y-%m-%d")
+    safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in video.stem)[:60]
+    return f"{date}_{safe}"
+
+
+def new_match_id(source: str | Path) -> str:
+    """Historical name for :func:`analysis_id_for`; the id doubles as the analysis directory's name."""
+    return analysis_id_for(source)
+
+
+def analysis_dir_for(video: str | Path) -> Path:
+    """Where the analysis of ``video`` lives: an ``analysis/<id>`` directory beside the footage itself.
+
+    Derived from the video's path alone, so it can be computed before anything exists (the combined game's path,
+    or a match directory about to be created) and it never depends on which machine or repository root is in use.
+    """
+    video = Path(video).expanduser()
+    parent = video.parent.absolute()
+    return parent / ANALYSIS_DIRNAME / analysis_id_for(video)
+
+
+def segments_root_for(video: str | Path) -> Path:
+    """Where Stage A output for this footage goes: with the rest of its analysis, not in the repository."""
+    return analysis_dir_for(video) / SEGMENTS_DIRNAME
+
+
+def match_id_from_path(path: str | Path) -> str:
+    """A match id given as a path (a script argument, an archive someone moved): the last path component."""
+    return Path(path).name
+
+
+def store_path(value: str | Path, base: Path) -> str:
+    """Store a path relative to ``base`` when it lies inside it, else absolute.
+
+    Relative-when-inside is what makes a match directory portable: move the footage directory and
+    ``game_16-28-37.784.mp4`` still means the file next door, while an absolute path would point at the old disk.
+    """
+    path = Path(value)
+    try:
+        return str(path.resolve().relative_to(base.resolve()))
+    except (ValueError, OSError):
+        return str(path)
+
+
+def resolve_path(value: str, base: Path) -> str:
+    """The usable form of a stored path: absolute if it exists, else resolved against the match directory.
+
+    A stored relative path is looked up next to the analysis first; an absolute path that no longer exists is
+    looked up by name beside the analysis too (moving a whole footage directory keeps the names but changes the
+    prefix, and that is exactly the case this is for). A value nothing matches stays as it is, so a manifest
+    that named something relative to the process's own directory (older archives did) keeps working the way it
+    always did.
+    """
+    path = Path(value)
+    if path.is_absolute():
+        if path.exists():
+            return str(path)
+        candidate = base / path.name
+        return str(candidate) if candidate.exists() else str(path)
+    candidate = base / path
+    if candidate.exists():
+        return str(candidate)
+    candidate = base / path.name
+    return str(candidate) if candidate.exists() else str(value)
 
 
 @dataclass
@@ -51,56 +181,112 @@ def _atomic_write(path: Path, payload) -> None:
     tmp.replace(path)
 
 
-def new_match_id(source: str | Path) -> str:
-    """Date-stamped id from the source file, so matches sort chronologically and stay recognisable."""
-    stem = Path(source).stem
-    safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in stem)[:60]
-    return f"{time.strftime('%Y-%m-%d')}_{safe}"
-
-
 class MatchLibrary:
-    def __init__(self, root: str | Path = MATCHES_ROOT):
-        self.root = Path(root)
+    """The match archives, wherever they live.
 
-    def create(self, source: str | Path, **kwargs) -> MatchRecord:
-        """The match for this footage, creating it only if it is not already archived.
+    ``MatchLibrary()`` finds every analysis: the self-contained ``analysis/<id>`` directories beside the footage,
+    and - until migrated - the old ``data/matches`` archives. ``MatchLibrary(root)`` keeps the old single-root
+    behaviour for tests and scripts that point at one directory explicitly.
+    """
 
-        The id is derived from the video's name and the date, so creating twice from the same footage lands on the
-        same id. Rewriting the record there would throw away the format, the team names and the segment list already
-        saved against it - and the page reads that record back on every run, so the loss would be silent.
-        """
-        match_id = new_match_id(source)
-        if (self.path(match_id) / "match.json").exists():
-            return self.load(match_id)
-        record = MatchRecord(match_id=match_id, sources=[str(source)], **kwargs)
-        self.save(record)
-        return record
+    def __init__(self, root: str | Path | None = None):
+        self.root = Path(root) if root is not None else None
+        self._index: dict[str, Path] | None = None
+
+    # --- discovery -------------------------------------------------------------------------------------------
+    def _scan(self) -> dict[str, Path]:
+        found: dict[str, Path] = {}
+        if self.root is not None:
+            if self.root.exists():
+                for path in sorted(self.root.iterdir()):
+                    if (path / "match.json").exists():
+                        found[path.name] = path
+            return found
+        if LEGACY_MATCHES_ROOT.exists():
+            for path in sorted(LEGACY_MATCHES_ROOT.iterdir()):
+                if (path / "match.json").exists():
+                    found[path.name] = path
+        for manifest in discover_match_manifests():
+            found.setdefault(manifest.parent.name, manifest.parent)
+        return found
+
+    def _index_map(self) -> dict[str, Path]:
+        if self._index is None:
+            self._index = self._scan()
+        return self._index
 
     def path(self, match_id: str) -> Path:
-        return self.root / match_id
+        """The directory of a match, whether the id is an id or a path to a match directory."""
+        candidate = Path(match_id)
+        if (candidate / "match.json").exists():
+            return candidate
+        if self.root is not None:
+            return self.root / match_id
+        return self._index_map().get(match_id, LEGACY_MATCHES_ROOT / match_id)
 
-    def save(self, record: MatchRecord) -> Path:
-        path = self.path(record.match_id) / "match.json"
-        _atomic_write(path, asdict(record))
+    def list_ids(self) -> list[str]:
+        if self.root is not None:
+            if not self.root.exists():
+                return []
+            return sorted(p.name for p in self.root.iterdir() if (p / "match.json").exists())
+        return sorted(self._index_map())
+
+    def match_for_video(self, video: str | Path) -> str | None:
+        """The id of the analysis saved beside this video, or ``None`` when it has not been analysed yet."""
+        directory = analysis_dir_for(video)
+        return directory.name if (directory / "match.json").exists() else None
+
+    # --- records ---------------------------------------------------------------------------------------------
+    def create(self, source: str | Path, **kwargs) -> MatchRecord:
+        """The match for this footage, creating its analysis directory *beside the video* if it does not exist.
+
+        The directory is derived from the video, so creating twice from the same footage lands on the same place,
+        and re-creating never rewrites the record (format, team names and the segment list survive).
+        """
+        if self.root is not None:
+            match_id = analysis_id_for(source)
+            directory = self.root / match_id
+        else:
+            directory = analysis_dir_for(source)
+            match_id = directory.name
+        if (directory / "match.json").exists():
+            return self.load(match_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        record = MatchRecord(match_id=match_id, sources=[str(source)], **kwargs)
+        if self._index is not None:
+            self._index[match_id] = directory
+        self.save(record, directory=directory)
+        return record
+
+    def save(self, record: MatchRecord, directory: str | Path | None = None) -> Path:
+        """Write the record, storing paths relative to the match directory when they lie inside it."""
+        directory = Path(directory) if directory is not None else self.path(record.match_id)
+        payload = asdict(record)
+        payload["sources"] = [store_path(source, directory.parent.parent) for source in record.sources]
+        payload["segments"] = [store_path(segment, directory) for segment in record.segments]
+        path = directory / "match.json"
+        _atomic_write(path, payload)
         return path
 
     def load(self, match_id: str) -> MatchRecord:
-        data = json.loads((self.path(match_id) / "match.json").read_text())
-        return MatchRecord(**data)
+        directory = self.path(match_id)
+        data = json.loads((directory / "match.json").read_text())
+        record = MatchRecord(**data)
+        # Repoint the recorded paths at wherever this match directory is now: the footage usually sits beside the
+        # analysis (one level up), the segments usually inside it. A moved directory still opens its own files.
+        record.sources = [resolve_path(source, directory.parent.parent) for source in record.sources]
+        record.segments = [resolve_path(segment, directory) for segment in record.segments]
+        return record
 
     def add_segment(self, match_id: str, segment_dir: str | Path) -> MatchRecord:
         """Remember that a segment directory belongs to this match, so the archive says what has been produced."""
         record = self.load(match_id)
-        entry = str(segment_dir)
+        directory = self.path(match_id)
+        entry = resolve_path(str(segment_dir), directory)
         if entry not in record.segments:
             record.segments.append(entry)
             self.save(record)
         return record
-
-    def list_ids(self) -> list[str]:
-        if not self.root.exists():
-            return []
-        return sorted(p.name for p in self.root.iterdir() if (p / "match.json").exists())
 
     def summaries(self) -> list[dict]:
         """One row per match for the dashboard's library list, with what has been produced so far."""
@@ -111,6 +297,7 @@ class MatchLibrary:
             rows.append(
                 {
                     "match_id": match_id,
+                    "directory": str(directory),
                     "sources": record.sources,
                     "format": record.format,
                     "segments": len(record.segments),

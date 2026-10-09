@@ -61,7 +61,13 @@ from soccer_analytics.analysis.highlights import (
     select_reel,
     write_manifest,
 )
-from soccer_analytics.analysis.library import MatchLibrary, new_match_id
+from soccer_analytics.analysis.library import (
+    MatchLibrary,
+    analysis_dir_for,
+    discover_videos,
+    segments_root_for,
+    video_roots,
+)
 from soccer_analytics.analysis.kit import colour_hex, colour_name, suggest_team_name
 from soccer_analytics.analysis.jerseys import merge_numbers
 from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
@@ -123,8 +129,8 @@ from soccer_analytics.geometry.pitch_calibration import (
 )
 from soccer_analytics.ingest.ffmpeg_reader import grab_frame, probe_video
 
-SEGMENTS_ROOT = REPO_ROOT / "data" / "segments"
-MATCHES_ROOT = REPO_ROOT / "data" / "matches"
+# Everything the tool computes for a match now lives beside the footage, in an ``analysis/<id>`` directory
+# (analysis.library builds the paths); the old data/matches root is still listed until migrated.
 ANNOTATION_COMPONENT = components.declare_component(
     "field_annotation_editor", path=str(Path(__file__).parent / "field_annotation_component")
 )
@@ -160,27 +166,35 @@ st.set_page_config(page_title="Match analysis", layout="wide")
 # --------------------------------------------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------------------------------------------
-def video_roots() -> list[Path]:
-    """Where match footage is looked for, newest-first within each root.
+def _location_label(path: Path) -> str:
+    """A short, readable name for where something lives: under a footage root when possible, else absolute.
 
-    ``data/videos`` in the repo comes first; ``SOCCER_VIDEO_ROOTS`` (colon-separated) adds machine-specific
-    archives after it - the old hardcoded ``/srv/storage/...`` path only existed on the author's machine, and on
-    any other box it silently halved the video picker.
+    Analyses live beside the footage now rather than in the repository, so "relative to the repo" is no longer
+    the right display rule; the root's own name ("Xbot/2026-10-03/analysis/...") tells the user which disk and
+    which match folder holds the directory, which is what they need to find it themselves.
     """
-    extra = os.environ.get("SOCCER_VIDEO_ROOTS", "/srv/storage/home_video/Xbot")
-    roots = [REPO_ROOT / "data" / "videos"]
-    roots += [Path(part).expanduser() for part in extra.split(":") if part.strip()]
-    return roots
-
-
-def discover_videos() -> list[Path]:
-    """Video files under the usual places, newest first, so the most recent match is the default."""
-    found: list[Path] = []
+    path = Path(path)
     for root in video_roots():
-        if not root.exists():
+        try:
+            return f"{root.name}/{path.relative_to(root)}"
+        except ValueError:
             continue
-        found += list(root.rglob("*.MP4")) + list(root.rglob("*.mp4"))
-    return sorted(set(found), key=lambda p: p.stat().st_mtime, reverse=True)
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _video_label(path: str) -> str:
+    """A video's label in the picker: where it is (relative to its root) and whether an analysis exists."""
+    relative = _location_label(Path(path))
+    return relative + ("  -  analysis saved" if _analysis_for_video(path) else "")
+
+
+def _analysis_for_video(path: str) -> str | None:
+    """The id of the analysis saved beside this video, if there is one (cheap: one stat beside the file)."""
+    directory = analysis_dir_for(path)
+    return directory.name if (directory / "match.json").exists() else None
 
 
 def _clock(seconds: float) -> str:
@@ -995,7 +1009,7 @@ def _stage_a_status(segment_dir: Path, watch_key: str) -> None:
         if status.get("lost"):
             st.caption(f"{status['lost']} frame(s) had no usable camera motion; they are excluded from metrics.")
     st.caption(
-        f"Output directory: `{segment_dir.relative_to(REPO_ROOT)}` "
+        f"Output directory: `{_location_label(segment_dir)}` "
         f"({stage_a.completed_chunks(segment_dir)} chunk(s) on disk)"
     )
     if previous == "running" and state != "running":
@@ -1626,9 +1640,9 @@ def replay_section(
             else "the best ball proxy this footage allows (the gimbal follows the ball; the scan below can track "
             "the ball itself)."
         )
-        + " Trails, shirt numbers and a pitch-usage heat map (all players, or just the selected one) are toggled "
-        "above the map. Numbers come from the roster below and the automatic scan; tracks without either show their "
-        "track id once they last 12 s."
+        + " Trails and a pitch-usage heat map (all players, or just the selected one) are toggled above the map. "
+        "Numbers come from the roster below and the automatic scan; tracks without either show their track id once "
+        "they last 12 s, when the debug layer is on."
         + (
             f" {excluded} bystander track(s) - touchline coaches, photographers, spectators - are excluded from "
             "the field of play: they never cover ground the way a player does."
@@ -2157,7 +2171,9 @@ st.caption(
 # cheap preview modes were there to make reviewing a scan bearable and the scan's candidates are now reviewed
 # straight off the playback instead of as cut clips.
 
-library = MatchLibrary(MATCHES_ROOT)
+# The library spans every analysis directory beside the footage - one per match folder, whichever disk it is on -
+# plus the repository's old data/matches archives until they are migrated.
+library = MatchLibrary()
 
 # Everything the page keeps in the session belongs to one match: the calibration just fitted, the report just
 # built, the landmarks behind the residual table. Selecting another archive has to drop all of it - otherwise the
@@ -2191,16 +2207,26 @@ with st.container(border=True):
         pending = st.session_state.pop("archive_select_pending", None)
         if pending in match_ids:
             st.session_state["archive_selection"] = pending
-        selection = st.selectbox("Archive", match_ids + ["(new match)"], index=0, key="archive_selection")
-        match_id = None if selection == "(new match)" else selection
+        selection = st.selectbox(
+            "Match",
+            match_ids + ["(new analysis)"],
+            index=0,
+            key="archive_selection",
+            help=(
+                "One entry per match that has an analysis saved beside its footage (and the repository's older "
+                "archives until they are moved out). Choosing a video that already has an analysis opens it "
+                "automatically, so this list is mainly for going back to a match."
+            ),
+        )
+        match_id = None if selection == "(new analysis)" else selection
         if st.session_state.get("archive_scope") != match_id:
             st.session_state["archive_scope"] = match_id
             for scoped in MATCH_SCOPED_STATE:
                 st.session_state.pop(scoped, None)
         st.caption(
-            f"`{(MATCHES_ROOT / match_id).relative_to(REPO_ROOT)}`"
+            f"Everything for this match is saved with the footage: `{_location_label(library.path(match_id))}`"
             if match_id
-            else "No archive selected - saving the footage starts one."
+            else "No analysis selected - pick footage below and start one, and it is saved beside the video."
         )
 
     with footage_col:
@@ -2210,35 +2236,88 @@ with st.container(border=True):
             st.error(f"No video files found under {searched}.")
             st.stop()
 
-        # Selecting an archive has to bring back the footage it was recorded from, or it cannot be reopened: the
+        # Selecting an analysis has to bring back the footage it was recorded from, or it cannot be reopened: the
         # picker would stay on whichever video happened to be newest and Step 2 would find no segment belonging to
-        # the match. The widget is keyed per match rather than mutated, so each archive remembers its own choice and
-        # a first visit opens on the footage the match was made from.
-        default_video = 0
+        # the match. The widget is keyed per match rather than mutated, so each match remembers its own choice and
+        # a first visit opens on the footage the analysis was made from. The recorded path is resolved against the
+        # analysis directory, so a match folder that has been moved still opens its own video.
+        pinned_source: str | None = None
+        default_video_folder = "All folders"
         if match_id is not None:
             recorded = library.load(match_id).sources
             reachable = [source for source in recorded if Path(source).exists()]
-            if reachable and reachable[0] not in {str(path) for path in video_options}:
-                video_options = [Path(reachable[0]), *video_options]
             if reachable:
-                default_video = [str(path) for path in video_options].index(reachable[0])
+                pinned_source = str(Path(reachable[0]))
+                default_video_folder = str(Path(reachable[0]).parent)
             elif recorded:
                 st.warning("The footage this match was recorded from is not reachable: " + ", ".join(recorded))
 
         video_col, probe_col = st.columns([2, 1])
         with video_col:
+            # Two levels: the recordings live in one folder per match (and matches for several teams sit side by
+            # side), so the picker browses by folder instead of scrolling one flat list from every disk.
+            folders = sorted({str(Path(option).parent) for option in map(str, video_options)})
+            folder_choices = ["All folders", *folders]
+            folder_index = (
+                folder_choices.index(default_video_folder) if default_video_folder in folder_choices else 0
+            )
+            folder = st.selectbox(
+                "Folder",
+                folder_choices,
+                index=folder_index,
+                format_func=lambda entry: entry if entry == "All folders" else _location_label(Path(entry)),
+                key=f"video_folder::{match_id}",
+            )
+            visible = [
+                path
+                for path in video_options
+                if folder == "All folders" or str(Path(path).parent) == folder
+            ]
+            # Whatever folder is shown, the open match's own footage and the last choice must stay selectable -
+            # a selectbox whose value is not among its options breaks on the next run.
+            for keep in (pinned_source, st.session_state.get(f"source_video::{match_id}")):
+                if keep and keep not in {str(path) for path in visible}:
+                    visible.insert(0, Path(keep))
+            option_strings = [str(path) for path in visible]
+            default_index = option_strings.index(pinned_source) if pinned_source in option_strings else 0
+
+            def _open_analysis_beside_video() -> None:
+                """A video that already has an analysis saved beside it opens that analysis automatically.
+
+                Only while no analysis is selected: with one open, changing the video means "analyse this footage
+                under the open match" (a match is usually created on a clip and then analysed on the combined game),
+                and switching the selection out from under that would fight the user.
+                """
+                if match_id is not None:
+                    return
+                selected_video = st.session_state.get(f"source_video::{match_id}")
+                if not isinstance(selected_video, str):
+                    return
+                found = _analysis_for_video(selected_video)
+                if found:
+                    st.session_state["archive_select_pending"] = found
+
             chosen = st.selectbox(
                 "Video (newest first)",
-                [str(p) for p in video_options],
-                index=default_video,
-                format_func=lambda p: Path(p).name,
+                option_strings,
+                index=default_index, format_func=_video_label,
                 key=f"source_video::{match_id}",
+                on_change=_open_analysis_beside_video,
+                help=(
+                    "Videos found under the footage roots, newest first. One that already has an analysis "
+                    "(marked `- analysis saved`) opens it when picked."
+                ),
             )
             manual = st.text_input(
                 "...or paste an absolute path", placeholder="/path/to/match.MP4", key=f"manual_video::{match_id}"
             )
             if manual.strip():
                 chosen = manual.strip()
+            if match_id is None:
+                st.caption(
+                    "Starting an analysis saves it with the video: `"
+                    f"{_location_label(analysis_dir_for(chosen))}` - everything later lands in that folder."
+                )
         with probe_col:
             if not Path(chosen).exists():
                 st.error("File not found.")
@@ -2248,22 +2327,33 @@ with st.container(border=True):
             st.metric("Source FPS", f"{probe.fps:.0f}")
             st.metric("Duration", f"{probe.duration_s / 60:.1f} min")
 
-# Saving the session: the archive entry everything below is stored against, made from the footage above.
+# Starting the session: the analysis directory beside the footage, which is what everything below is stored in.
+# It is normally created by pressing "Start a match analysis" - or automatically by the first Run analysis - and it
+# is re-opened by simply picking a video that has one.
 if match_id is None:
     def _create_match() -> None:
-        """Runs before the next run's body, so this module picks the new match up in that same run."""
-        existed = new_match_id(chosen) in match_ids
+        """Runs before the next run's body, so this module picks the new analysis up in that same run."""
+        existing = _analysis_for_video(chosen)
         record = library.create(chosen)
         st.session_state["archive_select_pending"] = record.match_id
         st.session_state["session_flash"] = (
             "success",
-            f"`{record.match_id}` is already archived for {Path(chosen).name} - opened it rather than saving a "
-            f"second record for the same footage."
-            if existed
-            else f"Saved `{record.match_id}` for {Path(chosen).name}.",
+            f"`{record.match_id}` already had an analysis beside the footage - opened it rather than starting "
+            "a second one."
+            if existing
+            else f"`{record.match_id}` started - saved with the footage in "
+            f"`{_location_label(library.path(record.match_id))}`.",
         )
 
-    st.button("Save as a new match", type="primary", on_click=_create_match)
+    st.button(
+        "Start a match analysis for this footage",
+        type="primary",
+        on_click=_create_match,
+        help=(
+            "Writes the match record into an `analysis/` folder beside the video. Every later step stores its "
+            "results there too, so copying the match folder carries the whole analysis with it."
+        ),
+    )
 show_flash("session_flash")
 
 # --------------------------------------------------------------------------------------------------------------
@@ -2303,7 +2393,8 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
             st.write(f"Already one game video: {only.name} - {total_minutes:.0f} min")
             st.caption(
                 "Used as it stands. The game metadata and the half-time marks live in "
-                f"`{expected_dir.name}` beside it, not in the video itself, so the file is never written to."
+                f"`{_location_label(expected_dir)}` beside it, not in the video itself, so the file is never "
+                "written to."
             )
         else:
             st.write(
@@ -2362,7 +2453,7 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
                     )
 
 if game_record is not None:
-    game_directory = game_lib.game_dir(game_lib.GAMES_ROOT, game_record.game_id)
+    game_directory = game_lib.manifest_dir(game_record)
     st.markdown(
         f"**Game video** `{Path(game_record.output).name}` - {len(game_record.clips)} clip(s) joined, "
         f"{game_record.duration_s / 60:.0f} min"
@@ -2520,7 +2611,7 @@ if game_marks is not None:
 # either - and resumed independently.
 segment_dir = segment_dir_for(
     chosen,
-    SEGMENTS_ROOT,
+    segments_root_for(chosen),
     window_label=(
         game_record.window_label(game_window_selection)
         if game_record is not None and game_window_selection
@@ -2575,7 +2666,20 @@ with run_col:
             # what created the conflict.
             archived = segment_dir.with_name(f"{segment_dir.name}_superseded_{time.strftime('%Y%m%d_%H%M%S')}")
             segment_dir.rename(archived)
-            archived_note = f" The previous results are at `data/segments/{archived.name}`."
+            archived_note = f" The previous results are at `{_location_label(archived)}`."
+        saved_note = ""
+        record_id = match_id
+        if record_id is None:
+            # Starting the pass starts the analysis, and the analysis lives with the footage: there is no
+            # separate save step to forget, and no segment can end up orphaned in the repository.
+            record = library.create(chosen)
+            record_id = record.match_id
+            st.session_state["archive_select_pending"] = record_id
+            saved_note = (
+                f" Saved with the footage in `{_location_label(library.path(record_id))}`."
+            )
+        # The match record keeps the segment list, which is what `summaries` and the rebuild scripts read.
+        library.add_segment(record_id, segment_dir)
         command = [
             sys.executable,
             str(REPO_ROOT / "scripts" / "run_stage_a.py"),
@@ -2584,14 +2688,10 @@ with run_col:
             "--start", str(start_s),
             "--duration", str(duration_s),
         ]
-        if match_id is not None:
-            # The archive's own record of what has been produced: `summaries` reports it, and it is what tells a
-            # later visit that this match already has segment results on disk.
-            library.add_segment(match_id, segment_dir)
         subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         st.session_state["step1_flash"] = (
             "success",
-            "Analysis started in the background - progress updates here automatically." + archived_note,
+            "Analysis started in the background - progress updates here automatically." + saved_note + archived_note,
         )
 
     st.button("Run analysis (background)", type="primary", on_click=_run_analysis)

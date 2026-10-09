@@ -54,7 +54,10 @@ def default_game() -> str:
 
 
 GAME = default_game()
-SEGMENT = "data/segments/game_16-28-37.784_32823901638__whole_game_541_4851"
+SEGMENT = (
+    "/srv/storage/home_video/Xbot/2026-10-03/analysis/2026-10-03_game_16-28-37-784/"
+    "segments/game_16-28-37.784_32823901638__whole_game_541_4851"
+)
 DEFAULT_FPS = 5.0  # only used when the segment's meta predates the rate being stored
 COCO_BALL_CLASS = 32
 WINDOW_PX = 1600  # the window scanned around the prediction while tracking, at 4K

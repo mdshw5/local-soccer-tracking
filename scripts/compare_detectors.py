@@ -24,7 +24,7 @@ Usage::
         --video /srv/storage/home_video/Xbot/2026-10-03/game_16-28-37.784.mp4 \
         --start-s 540.8 --end-s 4851.2 --frames 150 \
         --models yolov8n.pt weights/yolo26n.pt yolov8s.pt \
-        --segment data/segments/<dir> --device 0
+        --segment <footage>/analysis/<id>/segments/<dir> --device 0
 """
 
 from __future__ import annotations

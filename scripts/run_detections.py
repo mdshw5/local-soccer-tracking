@@ -133,7 +133,7 @@ def _run_mirrored(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--match", required=True, help="match id in the archive (data/matches/<id>)")
+    parser.add_argument("--match", required=True, help="match id (the name of its analysis directory)")
     parser.add_argument("--video", default="", help="the recording the scans read (default: the analysed segment's)")
     parser.add_argument("--segment", default="", help="the analysed segment (default: the match's first one)")
     parser.add_argument("--strictness", type=float, default=MIN_PROMINENCE)

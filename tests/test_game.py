@@ -285,7 +285,11 @@ def test_one_clip_is_the_game_video_and_is_left_exactly_as_it_is(tmp_path: Path)
     assert build_game(planned.clips, output) == only
     assert only.read_bytes() == before, "the game video must not be rewritten"
     assert probe_video(only).duration_s == pytest.approx(4.0, abs=0.4)
-    assert directory.name.startswith("game_"), "the manifest and proxy still get their own directory"
+    # The manifest and proxy get their own directory *beside the footage* (the video's analysis directory), so
+    # the match directory is self-contained; the id carries the recording date and the file's own name.
+    assert directory.parent.name == "analysis"
+    assert directory.parent.parent == tmp_path
+    assert directory.name.endswith("_game_16-28-37-784"), directory.name
 
 
 def test_a_single_clip_does_not_need_a_second_one_to_be_accepted() -> None:

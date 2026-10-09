@@ -30,7 +30,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from soccer_analytics.dashboard.stream import MATCHES_ROOT, AnnotatedMatch, parse_overlays  # noqa: E402
+from soccer_analytics.dashboard.stream import AnnotatedMatch, parse_overlays  # noqa: E402
 from soccer_analytics.dashboard.video import (  # noqa: E402
     VideoError,
     encode_clip,
@@ -132,7 +132,7 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1280)
     args = parser.parse_args()
 
-    match = AnnotatedMatch.load(args.match, root=MATCHES_ROOT)
+    match = AnnotatedMatch.load(args.match)
     work = Path(tempfile.mkdtemp(prefix="codec-probe-"))
     overlays = parse_overlays(None)
     print(

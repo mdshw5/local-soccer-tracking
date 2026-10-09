@@ -17,8 +17,8 @@ not invalidate a saved calibration - it makes the chain the calibration was fitt
 
 Usage::
 
-    python scripts/refine_camera_motion.py --segment data/segments/<dir> --dry-run
-    python scripts/refine_camera_motion.py --segment data/segments/<dir>
+    python scripts/refine_camera_motion.py --segment <footage>/analysis/<id>/segments/<dir> --dry-run
+    python scripts/refine_camera_motion.py --segment <footage>/analysis/<id>/segments/<dir>
 
 ``--dry-run`` reports what would change without writing. Pass ``--calibration`` to also report the reprojection
 error of the calibration's clicked landmarks before and after, which is the number that matters.

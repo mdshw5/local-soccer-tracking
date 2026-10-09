@@ -20,7 +20,7 @@ background); when the track numbering changes the scan's suggestions stop matchi
 
 Usage::
 
-    python scripts/rebuild_match.py --match 2026-10-04_16-58-38-391 [--segment data/segments/<name>]
+    python scripts/rebuild_match.py --match 2026-10-03_game_16-28-37-784 [--segment <footage>/analysis/<id>/segments/<name>]
 """
 
 from __future__ import annotations
@@ -54,12 +54,16 @@ def _ball_for_replay(segment_dir: Path, calibration, q, focal):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--match", required=True, help="match id in the archive (data/matches/<id>)")
+    parser.add_argument("--match", required=True, help="match id, or the path to its analysis directory")
     parser.add_argument("--segment", default=None, help="segment directory (default: the match's first one)")
-    parser.add_argument("--root", default="data/matches", help="matches root")
+    parser.add_argument(
+        "--root",
+        default=None,
+        help="single matches root; default: every analysis beside the footage roots (plus the legacy data/matches)",
+    )
     args = parser.parse_args()
 
-    root = Path(args.root)
+    root = args.root
     library = MatchLibrary(root)
     record = library.load(args.match)
     calibration = library.load_calibration(args.match)

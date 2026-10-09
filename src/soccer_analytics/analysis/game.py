@@ -12,7 +12,10 @@ the *game's own clock* - seconds into the combined video. Everything else (which
 window to analyse) follows from those three numbers.
 
 The video itself is written next to the clips it came from - it is as large as the clips are, so it belongs on the
-same disk, not in this repository. The manifest and the marking proxy live under ``data/games/<game_id>/``.
+same disk, not in this repository. The manifest and the marking proxy live in the *analysis directory of that
+combined video* (``<footage>/analysis/<video id>/game.json``), beside the match record for the same footage, so a
+match directory carries its game manifest with it. The old ``data/games`` root stays readable for archives from
+before the move.
 """
 
 from __future__ import annotations
@@ -22,9 +25,16 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from soccer_analytics.analysis.library import (
+    ANALYSIS_DIRNAME,
+    analysis_dir_for,
+    resolve_path,
+    store_path,
+    video_roots,
+)
 from soccer_analytics.ingest.ffmpeg_reader import FFmpegError, VideoProbe, probe_video
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -166,17 +176,29 @@ class GameRecord:
         )
 
     def save(self, directory: str | Path) -> Path:
+        """Write the manifest, storing its paths relative to the footage directory when they live there.
+
+        Relative-when-beside is what lets an archive move with its footage: the manifest now sits in
+        ``<footage>/analysis/<id>/`` while the videos it names sit in ``<footage>`` itself, so a copy of the
+        folder resolves every name without fixing anything up.
+        """
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
+        base = _path_base(directory)
+        data = self.to_json()
+        data["output"] = store_path(self.output, base)
+        data["clips"] = [{**clip.to_json(), "path": store_path(clip.path, base)} for clip in self.clips]
         path = directory / MANIFEST_FILE
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self.to_json(), indent=2))
+        tmp.write_text(json.dumps(data, indent=2))
         os.replace(tmp, path)
         return path
 
     @classmethod
     def load(cls, directory: str | Path) -> "GameRecord":
-        return cls.from_json(json.loads((Path(directory) / MANIFEST_FILE).read_text()))
+        directory = Path(directory)
+        record = cls.from_json(json.loads((directory / MANIFEST_FILE).read_text()))
+        return resolve_record_paths(record, directory)
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -212,15 +234,21 @@ def output_for(paths: list[Path]) -> Path:
     return first.parent / f"game_{sanitise(first.stem)}.mp4"
 
 
-def locations(paths: Iterable[str | Path], root: str | Path = GAMES_ROOT) -> tuple[list[Path], Path, Path]:
+def locations(
+    paths: Iterable[str | Path], root: str | Path | None = None
+) -> tuple[list[Path], Path, Path]:
     """The ordered clips, the combined video's path, and the directory holding this game's manifest and proxy.
 
     One place decides all three, so the page and the background build cannot disagree about where anything goes.
+    Without ``root`` the manifest directory is the combined video's own analysis directory, beside the footage;
+    ``root`` keeps the old "one directory per game id" layout, which the repo's first archives still use.
     """
     ordered = order_clips(paths)
     if not ordered:
         raise ValueError("no clips given")
-    return ordered, output_for(ordered), game_dir(root, game_id_for(ordered))
+    output = output_for(ordered)
+    directory = game_dir(root, game_id_for(ordered)) if root is not None else manifest_dir_for_video(output)
+    return ordered, output, directory
 
 
 def compatibility_problem(probes: list[VideoProbe]) -> str | None:
@@ -312,7 +340,76 @@ def build_game(clips: list[Clip], output: str | Path) -> Path:
 # Locations and lookup
 # --------------------------------------------------------------------------------------------------------------
 def game_dir(root: str | Path, game_id: str) -> Path:
+    """The legacy layout's directory for a game id (one directory per game under ``data/games``)."""
     return Path(root) / game_id
+
+
+def _path_base(directory: Path) -> Path:
+    """The folder a manifest's paths are stored relative to.
+
+    The analysis layout puts the manifest at ``<footage>/analysis/<id>/`` and the videos it names in ``<footage>``
+    itself, two levels up; any other directory (the legacy ``data/games/<id>``, a test's scratch folder) is its
+    own base, so paths pointing outside it stay absolute.
+    """
+    directory = Path(directory)
+    if directory.parent.name == ANALYSIS_DIRNAME:
+        return directory.parent.parent
+    return directory
+
+
+def resolve_record_paths(record: GameRecord, directory: str | Path) -> GameRecord:
+    """Re-point a record's stored paths at wherever its files are now, in place.
+
+    Called wherever a manifest is read (``load`` and the discovery in :func:`find_for_video`), so a footage
+    directory moved to another disk keeps its game clock, its clip offsets and its marking proxy: a stored path
+    that no longer exists is looked up by name beside the manifest - which is where the videos sit, whether the
+    manifest was written portable (relative) or by an older version (absolute at the old location).
+    """
+    directory = Path(directory)
+    base = _path_base(directory)
+    record.output = resolve_path(record.output, base)
+    record.clips = [replace(clip, path=resolve_path(clip.path, base)) for clip in record.clips]
+    return record
+
+
+def manifest_dir_for_video(video: str | Path) -> Path:
+    """Where this video's game manifest and marking proxy live: its own analysis directory, beside the footage."""
+    return analysis_dir_for(video)
+
+
+def discover_game_manifests(roots: list[Path] | None = None) -> list[Path]:
+    """Every ``analysis/<id>/game.json`` under the footage roots (manifests written by this version)."""
+    found: list[Path] = []
+    for root in roots if roots is not None else video_roots():
+        if root.exists():
+            found += list(root.glob(f"**/{ANALYSIS_DIRNAME}/*/{MANIFEST_FILE}"))
+    return found
+
+
+def find_dir_by_id(game_id: str, roots: list[Path] | None = None) -> Path | None:
+    """The directory holding the manifest with this game id, beside the footage first, then the legacy root.
+
+    The id is what the stream server's URLs carry, and it is the only thing a caller with no path knows; both
+    layouts are searched so a URL keeps working across the move.
+    """
+    for manifest in discover_game_manifests(roots):
+        try:
+            data = json.loads(manifest.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(data.get("game_id")) == game_id:
+            return manifest.parent
+    legacy = game_dir(GAMES_ROOT, game_id)
+    return legacy if (legacy / MANIFEST_FILE).exists() else None
+
+
+def manifest_dir(record: GameRecord) -> Path:
+    """Where this record's manifest lives: beside its video when built by this version, else the legacy root."""
+    beside = manifest_dir_for_video(record.output)
+    if (beside / MANIFEST_FILE).exists():
+        return beside
+    legacy = game_dir(GAMES_ROOT, record.game_id)
+    return legacy if (legacy / MANIFEST_FILE).exists() else beside
 
 
 def proxy_path(directory: str | Path) -> Path:
@@ -371,27 +468,43 @@ def half_labels_for_events(record: GameRecord, events: Iterable) -> list[str]:
     return labels
 
 
-def find_for_video(video: str | Path, root: str | Path = GAMES_ROOT) -> GameRecord | None:
+def find_for_video(video: str | Path, root: str | Path | None = None) -> GameRecord | None:
     """The game record whose combined video is ``video``, if it was made by this app.
 
     Both sides are resolved before comparing: the page passes the absolute path the video picker found, while a
     manifest may name its video relatively (older builds did), and the two must still be recognised as the same.
+    The video's own analysis directory is checked first; then, unless a specific legacy ``root`` is given, the
+    manifests beside the rest of the footage and the old ``data/games`` archive.
     """
     target = Path(video).resolve()
-    root = Path(root)
-    if not root.exists():
-        return None
-    for directory in sorted(root.iterdir()):
-        manifest = directory / MANIFEST_FILE
-        if not manifest.exists():
+    beside = manifest_dir_for_video(video) / MANIFEST_FILE
+    candidates: list[Path] = [beside] if beside.exists() else []
+    if root is not None:
+        base = Path(root)
+        if base.exists():
+            candidates += [d / MANIFEST_FILE for d in sorted(base.iterdir())]
+    else:
+        if GAMES_ROOT.exists():
+            candidates += [d / MANIFEST_FILE for d in sorted(GAMES_ROOT.iterdir())]
+        candidates += discover_game_manifests()
+    seen: set[Path] = set()
+    best: GameRecord | None = None
+    for manifest in candidates:
+        if manifest in seen or not manifest.exists():
             continue
+        seen.add(manifest)
         try:
             record = GameRecord.from_json(json.loads(manifest.read_text()))
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             continue
-        if Path(record.output).resolve() == target:
-            return record
-    return None
+        resolve_record_paths(record, manifest.parent)
+        if Path(record.output).resolve() != target:
+            continue
+        # Several manifests can describe the same video (a rebuild on a new game id); a marked one carries the
+        # user's kick-off/half-time/full-time work, so it wins over an unmarked duplicate.
+        if best is None or (record.bounds() is not None and best.bounds() is None):
+            best = record
+    return best
 
 
 # --------------------------------------------------------------------------------------------------------------

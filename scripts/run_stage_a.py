@@ -2,7 +2,8 @@
 
 Usage::
 
-    python scripts/run_stage_a.py --video /path/match.MP4 --out data/segments/<id> [--start 300] [--duration 600]
+    python scripts/run_stage_a.py --video /path/match.MP4 --out <footage>/analysis/<id>/segments/<segment> \
+        [--start 300] [--duration 600]
 
 ``--duration 0`` (the default) analyses from the offset to the end of the video. Progress is written to
 ``<out>/status.json`` by `analyse_segment`, which is what the dashboard polls. Resuming is implicit: the run starts

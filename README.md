@@ -45,7 +45,17 @@ over it, and `scripts/run_stage_a.py --weights` overrides both.
 
 The dashboard walks through four steps in order, and every step stores its result so you never repeat work:
 
-1. **Choose footage.** Pick a video (found under `data/videos` and the `SOCCER_VIDEO_ROOTS` directories, newest
+0. **Where things are saved.** Every analysis is *self-contained*: it lives in an `analysis/` folder beside the
+   footage it was made from, named by the recording date and the video
+   (`<footage>/analysis/2026-10-03_game_16-28-37-784/`). The match record, the pitch clicks, the report, the
+   replay, the events, the reels, the Stage A segment directories and the game manifest are all inside it, so a
+   match directory can be copied or moved as a unit - recorded paths are stored relative to the folder and
+   re-resolved on load. Match recordings are expected to sit one per directory (one directory per match, for as
+   many teams as you like); the picker browses them by folder and a video that already has an analysis opens it
+   when it is picked. `scripts/migrate_analysis.py` moves archives from the old repository-era `data/matches`,
+   `data/segments` and `data/games` roots into the same shape.
+
+1. **Choose footage.** Pick a folder (found under `data/videos` and the `SOCCER_VIDEO_ROOTS` directories, newest
    first),
    choose a start offset and length, and press *Run analysis* to launch the heavy pass in the background. Progress,
    analysed frames per second and lost frames come from `status.json` in the segment directory. Re-running resumes
@@ -203,9 +213,14 @@ drifting away from it (switch *sync footage* off to let it play on its own).
 ## Project layout
 
 ```
-data/videos/         # local input videos
-data/segments/       # per-segment Stage A output (one directory per video + size)
-data/matches/        # the archive: match.json, calibration.json, report.json, events.json, highlights/
+data/videos/         # local input videos (other roots via SOCCER_VIDEO_ROOTS)
+<footage root>/      # e.g. /srv/storage/home_video/Xbot - one directory per match, per team as you like
+    <date>/          #   the recording folder (the date names the analysis)
+        *.MP4        #   original clips, untouched
+        game_*.mp4   #   the combined game video, a stream copy of the clips
+        analysis/
+            <id>/           # everything computed for this match: match.json, calibration.json, report.json,
+                            # replay.json, events.json, highlights/, identities/, segments/ (Stage A), game.json
 src/soccer_analytics/
     ingest/          # GPU-accelerated frame and audio I/O (ffmpeg)
     geometry/        # camera motion recovery (estimated chain + gimbal log), pitch calibration
@@ -214,7 +229,8 @@ src/soccer_analytics/
 tests/               # including a synthetic-match oracle with known ground truth
 scripts/             # run_stage_a.py: the background heavy pass; run_ball_scan.py: the ball scan;
                     # refresh_kit_descriptors.py: re-derive kit colours without re-analysing;
-                    # rebuild_match.py: headless report+replay rebuild; run_match_stream.py: annotated MJPEG
+                    # rebuild_match.py: headless report+replay rebuild; run_match_stream.py: annotated MJPEG;
+                    # migrate_analysis.py: move repository-era archives beside their footage
 ```
 
 ## The two-stage split

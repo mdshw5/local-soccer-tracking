@@ -439,7 +439,7 @@ class AnnotatedMatch:
     # Construction
     # ----------------------------------------------------------------------------------------------------------
     @classmethod
-    def load(cls, match_id: str, *, root: str | Path = MATCHES_ROOT, segment: str | Path | None = None) -> "AnnotatedMatch":
+    def load(cls, match_id: str, *, root: str | Path | None = None, segment: str | Path | None = None) -> "AnnotatedMatch":
         """Load a match from the archive; raises :class:`StreamError` when it cannot be streamed as asked.
 
         The per-player image boxes do not travel inside the replay payload (they would be tens of megabytes of
@@ -937,7 +937,7 @@ def iter_annotated_frames(
                 next_push = time.monotonic()
 
 
-def streamable_matches(root: str | Path = MATCHES_ROOT) -> list[dict]:
+def streamable_matches(root: str | Path | None = None) -> list[dict]:
     """One row per match that could be streamed, for the index page and ``/matches``.
 
     Only metadata is read (never the tens-of-megabyte replay), so the index stays cheap: what it needs is which
@@ -1016,7 +1016,7 @@ class MatchStreamServer(ThreadingHTTPServer):
         self,
         server_address: tuple[str, int],
         *,
-        root: str | Path = MATCHES_ROOT,
+        root: str | Path | None = None,
         width: int = DEFAULT_WIDTH,
         max_streams: int = MAX_CONCURRENT_STREAMS,
         reader_factory=FFmpegFrameReader,
@@ -1028,7 +1028,7 @@ class MatchStreamServer(ThreadingHTTPServer):
         games_root: str | Path | None = None,
     ):
         super().__init__(server_address, MatchStreamHandler)
-        self.root = Path(root)
+        self.root = Path(root) if root is not None else None
         self.width = int(width)
         self.reader_factory = reader_factory
         self.pace = pace
@@ -1039,8 +1039,10 @@ class MatchStreamServer(ThreadingHTTPServer):
         self.clip_cache = clip_cache if clip_cache is not None else ClipCache()
         self.clip_encoder = clip_encoder
         self.live_chunks = live_chunks
-        # Game marking videos (Step 1) live under their own root; the /game/ route builds them on demand.
-        self.games_root = Path(games_root) if games_root is not None else game_lib.GAMES_ROOT
+        # Game marking videos (Step 1): the /game/ route builds them on demand, beside the combined video.
+        # An explicit ``games_root`` keeps the old single-root behaviour; otherwise the manifest is found
+        # where this version writes it (an analysis directory beside the footage) or in the legacy root.
+        self.games_root = Path(games_root) if games_root is not None else None
         self._game_locks: dict[str, threading.Lock] = {}
         self._game_locks_guard = threading.Lock()
         self.stream_slots = threading.BoundedSemaphore(max_streams)
@@ -1074,17 +1076,27 @@ class MatchStreamServer(ThreadingHTTPServer):
         with self._game_locks_guard:
             return self._game_locks.setdefault(game_id, threading.Lock())
 
+    def game_directory(self, game_id: str) -> Path:
+        """Where a game's manifest and proxy live: an explicit legacy root when the server was told one, else
+        the manifest found beside the footage (and in the old ``data/games`` archive)."""
+        if self.games_root is not None:
+            return game_lib.game_dir(self.games_root, game_id)
+        directory = game_lib.find_dir_by_id(game_id)
+        if directory is None:
+            raise StreamError(f"no game {game_id} beside any footage root")
+        return directory
+
     def game_source(self, game_id: str) -> tuple[Path, float]:
         """The combined video and its length for a game id; raises :class:`StreamError` when it is not there.
 
         The id arrives in a URL, so it is validated (a bare name, nothing joined to it) before it ever reaches
-        the filesystem - ``game_dir`` joins it to the games root, and a name is all it may be.
+        the filesystem - the directory lookup joins it to a root, and a name is all it may be.
         """
         if not game_id or game_id.startswith(".") or game_id != Path(game_id).name or "/" in game_id or "\\" in game_id:
             raise StreamError(f"bad game id: {game_id!r}")
-        directory = game_lib.game_dir(self.games_root, game_id)
+        directory = self.game_directory(game_id)
         if not (directory / game_lib.MANIFEST_FILE).exists():
-            raise StreamError(f"no game {game_id} in {self.games_root}")
+            raise StreamError(f"no game {game_id} in {self.games_root or 'the footage roots'}")
         record = game_lib.GameRecord.load(directory)
         video = Path(record.output)
         if not video.exists():
@@ -1497,7 +1509,7 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
         if not game_id or game_id.startswith(".") or game_id != Path(game_id).name or "/" in game_id or "\\" in game_id:
             self._send_text(404, "bad game id\n")
             return
-        target = game_lib.proxy_path(game_lib.game_dir(self.server.games_root, game_id))
+        target = game_lib.proxy_path(self.server.game_directory(game_id))
         if target.exists():
             self._send_file(target, "video/mp4")
             return
