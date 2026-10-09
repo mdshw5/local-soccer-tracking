@@ -177,7 +177,9 @@ stream in an `<img>` - browsers download a bare multipart URL instead of playing
 markings projected back through the same corrected camera chain the report uses (the homography drawn on the
 field), a box on each tracked player in their measured team colour with a chip showing their shirt number - or
 `#track_id` while nobody has named them - the ball from the segment's scan (a filled dot when a detector saw it, a
-hollow ring where the scan coasted across a miss), and a clock/legend HUD.
+hollow ring where the scan coasted across a miss), and a clock/legend HUD. The clock reads the same time as the
+animation beside it - elapsed on the analysed window's own clock, whose zero is kick-off on a marked build - not
+the recording's own clock, which starts minutes earlier.
 
 The encoded form of the same stream is what the dashboard pane plays where the browser can: `/live/<match_id>.mp4`
 (an endless fragmented MP4: `fps=`, `rate=`, `width=`, `overlays=`, `audio=`), `/video/<match_id>.mp4` (a bounded,

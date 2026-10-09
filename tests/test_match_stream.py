@@ -70,13 +70,13 @@ def stream_case():
     return segment, calibration, q, focal, replay, track_boxes(report.players)
 
 
-def _annotated(stream_case, *, numbers=None, numbers_note=None, ball_records=(), notes=(), players=None, boxes=None) -> AnnotatedMatch:
+def _annotated(stream_case, *, numbers=None, numbers_note=None, ball_records=(), notes=(), players=None, boxes=None, start_s=None) -> AnnotatedMatch:
     segment, calibration, q, focal, replay, track_boxes_all = stream_case
     return AnnotatedMatch(
         match_id="synthetic",
         video=Path("/nonexistent/synthetic.mp4"),
         fps=float(replay["fps"]),
-        start_s=float(segment.meta.get("start_s", 0.0)),
+        start_s=float(segment.meta.get("start_s", 0.0)) if start_s is None else float(start_s),
         frame_count=int(replay["frame_count"]),
         pitch=(PITCH_LENGTH, PITCH_WIDTH),
         calibration=calibration,
@@ -344,6 +344,25 @@ def test_the_debug_layer_carries_the_diagnostics_and_switches_off_alone(stream_c
     assert changed(debug_only, *top_left) > 0, "the session name is the debug layer's"
     assert changed(debug_only, *below_clock) > 0, "the frame counter is the debug layer's"
     assert changed(debug_only, *bottom_left) > 0, "the notes are the debug layer's"
+
+
+def test_the_hud_clock_reads_the_animation_clock_not_the_recording_clock(stream_case, monkeypatch) -> None:
+    """The pane's animation counts from the analysed window's start - kick-off on a marked build - and the HUD
+    must show that same clock. The recording's own clock starts earlier, and a stamp in recording seconds reads
+    minutes away from the animation the viewer compares it with."""
+    drawn: list[str] = []
+    monkeypatch.setattr(
+        "soccer_analytics.dashboard.stream._outline_text",
+        lambda frame, text, *args, **kwargs: drawn.append(text),
+    )
+    match = _annotated(stream_case, start_s=3.0)
+    frame = np.full((360, 640, 3), 60, dtype=np.uint8)
+    layers = dict(pitch=False, boxes=False, numbers=False, ball=False, hud=True, debug=False)
+    match.render(frame, int(10 * match.fps), **layers)
+    assert "0:10" in drawn, "ten seconds into the window is 0:10 - the number the animation shows"
+    assert "0:00:13" not in drawn, "13 s on the recording (window start + 10 s) is not the animation's clock"
+    match.render(frame, 0, **layers)
+    assert "0:00" in drawn, "the window's zero is the clock's zero"
 
 
 def test_a_track_id_chip_is_debug_information(stream_case) -> None:

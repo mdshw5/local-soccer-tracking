@@ -778,7 +778,12 @@ class AnnotatedMatch:
             cv2.circle(frame, centre, radius, FORECAST_BGR, max(2, radius // 3))
 
     def _draw_hud(self, frame: np.ndarray, index: int, *, note: str = "", session_line: bool = False) -> None:
-        """The watching corners: who is playing, which colour they are, and where in the recording this is.
+        """The watching corners: who is playing, which colour they are, and where in the match this is.
+
+        The clock is the animation's clock: elapsed on the analysed window's own clock, whose zero is where the
+        analysis starts (kick-off on a kick-off-to-full-time build), drawn ``M:SS`` like the pane's. The
+        recording's clock is deliberately not drawn - it starts before kick-off, and a stamp in recording
+        seconds reads minutes away from the animation the viewer compares it with.
 
         ``session_line`` holds the very first line for the debug layer's session name when both layers are on,
         so the two never draw over each other; the legend only starts a line lower when it has to.
@@ -793,8 +798,11 @@ class AnnotatedMatch:
             _outline_text(frame, style.name, (pad + int(26 * scale), y), PAPER, font)
             y += int(21 * scale)
 
-        clock = self.source_time(index)
-        stamp = f"{int(clock) // 3600}:{int(clock) % 3600 // 60:02d}:{int(clock) % 60:02d}"
+        # ``source_time`` is the recording's clock, whose zero is the start of the recording; subtracting
+        # ``start_s`` lands on the animation's zero (kick-off for a marked build), and ``M:SS`` is the shape the
+        # pane's clock text has, so the two read as one clock.
+        clock = max(0.0, self.source_time(index) - self.start_s)
+        stamp = f"{int(clock) // 60}:{int(clock) % 60:02d}"
         # The speed a viewer is watching at is playback state, so it rides with the clock - not with the frame
         # counter - and stays on screen when the debug layer is turned off.
         line = stamp + (f"  {note}" if note else "")

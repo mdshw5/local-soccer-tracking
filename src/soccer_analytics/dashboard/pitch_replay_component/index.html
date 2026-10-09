@@ -1070,8 +1070,9 @@
       // * in the fallback mode there is no clock to read (an <img> has none), so the MJPEG stream is opened at
       //   the animation's second and left alone until the next seek, speed or layer change moves it.
       //
-      // The animation's clock is the strip's (0 = first analysed frame); the stream's is the recording's, so
-      // ``streamOffset`` is what makes "start at this second" mean the same on both clocks.
+      // The animation's clock is the strip's (0 = first analysed frame); the stream asks for times in the
+      // recording's seconds (its HUD draws the strip clock - see dashboard/stream.py), so ``streamOffset`` is
+      // what makes "start at this second" mean the same on both clocks.
       // ---------------------------------------------------------------------------------------------------
       const FOOTAGE_FPS = 30; // full motion for the pane; 60 outruns this box's render at 1280 with overlays
       const FOOTAGE_DRIFT_TOLERANCE_S = 2.0; // a restart costs an encode: only correct a visible divergence
