@@ -208,3 +208,35 @@ def test_tracking_is_deterministic(prepared) -> None:
     first = _track_people(detections, keep).track_id
     second = _track_people(detections, keep).track_id
     assert np.array_equal(first, second)
+
+
+def test_the_weak_label_note_counts_only_labelled_tracks() -> None:
+    """A track whose label is -1 has no label, so it cannot be a "best guess" of one.
+
+    The old rule counted every track with quality below the bar, and unlabelled fragments carry quality 0 - on the
+    real game the note fired with 13,257 entries out of 9,164 tracks, which drowned the signal it exists to carry.
+    """
+    from soccer_analytics.analysis.stage_b import _weak_labels
+
+    teams = {1: 0, 2: 1, 3: -1}
+    quality = {0: 0.0, 1: 0.9, 2: 0.1, 3: 0.5}  # track 0 is unlabelled; 1 solid; 2 marginal; 3 "other"
+
+    assert _weak_labels(teams, quality) == [2]
+
+
+def test_a_clean_match_does_not_report_weak_labels() -> None:
+    """The synthetic kits are plainly separable, so a note about weakly separated colours would be crying wolf.
+
+    With the old rule this note fired for essentially every match, because every non-voter track (most of them
+    unlabelled fragments) counted as weak - it said nothing about whether any displayed label was doubtful.
+    """
+    from soccer_analytics.analysis.projection import on_pitch_mask
+    from soccer_analytics.analysis.stage_b import _weak_labels
+
+    _, _truth, detections = _prepared(frames=200, seed=4)
+    keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
+    assignment = _track_people(detections, keep)
+    teams, quality, _colours = _team_assignment(detections, assignment)
+
+    assert sum(1 for team in teams.values() if team >= 0) > 0, "no labels to judge"
+    assert _weak_labels(teams, quality) == []

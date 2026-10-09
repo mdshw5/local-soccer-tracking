@@ -50,6 +50,7 @@ from soccer_analytics.analysis.events import (
     VERDICT_TRUE,
     Event,
 )
+from soccer_analytics.analysis.framing import SHORTEST_CLIP_SECONDS, default_clip_length
 from soccer_analytics.analysis.highlights import (
     PREVIEW_DIR,
     PREVIEW_SETTINGS,
@@ -105,7 +106,8 @@ from soccer_analytics.dashboard.reports import (
     team_colours,
     team_name,
 )
-from soccer_analytics.dashboard.replay import build_replay, player_table_rows
+from soccer_analytics.dashboard.replay import build_replay, player_table_rows, track_boxes
+from soccer_analytics.dashboard.stream import configured_base, configured_port, is_reachable
 from soccer_analytics.geometry.pitch_calibration import (
     MIN_CLICKS_PER_ANCHOR,
     MIN_REFERENCE_CLICKS,
@@ -346,9 +348,12 @@ def replay_view(
     events: list[dict] | None = None,
     momentum: dict | None = None,
     half_minute: float | None = None,
-    clip_url: str = "",
-    clip_start_s: float | None = None,
-    clip_end_s: float | None = None,
+    match_id: str = "",
+    stream_offset_s: float | None = None,
+    stream_port: int | None = None,
+    stream_base: str = "",
+    seek_to_s: float | None = None,
+    seek_seq: int = 0,
 ) -> None:
     """Draw the animated pitch view; playback lives entirely in the browser.
 
@@ -357,8 +362,10 @@ def replay_view(
     as component arguments rather than in the replay payload because they are small and change without the replay
     being rebuilt - a new tag shows up on the strip on the next rerun.
 
-    ``clip_url`` is the generated clip shown beside the pitch, with ``clip_start_s``/``clip_end_s`` giving its
-    window on the strip's own clock so the component can hold the two in step.
+    ``match_id``, ``stream_offset_s`` (the recording second of strip second 0) and ``stream_port`` point the pane
+    beside the pitch at the annotated match stream, so it can play the footage of any second the animation is
+    showing. ``seek_to_s`` plus ``seek_seq`` is the "jump to this moment" request from the picker above; the
+    component acts when the sequence changes, so unrelated reruns never re-seek.
     """
     REPLAY_COMPONENT(
         data_url=data_url,
@@ -372,9 +379,12 @@ def replay_view(
             {"minute": float(minute), **bucket} for minute, bucket in sorted((momentum or {}).items())
         ],
         half_minute=half_minute,
-        clip_url=clip_url,
-        clip_start_s=clip_start_s,
-        clip_end_s=clip_end_s,
+        match_id=match_id,
+        stream_offset_s=stream_offset_s,
+        stream_port=stream_port,
+        stream_base=stream_base,
+        seek_to_s=seek_to_s,
+        seek_seq=int(seek_seq),
         key=key,
     )
 
@@ -528,34 +538,26 @@ def _clip_offsets(video: str) -> dict[str, float]:
     }
 
 
-# The clip beside the pitch is watched, not reviewed: a 4 fps keyframe-only cut stutters badly enough to make the
-# sync with the animation feel broken, so it is cut at full frame rate. It costs a decode of every frame (~11 s for
-# a 10 s clip on the 4K source rather than ~3 s), which is the price of footage that actually plays.
-CLIP_BESIDE_PITCH_MODE = "full"
-
-
-def _clip_beside_pitch(
-    library: MatchLibrary,
+def _footage_moment(
     match_id: str,
     replay_duration_s: float,
-    chosen: str,
     event_log,
     game_record,
     window_start: float,
-) -> tuple[str, float | None, float | None]:
-    """The clip shown beside the pitch, and its window on the strip's clock.
+) -> tuple[float | None, int]:
+    """The moment picker beside the footage pane: the strip second to jump to, and a sequence for the request.
 
-    The moment is chosen from the event log and cut on request, because cutting costs a decode of the footage. The
-    clip is cut from the recording the moment was found in - a whistle candidate's seconds are seconds of a single
-    camera file, not of the combined game - and its window is then translated onto the strip's own clock so the
-    component can hold the two in step.
+    The pane's footage is a live MJPEG stream, and an MJPEG connection cannot be seeked - so the way to watch
+    "from that moment" is to move the *animation* there and let the pane follow it. The moment is chosen from the
+    same event log the table and the strip show and translated onto the strip's clock exactly as the strip's own
+    markers are, so the picker, the marker and the stream all agree on when the moment is.
 
-    Returns ``(url, start_s, end_s)``; the URL is empty when no clip has been cut, and the window is ``None`` when
-    the moment does not lie inside the analysed window (so there is nothing to sync it to).
+    Returns ``(seek_to_s, seek_seq)``. ``seek_to_s`` is ``None`` when the selected moment lies outside the
+    analysed window (there is no second to jump to); ``seek_seq`` changes only when the button is pressed, and
+    the component acts on a changed sequence so an unrelated rerun never re-seeks.
     """
     if not event_log.events:
-        return "", None, None
-    preview_dir = library.highlights_dir(match_id) / PREVIEW_DIR
+        return None, 0
     # The picker is the same list the table shows, so a moment is chosen once and read everywhere. Its label leads
     # with the match clock where the game is marked, because that is the time a coach reads out.
     def _label(index: int) -> str:
@@ -575,21 +577,19 @@ def _clip_beside_pitch(
     pick_col, button_col = st.columns([3, 1])
     with pick_col:
         index = st.selectbox(
-            "Clip to show beside the pitch",
+            "Footage moment to jump to",
             range(len(event_log.events)),
             format_func=_label,
             key=f"pitch_clip_event::{match_id}",
             help=(
-                "The clip is cut from the recording the moment was found in, and plays in step with the animation "
-                "while the animation is inside its window."
+                "The annotated stream beside the pitch plays from this moment: the button jumps the animation "
+                "there and starts both in step."
             ),
         )
     event = event_log.events[index]
-    source = Path(event.video) if event.video else Path(chosen)
     moment = moment_for_event(event)
-    # The window on the strip's clock: the moment's own recording time translated onto the game's clock and then
-    # onto the analysed window's. This is what the component syncs against, so it has to be the same translation
-    # the strip's markers use.
+    # The moment on the strip's clock: its own recording time translated onto the game's and then onto the
+    # analysed window's - the same translation the strip's markers use, so a jump lands where the marker is.
     on_game = (
         game_lib.game_time(game_record, moment.time_s, event.video)
         if game_record is not None and event.video
@@ -597,44 +597,22 @@ def _clip_beside_pitch(
     )
     strip_start = None if on_game is None else on_game - window_start
     strip_end = None if strip_start is None else strip_start + (moment.end_s - moment.start_s)
-    # The strip's own clock runs 0..duration over the analysed window, so a moment outside it has nothing to be
-    # synced to - the component would be asked to hold the clip against a second the animation never reaches.
+    # The strip's clock runs 0..duration over the analysed window; a moment outside it has nothing to jump to.
     if strip_start is not None and (strip_end < 0 or strip_start > replay_duration_s):
         strip_start = strip_end = None
+    seq_key = f"pitch_seek_seq::{match_id}"
     with button_col:
         st.write("")  # line the button up with the selectbox
-        generate = st.button(
-            "Generate clip",
-            key=f"pitch_clip_generate::{match_id}",
-            disabled=not source.exists(),
-            help="Cut this moment from the footage and play it beside the animation.",
-        )
-    if not source.exists():
-        st.caption(f"`{source.name}` is not available, so this moment cannot be cut.")
-        return "", strip_start, strip_end
-    clip_file = preview_dir / preview_clip_name(moment, CLIP_BESIDE_PITCH_MODE)
-    if generate and not clip_file.exists():
-        bar = st.progress(0.0, text="Cutting the clip...")
-        reporter = progress_reporter(bar, "Cutting the clip...")
-        try:
-            export_moment(
-                source,
-                clamp_moment(moment, probe_cached(str(source)).duration_s) or moment,
-                clip_file,
-                mode=CLIP_BESIDE_PITCH_MODE,
-                use_gpu=True,
-                progress=reporter,
-                clip_offsets=_clip_offsets(str(source)),
-            )
-            reporter(1.0, "Clip ready")
-        except Exception as exc:  # a failed cut must not take the page down
-            st.error(f"Could not cut the clip: {exc}")
-            return "", strip_start, strip_end
-    if not clip_file.exists():
-        st.caption("Press **Generate clip** to cut this moment and play it beside the animation.")
-        return "", strip_start, strip_end
-    url = _served_video_url(clip_file, f"pitchclip::{clip_file.name}") or ""
-    return url, strip_start, strip_end
+        if st.button(
+            "Jump to this moment",
+            key=f"pitch_moment_jump::{match_id}",
+            disabled=strip_start is None,
+            help="Jump the animation to this moment and play it with the footage beside it.",
+        ):
+            st.session_state[seq_key] = int(st.session_state.get(seq_key, 0)) + 1
+    if strip_start is None:
+        st.caption("This moment is outside the analysed window, so there is no second to jump to.")
+    return strip_start, int(st.session_state.get(seq_key, 0))
 
 
 @st.cache_data(show_spinner=False)
@@ -989,73 +967,14 @@ def _ball_scan_status(segment_dir: Path, watch_key: str) -> None:
 
 
 @st.cache_data(show_spinner=False)
-def _load_identities_cached(path: str, mtime_ns: int) -> tuple[dict, dict]:
-    """The identity scan's arrays and its metadata, read once per file version.
-
-    The arrays travel in an ``npz`` (512-float embeddings per track would make a JSON file of tens of megabytes)
-    and the metadata beside it as JSON; both are small enough to hold in the cache, and the page reads them on
-    every rerun otherwise.
-    """
+def _load_replay_boxes_cached(path: str, mtime_ns: int) -> dict:
+    """Each track's own image boxes, read once per file version (they are only needed when a clip is cut)."""
     del mtime_ns
-    with np.load(path) as data:
-        arrays = {key: data[key] for key in data.files}
-    meta_path = Path(path).with_suffix(".json")
-    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-    return arrays, meta
-
-
-@st.cache_data(show_spinner=False)
-def _identities_cached(path: str, mtime_ns: int, body_threshold: float, face_threshold: float):  # noqa: ANN201
-    """Decode the scan and cluster it into players, once per file version and threshold pair.
-
-    The clustering is pure arithmetic over a few hundred tracks, but it is a quadratic similarity matrix, so it is
-    not repeated on every rerun - a rerun happens on every widget gesture.
-    """
-    arrays, meta = _load_identities_cached(path, mtime_ns)
-    tracks = identity_lib.decode_scan(arrays)
-    identities, members = identity_lib.cluster_identities(
-        tracks, body_threshold=body_threshold, face_threshold=face_threshold
-    )
-    return tracks, identities, members, meta
-
-
-@st.fragment(run_every=POLL_SECONDS)
-def _identity_scan_status(library: MatchLibrary, match_id: str, watch_key: str) -> None:
-    """Live progress of the background identity scan; the panel picks the tracks up when it lands."""
-    status = library.load_identity_status(match_id)
-    state = status.get("state")
-    previous = st.session_state.get(watch_key)
-    st.session_state[watch_key] = state
-    if not status:
-        st.caption(
-            "Not scanned yet. The scan measures each tracked player's *appearance* - a CLIP embedding of their own "
-            "crop, plus a face embedding on the rare frames where a face is big enough to read - so appearances of "
-            "one player can be merged into one person. It rebuilds the tracks (a couple of minutes) and then "
-            "decodes the footage once, which is the expensive part: roughly an hour for a whole game, like the ball "
-            "scan, and it runs in the background."
-        )
-    elif state == "running":
-        done, total = int(status.get("crops_done", 0)), int(status.get("crops_total", 0))
-        stage_text = str(status.get("message") or "Working...")
-        if total:
-            st.progress(min(1.0, done / max(1, total)), text=f"{stage_text} - {done}/{total} crops")
-        else:
-            st.progress(0.0, text=stage_text)
-        st.caption("Running in the background - this bar updates by itself.")
-    elif state == "error":
-        st.error(f"The scan failed: {status.get('message')}")
-    else:
-        faces = int(status.get("faces_read", 0))
-        found = int(status.get("faces_found", 0))
-        face_note = (
-            f" {found} face(s) were found inside player boxes and {faces} were big enough to read - the rest were "
-            "too small, which is the normal case on this footage."
-            if found
-            else ""
-        )
-        st.caption(f"Last scan: {status.get('message') or 'finished'}.{face_note}")
-    if previous == "running" and state != "running":
-        st.rerun()
+    try:
+        with np.load(path) as data:
+            return {key: data[key] for key in data.files}
+    except (OSError, ValueError):  # missing, torn, or written by an older build: no boxes is a normal answer
+        return {}
 
 
 def _centred_clip_name(track_id: int, start_s: float, duration_s: float) -> str:
@@ -1065,121 +984,130 @@ def _centred_clip_name(track_id: int, start_s: float, duration_s: float) -> str:
     return f"player_{track_id}_{digest}.mp4"
 
 
+def _appearance_thumbnail(
+    library: MatchLibrary,
+    match_id: str,
+    source: Path,
+    appearance,  # noqa: ANN001 - identity.Appearance
+) -> Path | None:
+    """One crop of an appearance, cut from the footage once and kept beside the match.
+
+    Seeing who an appearance is *is* the fastest way to recognise it - the point of the roster is typing a number
+    against the right track, and a track id means nothing. One frame is decoded and its box cropped, which costs a
+    single seek rather than a scan, and the JPEG is cached so looking again is free. Returns None when the frame
+    cannot be read or the box has no size.
+    """
+    directory = library.identities_dir(match_id)
+    # The window's start is part of the name: a rebuilt pipeline can reuse a track id for a different appearance,
+    # and a stale still under the same name would then show the wrong player.
+    target = directory / f"track_{int(appearance.track_id)}_{int(appearance.first_t)}.jpg"
+    if target.exists():
+        return target
+    times = np.asarray(appearance.traj_t if appearance.traj_t is not None else [], dtype=np.float64)
+    boxes = np.asarray(appearance.traj_box if appearance.traj_box is not None else np.zeros((0, 4)), dtype=np.float64)
+    if len(times) == 0 or len(boxes) != len(times):
+        return None
+    # The frame where the player is largest: a thumbnail exists to be recognised, and a big crop is recognisable.
+    heights = np.abs(boxes[:, 3] - boxes[:, 1])
+    index = int(np.argmax(heights))
+    frame = grab_frame(source, float(times[index]), width=960)
+    if frame is None:
+        return None
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = (float(v) * width for v in boxes[index])
+    margin = 0.05 * max(1.0, y2 - y1)
+    left, right = int(max(0, x1 - margin)), int(min(width, x2 + margin))
+    top, bottom = int(max(0, y1 - margin)), int(min(height, y2 + margin))
+    if right - left < 8 or bottom - top < 8:
+        return None
+    crop = frame[top:bottom, left:right]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(target), crop, [int(cv2.IMWRITE_JPEG_QUALITY), 88]):
+        return None
+    return target
+
+
 def identity_section(
     library: MatchLibrary,
     match_id: str,
-    segment_dir: Path,
+    segment,
+    replay: dict,
     numbers: dict[int, dict],
 ) -> None:
-    """Unique players: merge each player's appearances, and cut a clip centred on one of them.
+    """Unique players: group each person's appearances, and cut a clip centred on one of them.
 
-    Everything the panel shows is a measurement with its evidence attached: how many crops went into each identity,
-    how many face readings it has, and - when the scan finished - how well the embeddings separated players on this
-    footage at all. The merge thresholds are deliberately conservative, so the honest presentation is "these are
-    the appearances it is confident about", not "this is the full list of players".
+    The grouping is exact and comes from what is *known* - the team plus the shirt number or name, typed in the
+    roster or read by the shirt-number scan. It deliberately does not guess from appearance: measured on this
+    footage, embeddings do not separate individual players (the numbers are in the README), and a wrong merge would
+    put one player's clips under another player's name. Appearances nobody has named are listed separately, so they
+    can still be clipped and can still be named.
     """
-    identity_path = library.path(match_id) / "identities.npz"
-    with st.expander("Unique players - and a clip centred on one of them", expanded=identity_path.exists()):
-        _identity_scan_status(library, match_id, watch_key=f"identity_watch::{match_id}")
-
-        full_resolution = st.checkbox(
-            "Decode at full resolution (lets the face channel read anything at all - about twice as slow)",
-            value=False,
-            key=f"identity_fullres::{match_id}",
-            help=(
-                "Faces on this footage are 9-40 px wide at 1920 because the camera keeps the far side of the pitch "
-                "in frame, and SFace needs about 48 px. Decoding at the source width is what gives the rare "
-                "close-up face a chance to be read."
-            ),
+    appearances = identity_lib.appearances_from_players(
+        replay.get("players") or [],
+        frames_per_second=float(replay.get("fps") or 5.0),
+        start_s=float(segment.meta.get("start_s", 0.0)),
+        # Each player's own boxes live beside the payload (they are tens of megabytes, and the browser that draws
+        # the pitch never needs them); without them an appearance has no trajectory and no clip can be framed.
+        boxes=_load_replay_boxes_cached(
+            str(library.path(match_id) / "boxes.npz"),
+            (library.path(match_id) / "boxes.npz").stat().st_mtime_ns
+            if (library.path(match_id) / "boxes.npz").exists()
+            else 0,
+        ),
+    )
+    if not appearances:
+        return
+    identities = identity_lib.identities_from_labels(appearances, numbers)
+    team_names = library.load(match_id).team_names
+    named = sum(1 for identity in identities if identity.grouped_by)
+    with st.expander("Unique players - and a clip centred on one of them", expanded=named > 0):
+        # Numbers are attached to *tracks*, so a scan read against an older pitch fit describes tracks that may no
+        # longer exist under those ids. Two checks say so - ids that have vanished from the report entirely, and a
+        # scan saved before the calibration on disk - because "no numbers yet" and "numbers worn by the wrong
+        # people" must not look the same.
+        jerseys = library.load_jerseys(match_id)
+        stored = list((jerseys.get("suggestions") or {}).keys())
+        scan_saved = (jerseys.get("meta") or {}).get("calibration_saved")
+        calibration_path = library.path(match_id) / "calibration.json"
+        current_saved = calibration_path.stat().st_mtime if calibration_path.exists() else None
+        stale_reason = identity_lib.numbers_are_stale(
+            stored,
+            appearances.keys(),
+            scan_calibration_saved=None if scan_saved is None else float(scan_saved),
+            calibration_saved=current_saved,
         )
-
-        def _start_scan() -> None:
-            command = [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "run_identity_scan.py"),
-                "--match", match_id,
-                "--segment", str(segment_dir),
-                "--width", "3840" if full_resolution else "1920",
-            ]
-            status_path = library.path(match_id) / "identity_scan.json"
-            try:
-                status_path.write_text(
-                    json.dumps({"state": "running", "message": "Starting...", "updated": time.time()})
-                )
-            except OSError:
-                pass  # an unwritable match directory fails the child too, and its error lands in its own status
-            subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            st.session_state["identity_flash"] = ("success", "Identity scan started in the background.")
-
-        st.button(
-            "Measure player appearances (background)",
-            on_click=_start_scan,
-            key=f"scan_identity::{match_id}",
-            help="Runs scripts/run_identity_scan.py against this segment; the panel fills in when it finishes.",
-        )
-
-        if not identity_path.exists():
-            show_flash("identity_flash")
-            return
-        tracks, identities, _members, meta = _identities_cached(
-            str(identity_path),
-            identity_path.stat().st_mtime_ns,
-            identity_lib.DEFAULT_BODY_THRESHOLD,
-            identity_lib.DEFAULT_FACE_THRESHOLD,
-        )
-        if not identities:
-            st.caption(
-                "The scan found no track with enough appearance evidence to merge. Shirt numbers and the roster "
-                "below still work; identities need a few clear crops of a player."
+        # Shown even when no number made it into the grouping: a stale file is exactly why the list looks empty of
+        # names, and saying "no numbers yet" would send the user to re-run a scan that would produce the same file.
+        if stored and stale_reason:
+            st.warning(
+                f"The stored shirt numbers cannot be trusted for this report: {stale_reason}. Re-run the number "
+                "scan - or retype the numbers in the roster below - and the grouping here will be right."
             )
-            show_flash("identity_flash")
-            return
-        labelled = identity_lib.label_identities(identities, numbers)
-        by_id = {identity.identity_id: identity for identity in labelled}
-
-        separation = meta.get("separation") or {}
-        if separation:
-            overlap = float(separation.get("between_p95", 0.0)) >= identity_lib.DEFAULT_BODY_THRESHOLD
-            st.caption(
-                f"Measured on this footage: {separation.get('tracks_measured', 0)} tracks embedded; the same "
-                f"player's crops agree at {float(separation.get('within_p05', 0.0)):.2f} (5th percentile) while "
-                f"different tracks agree at {float(separation.get('between_p95', 0.0)):.2f} (95th) - the merge floor "
-                f"is {identity_lib.DEFAULT_BODY_THRESHOLD:.2f}. "
-                + (
-                    "The two distributions overlap, so some appearances will be left as separate identities rather "
-                    "than merged on a guess."
-                    if overlap
-                    else "No pair of different tracks reaches the merge floor, so a merge is a strong claim here."
-                )
-            )
-        face_evidence = int(meta.get("faces_read") or 0)
         st.caption(
-            f"{len(identities)} identity(ies) from {int(meta.get('tracks') or 0)} measured tracks; "
-            f"{int(meta.get('crops') or 0)} appearance crops"
-            + (f" and {face_evidence} readable face(s)" if face_evidence else " and no readable faces")
-            + ". An identity is a set of appearances the measurements say are one person - conservative on purpose: "
-            "an appearance it is unsure about stays its own identity."
+            "Appearances are grouped into a person by what is known about them - the shirt number (or name) from "
+            "the roster below and the automatic scan - never by guessing from the picture: measured on this "
+            "footage, appearance embeddings do not separate individual players well enough to merge them (see the "
+            "README). So the list is exact but incomplete: an appearance nobody has named stays its own row until "
+            "it is named below."
         )
-
         rows = identity_lib.identity_rows(
-            labelled,
-            tracks,
-            lambda team: team_name(team, library.load(match_id).team_names),
+            identities,
+            appearances,
+            lambda team: team_name(team, team_names),
         )
         frame = pd.DataFrame(rows)
-        if not frame.empty:
-            frame["first"] = frame["first_t"].map(_clock)
-            frame["last"] = frame["last_t"].map(_clock)
-            frame["tracks"] = frame["tracks"].map(lambda ids: ", ".join(str(track) for track in ids))
-            frame = frame[
-                ["player", "team", "appearances", "first", "last", "seen_s", "crops", "faces", "merged_by", "tracks"]
-            ].rename(columns={"seen_s": "seen (s)", "merged_by": "merged by"})
+        frame["first"] = frame["first_t"].map(_clock)
+        frame["last"] = frame["last_t"].map(_clock)
+        frame["tracks"] = frame["tracks"].map(lambda ids: ", ".join(str(track) for track in ids))
+        frame = frame[
+            ["player", "team", "appearances", "first", "last", "seen_s", "grouped_by", "tracks"]
+        ].rename(columns={"seen_s": "seen (s)", "grouped_by": "grouped by"})
         st.dataframe(frame, hide_index=True, use_container_width=True)
 
-        team_names = library.load(match_id).team_names
+        by_id = {identity.identity_id: identity for identity in identities}
         choice = st.selectbox(
             "Player to cut a clip around",
-            [identity.identity_id for identity in labelled],
+            [identity.identity_id for identity in identities],
             format_func=lambda identity_id: (
                 f"{by_id[identity_id].label} "
                 f"({team_name(by_id[identity_id].team, team_names)}, "
@@ -1189,59 +1117,65 @@ def identity_section(
             key=f"identity_choice::{match_id}",
         )
         identity = by_id[choice]
-        appearances = [tracks[track_id] for track_id in identity.members if track_id in tracks]
-        appearances.sort(key=lambda track: track.first_t)
-
-        # The crops behind the merge, so "is this one person?" can be looked at rather than taken on trust.
-        identity_dir = library.identities_dir(match_id)
-        thumbs = [
-            identity_dir / track.thumbnail
-            for track in appearances[:8]
-            if track.thumbnail and (identity_dir / track.thumbnail).exists()
-        ]
-        if thumbs:
-            st.caption("The best crop of each appearance in this identity - what the merge was based on:")
-            columns = st.columns(len(thumbs))
-            for column, thumb, track in zip(columns, thumbs, appearances[:8]):
-                with column:
-                    st.image(str(thumb), caption=f"track {track.track_id}", use_container_width=True)
-
-        if not appearances:
-            st.caption("This identity has no appearance with a stored trajectory, so no clip can be cut.")
-            show_flash("identity_flash")
-            return
+        members = [appearances[track_id] for track_id in identity.members if track_id in appearances]
+        members.sort(key=lambda appearance: appearance.first_t)
         appearance = st.selectbox(
             "Which appearance to cut",
-            list(range(len(appearances))),
+            list(range(len(members))),
             format_func=lambda index: (
-                f"{_clock(appearances[index].first_t)}-{_clock(appearances[index].last_t)} "
-                f"({appearances[index].span_s:.0f} s, track {appearances[index].track_id})"
+                f"{_clock(members[index].first_t)}-{_clock(members[index].last_t)} "
+                f"({members[index].span_s:.0f} s, track {members[index].track_id})"
             ),
             key=f"identity_appearance::{match_id}",
         )
-        chosen = appearances[appearance]
+        chosen = members[appearance]
+        source = Path(str(segment.meta.get("video") or ""))
+
+        # A replay built before the boxes were added (or by a process still running the older code - Streamlit
+        # keeps already-imported modules across an edit) has no per-player boxes, and the crop cannot be framed
+        # from a pitch position: the clip needs to know where the player is *in the picture*.
+        framed = chosen.traj_box is not None and len(chosen.traj_box) > 0
+        if not framed:
+            st.info(
+                "This report does not carry each player's position in the frame, so a centred clip cannot be cut "
+                "from it. Press **Build report** above and the appearances here will be clip-able."
+            )
+            return
+
+        preview_col, cut_col = st.columns([1, 3])
+        with preview_col:
+            if st.button("Show this appearance", key=f"identity_look::{match_id}", disabled=not source.exists()):
+                thumbnail = _appearance_thumbnail(library, match_id, source, chosen)
+                if thumbnail is None:
+                    st.warning("Could not cut a still of this appearance - the footage may not be available.")
+                else:
+                    st.image(str(thumbnail), caption=f"track {chosen.track_id}", use_container_width=True)
+        # The default length is the appearance's own span, capped, and always a float (see `default_clip_length`:
+        # an int default against float bounds is rejected by Streamlit and breaks the page for short appearances).
+        # The key carries the appearance: each one gets its own default, so switching from a 50 s appearance to a
+        # 17 s one offers 17 s rather than the length chosen for the previous player.
         duration = st.slider(
             "Clip length (s)",
-            min_value=5.0,
+            min_value=SHORTEST_CLIP_SECONDS,
             max_value=60.0,
-            value=min(24.0, max(5.0, round(chosen.span_s))),
+            value=default_clip_length(chosen.span_s),
             step=1.0,
-            key=f"identity_duration::{match_id}",
+            key=f"identity_duration::{match_id}::{chosen.track_id}",
         )
-        source = Path(str(segment.meta.get("video") or ""))
         if not source.exists():
             st.caption(f"`{source}` is not available on this machine, so the clip cannot be cut.")
-            show_flash("identity_flash")
             return
-        cut = st.button(
-            "Cut the clip, centred on this player",
-            key=f"identity_cut::{match_id}",
-            help=(
-                "The clip is cut from the analysed video with a moving crop that follows this appearance, sized to "
-                "the player's own height; where the appearance has a gap the clip stops rather than panning across "
-                "a stretch nobody saw."
-            ),
-        )
+        with cut_col:
+            st.write("")  # line the button up with the slider's caption
+            cut = st.button(
+                "Cut the clip, centred on this player",
+                key=f"identity_cut::{match_id}",
+                help=(
+                    "The clip is cut from the analysed video with a moving crop that follows this appearance, sized "
+                    "to the player's own height. Where the appearance has a gap of more than a couple of seconds "
+                    "the clip stops rather than panning across a stretch nobody saw."
+                ),
+            )
         target = library.highlights_dir(match_id) / "centred" / _centred_clip_name(
             chosen.track_id, chosen.first_t, duration
         )
@@ -1249,34 +1183,44 @@ def identity_section(
             bar = st.progress(0.0, text="Cutting the clip...")
             reporter = progress_reporter(bar, "Cutting the clip...")
             try:
-                export_player_clip(
+                probe = probe_cached(str(source))
+                _path, plan = export_player_clip(
                     source,
-                    chosen.traj_t,
-                    chosen.traj_box,
+                    *chosen.trajectory(start_s=chosen.first_t),
                     target,
                     start_s=chosen.first_t,
                     duration_s=duration,
-                    source_size=(probe_cached(str(source)).width, probe_cached(str(source)).height),
+                    source_size=(probe.width, probe.height),
                     width=1280,
                     use_gpu=True,
                     progress=reporter,
                 )
+                st.session_state[f"identity_plan::{match_id}"] = {
+                    "track": chosen.track_id, "duration": plan.duration_s, "truncated": plan.truncated,
+                }
                 reporter(1.0, "Clip ready")
             except Exception as exc:  # a failed cut must not take the page down
                 st.error(f"Could not cut the clip: {exc}")
-                show_flash("identity_flash")
                 return
         if target.exists():
-            url = _served_video_url(target, f"centred::{target.name}")
-            if url:
-                st.video(url)
+            # A path, not the media URL the component would be given: `st.video` registers the file itself, and a
+            # scheme-less ``/media/<hash>.mp4`` string is read as a *local* path, which fails with
+            # MediaFileStorageError. The endpoint URL is only for callers that fetch it themselves (the replay
+            # component's clip pane).
+            st.video(str(target))
+            note = st.session_state.get(f"identity_plan::{match_id}") or {}
+            covers = float(note.get("duration") or duration) if note.get("track") == chosen.track_id else duration
             st.caption(
-                f"`{target.name}` - {_clock(chosen.first_t)} to {_clock(chosen.first_t + duration)}, "
-                "cropped to follow this player."
+                f"`{target.name}` - {_clock(chosen.first_t)} to {_clock(chosen.first_t + covers)}, cropped to "
+                "follow this player, cut from the analysed video."
+                + (
+                    f" The clip stops there rather than following across a stretch nobody saw ({note['truncated']})."
+                    if note.get("truncated")
+                    else ""
+                )
             )
         else:
             st.caption("Press **Cut the clip** to produce a clip cropped around this player.")
-        show_flash("identity_flash")
 
 
 def replay_section(
@@ -1363,18 +1307,40 @@ def replay_section(
         strip_half_minute = half_minute * 60.0 - window_start
         if strip_half_minute < 0 or strip_half_minute > float(replay.get("duration_s", 0.0)):
             strip_half_minute = None
-    # The clip that plays beside the pitch. It is cut on request rather than on selection: cutting costs a decode
-    # of the footage, and the animation is worth watching on its own. Once cut it is cached beside the match, so
-    # re-selecting the same moment is instant and the file survives a reload.
-    clip_url, clip_start_s, clip_end_s = _clip_beside_pitch(
-        library,
-        match_id,
-        float(replay.get("duration_s", 0.0)),
-        chosen,
-        event_log,
-        game_record_for_video,
-        window_start,
+    # The moment to watch with the footage: the picker translates the chosen event onto the strip's clock and the
+    # button asks the component to jump the animation there. The stream pane follows the animation, so one jump
+    # moves both clocks.
+    seek_to_s, seek_seq = _footage_moment(
+        match_id, float(replay.get("duration_s", 0.0)), event_log, game_record_for_video, window_start
     )
+    # The pane needs the stream server (Streamlit cannot serve a route of its own). Say whether it is up - and
+    # offer the one click that starts it - instead of letting the pane fail quietly.
+    stream_port = configured_port()
+    if is_reachable(stream_port):
+        st.caption(f"Footage stream: connected on port {stream_port}.")
+    else:
+        st.caption(
+            f"Footage stream: not running. Start `scripts/run_match_stream.py --port {stream_port}` (or press the "
+            "button) to play the annotated footage beside the animation."
+        )
+
+        def _start_stream() -> None:
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "run_match_stream.py"),
+                    "--port",
+                    str(stream_port),
+                    "--match",
+                    match_id,
+                ],
+                cwd=str(REPO_ROOT),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            st.session_state["replay_flash"] = ("success", f"Footage stream starting on port {stream_port}.")
+
+        st.button("Start the footage stream", key=f"start_stream::{match_id}", on_click=_start_stream)
     replay_view(
         _replay_media_url(replay_path),
         numbers,
@@ -1384,9 +1350,12 @@ def replay_section(
         events=strip_events,
         momentum=momentum_on_window_clock(report_payload.get("momentum") or {}, window_start),
         half_minute=None if strip_half_minute is None else strip_half_minute / 60.0,
-        clip_url=clip_url,
-        clip_start_s=clip_start_s,
-        clip_end_s=clip_end_s,
+        match_id=match_id,
+        stream_offset_s=window_start,
+        stream_port=stream_port,
+        stream_base=configured_base(),
+        seek_to_s=seek_to_s,
+        seek_seq=seek_seq,
     )
     has_ball = any(entry is not None for entry in (replay.get("ball") or []))
     excluded = int(replay.get("bystanders_excluded") or 0)
@@ -1426,7 +1395,7 @@ def replay_section(
         table = table[table["seen (s)"] >= 6.0]
     st.dataframe(table, hide_index=True, use_container_width=True)
 
-    identity_section(library, match_id, segment_dir, numbers)
+    identity_section(library, match_id, segment, replay, numbers)
 
     with st.expander("Shirt numbers and names (per track)"):
         st.caption(
@@ -2783,7 +2752,7 @@ else:
                 "frames_analysed": report.frames_analysed,
             }
             library.save_report(match_id, st.session_state["report"])
-            library.save_replay(match_id, replay)
+            library.save_replay(match_id, replay, boxes=track_boxes(report.players))
         advance(1.0, "Report and replay built.")
         report_box.update(
             label=f"Report built: {len(report.players)} tracks, {len(report.teams)} teams, replay ready",

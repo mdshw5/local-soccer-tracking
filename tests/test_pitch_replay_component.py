@@ -120,61 +120,161 @@ def test_the_legend_is_redrawn_when_events_arrive_without_a_reload() -> None:
     assert "renderLegend()" in else_branch, "the legend must be redrawn when the arguments change"
 
 
-def test_the_pitch_and_the_clip_sit_side_by_side() -> None:
-    """The clip is the footage of the moment; the pitch is the whole window. They are read together, so they share
-    a row - and the pitch has to size itself from its own pane, not the page, or it would overflow the row."""
+def test_the_pitch_and_the_footage_stream_sit_side_by_side() -> None:
+    """The footage is the annotated match stream beside the animation; the pitch is the whole window. They are
+    read together, so they share a row - evenly split, since neither view is the other's annex - and the pitch
+    has to size itself from its own pane, not the page, or it would overflow the row."""
     html = COMPONENT.read_text()
     assert 'id="panes"' in html, "the two views must be laid out as panes"
-    assert 'id="pitch-pane"' in html and 'id="clip-pane"' in html
-    assert 'id="clip"' in html and "<video" in html, "the clip is a real video element"
+    assert 'id="pitch-pane"' in html and 'id="footage-pane"' in html
+    assert 'id="footage"' in html and "<img" in html, "only an <img> element plays an MJPEG stream"
+    pitch_css = html.split("#pitch-pane {", 1)[1].split("}", 1)[0]
+    footage_css = html.split("#footage-pane {", 1)[1].split("}", 1)[0]
+    assert "flex: 1 1 50%" in pitch_css and "flex: 1 1 50%" in footage_css, "equal halves of the row"
     assert "pitchPane.clientWidth" in html, "the pitch must measure its own pane, not the page"
 
 
-def test_the_clip_is_held_in_step_with_the_animation() -> None:
-    """Sync is one-way and driven by the animation, because the animation can be scrubbed to any second of the
-    match while the clip only exists for its own window.
+def test_the_footage_follows_the_animation_clock() -> None:
+    """An MJPEG connection cannot be seeked, so the pane follows the animation in the two ways it can: one
+    annotated *still* of the exact second while paused (debounced - a scrub must not fire a decode per pixel), and
+    a *stream* opened at that second, at the animation's speed, while playing.
 
-    Two things make this work and are easy to lose: the clip's window arrives on the *strip's* clock (so the two
-    can be compared at all), and the correction is a tolerance rather than a seek per frame - seeking every frame
-    would stutter the video, and the two clocks run at the same rate.
+    Two things make the times comparable and are easy to lose: the strip's clock is translated onto the
+    recording's (``streamOffset``) before it is asked for, and every path that moves the animation ends in a
+    draw, which is where the pane is re-synced - so the animation drives, never the other way round.
     """
     html = COMPONENT.read_text()
-    assert "args.clip_url" in html, "the clip arrives as a URL"
-    assert "args.clip_start_s" in html and "args.clip_end_s" in html, "its window arrives on the strip's clock"
-    assert "function syncClip" in html
-    assert "clipTimeFor" in html, "the strip time must be translated into the clip's own time"
-    assert "clip.currentTime" in html, "the clip is seeked to follow the animation"
-    # A tolerance, not an equality: the two clocks drift by the gap between ticks.
-    assert "0.35" in html, "the drift correction must have a tolerance"
-    # Outside the window the clip must stop rather than run on past the moment it shows.
-    assert "clip.pause()" in html
-    # And the animation must drive it, not the other way round.
-    assert "syncClip()" in html.split("function tick", 1)[1].split("requestAnimationFrame(tick)", 1)[0]
+    assert "function footageUrl" in html
+    assert "/stream/" in html and "/frame/" in html, "the stream for playing, the still endpoint for paused"
+    assert "state.streamOffset" in html, "the strip clock must be translated onto the recording's"
+    assert "function scheduleStill" in html and "FOOTAGE_STILL_DEBOUNCE_MS" in html, "scrubbing must be debounced"
+    assert "function syncFootage" in html
+    draw_body = html.split("function draw()", 1)[1].split("\n      function ", 1)[0]
+    assert "syncFootage();" in draw_body, "every path that moves the animation must move the footage"
 
 
-def test_the_clip_sync_can_be_turned_off() -> None:
-    """A clip is worth watching on its own - the animation is a reconstruction, the clip is the footage - so the
-    two can be uncoupled without losing the clip."""
+def test_a_stream_that_falls_behind_is_restarted_not_left_to_drift() -> None:
+    """The decode is capped by how fast the 4K footage decodes, so a playing stream can fall behind the
+    animation. The pane restarts it at the animation's own second once the gap is visible - rate-limited, so a
+    decode slower than real time cannot turn the pane into a loop of restarts."""
+    html = COMPONENT.read_text()
+    assert "FOOTAGE_DRIFT_TOLERANCE_S" in html, "a restart costs a seek: only correct a visible divergence"
+    assert "FOOTAGE_MIN_RESTART_INTERVAL_MS" in html, "and never restart more often than this"
+    assert "function restartFootage" in html
+    assert "footageStartedAt" in html and "footageWallAt" in html, "the drift is measured against the start"
+
+
+def test_the_footage_sync_can_be_turned_off() -> None:
+    """The footage is worth watching on its own - the animation is a reconstruction, the footage is the match -
+    so the two can be uncoupled without losing the pane."""
     html = COMPONENT.read_text()
     assert 'id="sync"' in html, "there must be a control to uncouple the two"
-    assert "state.clipSync" in html
-    assert "clipSync: true" in html, "synced is the useful default"
+    assert "state.footageSync" in html
+    assert "footageSync: true" in html, "synced is the useful default"
 
 
-def test_a_button_jumps_the_animation_to_the_clip_and_plays_both() -> None:
-    """The clip has its own controls, so the user can drag it away from the animation; the follow button is the way
-    back. It must read the *clip's* time (the animation is the thing being moved), land inside the clip's window so
-    sync can hold the two, and start playback - the button's whole point is watching both together.
-
-    It also re-couples sync when it was switched off: a button that says "match the video" while leaving the two
-    free to drift again would not do what it says.
-    """
+def test_a_button_restarts_the_footage_at_the_animation_second() -> None:
+    """The pane's one real control: drop the current stream and reopen it at the animation's second (the way
+    back into step after a stall). It re-couples sync if it was switched off - a button that says "match the
+    animation" while leaving them free to drift again would not do what it says."""
     html = COMPONENT.read_text()
-    assert 'id="follow-clip"' in html, "the button sits beside play"
-    assert "followClipBtn.disabled = !has || state.clipStart === null" in html, (
-        "without a clip (or a window to jump into) there is nothing to follow"
-    )
-    handler = html.split("followClipBtn.addEventListener", 1)[1]
-    assert "state.clipStart + clip.currentTime" in handler, "the animation time comes from the clip's own time"
-    assert "state.clipSync = true" in handler, "following re-couples sync if it was off"
-    assert "setPlaying(true)" in handler, "the button starts playback"
+    assert 'id="resync-footage"' in html, "the button sits beside play"
+    handler = html.split("resyncFootageBtn.addEventListener", 1)[1]
+    assert "restartFootage()" in handler, "the button restarts the stream at the animation's own second"
+    assert "state.footageSync = true" in handler, "restarting re-couples sync if it was off"
+
+
+def test_the_footage_overlay_toggles_choose_the_layers() -> None:
+    """The footage is drawn server-side, so each toggle is a query parameter on the stream *and* the still URLs:
+    switching one off reopens the pane at the animation's own second with the new layer set, rather than leaving
+    the previous picture on screen until the next seek. ``none`` is the explicit spelling for a clean frame - an
+    empty query value parses as \"absent\" on the server, which means everything on."""
+    html = COMPONENT.read_text()
+    for ident in ("ov-pitch", "ov-boxes", "ov-numbers", "ov-ball", "ov-hud", "ov-debug"):
+        assert f'id="{ident}"' in html, f"a toggle must exist for {ident}"
+    assert "state.footageOverlays" in html
+    assert "overlays=${overlayParam()}" in html, "the layer set must travel on the URLs"
+    assert html.count("overlays=${overlayParam()}") == 2, "the stream and the still both carry it"
+    assert "on.length ? on.join(',') : 'none'" in html, "all layers off is spelled none, not empty"
+    handler = html.split("state.footageOverlays[name] = event.target.checked;", 1)[1]
+    assert "restartFootage()" in handler, "a new layer set must reopen the footage now"
+
+
+def test_a_busy_stream_server_is_retried_before_giving_up() -> None:
+    """Restarting the footage can lose the race for the server's decode slot (the previous connection's slot is
+    only freed when the server notices nobody is reading it): the pane retries with backoff instead of declaring
+    the server absent on the first refusal, and a successful frame clears the state."""
+    html = COMPONENT.read_text()
+    assert "FOOTAGE_RETRY_LIMIT" in html and "FOOTAGE_RETRY_BASE_MS" in html
+    error_handler = html.split("function onFootageError", 1)[1].split("function onFootageLoad", 1)[0]
+    assert "state.footageRetry < FOOTAGE_RETRY_LIMIT" in error_handler
+    assert "openFootage();" in error_handler, "the retry reopens the footage itself, not through a counter reset"
+    assert "state.footageError = true" in error_handler, "only exhausted retries call the server absent"
+    load_handler = html.split("function onFootageLoad", 1)[1]
+    assert "state.footageRetry = 0" in load_handler, "a frame that arrives clears the retry state"
+
+
+def test_a_superseded_stream_is_aborted_not_just_ignored() -> None:
+    """Chromium keeps *draining* an MJPEG fetch while its <img> exists, so merely removing the src leaves every
+    superseded stream decoding - here and on the server, holding one of its slots - with nobody watching. Every
+    source change therefore clears the src (which aborts the fetch) and swaps in a fresh element."""
+    html = COMPONENT.read_text()
+    assert "function replaceFootageImage" in html
+    body = html.split("function replaceFootageImage", 1)[1].split("function setFootageSource", 1)[0]
+    assert "removeAttribute('src')" in body, "clearing the src is what aborts the fetch"
+    assert "replaceWith(next)" in body, "the drained element must be replaced, not reused"
+    setter = html.split("function setFootageSource", 1)[1].split("\n      function ", 1)[0]
+    assert "replaceFootageImage()" in setter, "every source change goes through the swap"
+
+
+def test_an_abandoned_stream_is_stopped_by_the_server_not_left_draining() -> None:
+    """A browser will not abort an MJPEG fetch on command - Chromium keeps draining a replaced <img> - so the
+    pane tells the server to end the stream it is abandoning: before every replacement, and via a pagehide
+    beacon when the page goes away. Without it every seek/toggle would leave a decode running."""
+    html = COMPONENT.read_text()
+    assert "function stopFootageStream" in html
+    assert "/stop?token=" in html
+    assert "sendBeacon" in html, "the page says goodbye on unload"
+    assert "footageToken" in html, "each stream identifies itself"
+    opener = html.split("function openFootage", 1)[1].split("function restartFootage", 1)[0]
+    assert "stopFootageStream();" in opener, "a stream must be stopped before its replacement starts"
+    assert "newFootageToken()" in opener, "the replacement gets its own token"
+
+
+def test_a_repeated_render_does_not_reload_the_still() -> None:
+    """Streamlit re-sends the args while a component stays unchanged, and every payload redraws the pane. While
+    paused that must not swap the still <img>: the reload would abort a decode in flight for a picture that is
+    already on screen - a 4K seek spent per rerun. A still that *failed* is the exception: its retry must go
+    through, so a loaded-with-no-pixels image is not skipped."""
+    html = COMPONENT.read_text()
+    setter = html.split("function setFootageSource", 1)[1].split("\n      function ", 1)[0]
+    assert "url === footage.getAttribute('src')" in setter, "the same request twice is a no-op"
+    assert "!failed" in setter, "except when the picture failed to load - that retry has to proceed"
+
+
+def test_the_streams_clock_starts_with_its_first_frame() -> None:
+    """The seek and the first decode cost a second or two. A drift model anchored at the *request* would read as
+    permanently behind the animation and restart a stream playing exactly in step, over and over; anchored at
+    the first frame, the pane's copy of "where the stream is" starts when the picture does."""
+    html = COMPONENT.read_text()
+    assert "footageAwaitingFirstFrame" in html
+    opener = html.split("function openFootage", 1)[1].split("function restartFootage", 1)[0]
+    assert "state.footageAwaitingFirstFrame = true" in opener, "the wait begins with the request"
+    sync_body = html.split("function syncFootage", 1)[1].split("\n      function ", 1)[0]
+    assert "if (state.footageAwaitingFirstFrame) return" in sync_body, "no drift verdict while the request flies"
+    load_handler = html.split("function onFootageLoad", 1)[1].split("bindFootage(footage);", 1)[0]
+    assert "state.footageAwaitingFirstFrame = false" in load_handler, "frame one ends the wait"
+    assert "state.footageStartedAt = state.time" in load_handler, "and re-anchors the stream's clock"
+
+
+def test_the_moment_jump_follows_changing_sequences_only() -> None:
+    """Python's moment picker moves the *animation* to the chosen second - the stream follows the animation, so
+    one jump moves both. The jump arrives as a target plus a sequence number, and only a changed sequence acts:
+    an unrelated rerun (a scan's progress, a table redraw) must not yank the playback back to the moment."""
+    html = COMPONENT.read_text()
+    assert "args.seek_to_s" in html and "args.seek_seq" in html, "the jump arrives as target plus sequence"
+    assert "state.seekSeq" in html
+    assert "pendingSeek" in html, "a jump that arrives before the payload finishes loading must still land"
+    handler = html.split("seekSeq && seekSeq !== state.seekSeq", 1)
+    assert len(handler) == 2, "the sequence, not the mere presence of a target, decides when to act"
+    assert "setPlaying(true)" in handler[1], "jumping to a moment starts playback at it"

@@ -227,3 +227,24 @@ def player_table_rows(replay: dict, numbers: dict[int, dict] | None = None):  # 
         )
     table = pd.DataFrame(rows)
     return table.sort_values("seen (s)", ascending=False).reset_index(drop=True)
+
+
+def track_boxes(players) -> dict[str, np.ndarray]:
+    """Each tracked player's own image boxes, keyed by track id as a string, for the centred-clip cutter.
+
+    These deliberately do *not* travel inside the replay payload. The component draws pitch positions and never
+    looks at a box, while a whole game's boxes are ~35 MB of JSON - which the browser would download and parse on
+    every view of a match just so that a clip cut later, from Python, could follow one player. They are written
+    beside the payload as a small ``.npz`` instead (float16: the crop maths cannot see the difference, and it
+    halves the file), and only the page's own code reads them.
+
+    A player whose track has no boxes (built without detections, or a payload from an older build) is left out
+    rather than given zeros, which would frame its clips in the frame's corner.
+    """
+    out: dict[str, np.ndarray] = {}
+    for player in players:
+        boxes = getattr(player, "box", None)
+        if boxes is None or len(boxes) == 0:
+            continue
+        out[str(int(player.track_id))] = np.asarray(boxes, dtype=np.float16)
+    return out

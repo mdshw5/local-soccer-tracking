@@ -128,6 +128,14 @@ The dashboard walks through four steps in order, and every step stores its resul
    filled dots for manual tags, hollow rings for detected candidates, one colour per event type. Clicking the strip
    seeks the replay to that moment, so the timeline doubles as the animation's scrubber.
 
+   Beside the animation sits the **annotated footage** of the match itself (the stream described further down), kept
+   in step with it: a still of the exact second while the animation is paused - so scrubbing the animation scrubs
+   the footage - and a live stream opened at that second and speed while it plays. Above it, **Footage moment to
+   jump to** lists the same tagged and detected events as the strip; picking one and pressing *Jump to this moment*
+   moves the animation there and starts both together, so the events are how a review picks its start times. The
+   pane needs the stream server (`scripts/run_match_stream.py`); the page says so - and offers to start it - when
+   it is not running.
+
    Whistle detection is deliberately strict, and the strictness is adjustable. A referee's whistle is a loud,
    sustained, tonal blast, and that is all three things the detector requires: a narrow band peak that dominates the
    2.2-4.6 kHz band, held for at least 0.2 s, and *loud relative to the rest of the match* - the gate is in
@@ -144,6 +152,31 @@ The dashboard walks through four steps in order, and every step stores its resul
    candidate is recorded in its note so the loud ones can be trusted first. Raise the strictness in the dashboard if
    the neighbouring pitches dominate the list.
 
+## The annotated match stream
+
+The footage pane beside the pitch is served by a small MJPEG server of its own, which can also be opened directly:
+
+```bash
+.venv/bin/python scripts/run_match_stream.py --port 8510
+```
+
+`http://localhost:8510/` is an index of streamable matches; `/play/<match_id>` plays one (a page that embeds the
+stream in an `<img>` - browsers download a bare multipart URL instead of playing it), and the stream itself is
+`/stream/<match_id>.mjpg?start=<source seconds>&rate=<speed>&width=<px>`. A single annotated still is at
+`/frame/<match_id>.jpg?t=<seconds>`, and `/matches` lists what is available as JSON. Every frame carries the pitch
+markings projected back through the same corrected camera chain the report uses (the homography drawn on the
+field), a box on each tracked player in their measured team colour with a chip showing their shirt number - or
+`#track_id` while nobody has named them - the ball from the segment's scan (a filled dot when a detector saw it, a
+hollow ring where the scan coasted across a miss), and a clock/legend HUD.
+
+The stream draws what the archive already knows and invents nothing: boxes come from the report build (the
+`boxes.npz` beside the replay - a replay without them is refused with the `scripts/rebuild_match.py` command
+instead of streaming silently empty boxes), and shirt numbers come from the roster and the number scan, with a
+stale scan called out in the corner rather than mapping numbers onto the wrong tracks. Each viewer gets their own
+ffmpeg decode, so streams can start at different times and speeds; `rate` is capped by how fast the footage
+decodes, and when that is slower than real time the pane restarts the stream at the animation's second rather than
+drifting away from it (switch *sync footage* off to let it play on its own).
+
 ## Project layout
 
 ```
@@ -157,7 +190,8 @@ src/soccer_analytics/
     dashboard/       # Streamlit app
 tests/               # including a synthetic-match oracle with known ground truth
 scripts/             # run_stage_a.py: the background heavy pass; run_ball_scan.py: the ball scan;
-                    # refresh_kit_descriptors.py: re-derive kit colours without re-analysing
+                    # refresh_kit_descriptors.py: re-derive kit colours without re-analysing;
+                    # rebuild_match.py: headless report+replay rebuild; run_match_stream.py: annotated MJPEG
 ```
 
 ## The two-stage split

@@ -58,3 +58,102 @@ def test_dashboard_offers_the_next_step_either_way() -> None:
     actionable = "Build report" in buttons
     explained = any(phrase in messages for phrase in ("Run Step 1 first", "Steps 1 and 2", "Not analysed yet"))
     assert actionable or explained, f"Step 3 said neither. buttons={buttons} messages={messages!r}"
+
+
+def test_the_unique_players_panel_renders_when_a_report_exists() -> None:
+    """The centred-clip panel must render against real artefacts - or say why it cannot.
+
+    Data-dependent on purpose: on a machine with a match whose report and replay are built, the panel appears with
+    its player list; on a clean machine there is nothing to show and the test skips. What it guards is the wiring
+    between the replay payload (which carries each player's own boxes), the grouping by shirt number, and the
+    clip-cutting controls - the parts that only fail when they are actually rendered.
+    """
+    app = streamlit_testing.AppTest.from_file(str(APP), default_timeout=300)
+    app.run()
+    if _no_footage(app):
+        pytest.skip("no footage available in this environment")
+    video_box = next((s for s in app.selectbox if s.label == "Video (newest first)"), None)
+    if video_box is None:
+        pytest.skip("the page did not offer a video to analyse")
+    # The segment for the combined game is the one the whole pipeline runs on; a single camera clip has none.
+    game = next((option for option in video_box.options if "game_" in str(option)), None)
+    if game is None:
+        pytest.skip("no combined game video on this machine")
+    video_box.set_value(game)
+    app.run()
+    assert not app.exception, [str(e.value) for e in app.exception]
+    labels = [expander.label for expander in app.expander]
+    if not any("Unique players" in label for label in labels):
+        pytest.skip("this machine has no built report for the game video")
+    panel = next(expander for expander in app.expander if "Unique players" in expander.label)
+    player_box = next(box for box in panel.selectbox if box.label == "Player to cut a clip around")
+    assert len(player_box.options) > 0, "the panel offers no player to cut a clip around"
+    # The appearances offered are the chosen player's own tracks, so the second list is never empty either.
+    appearance_box = next(box for box in panel.selectbox if box.label == "Which appearance to cut")
+    assert len(appearance_box.options) > 0
+
+
+def _media_url_variables(tree) -> set[str]:  # noqa: ANN001 - ast.Module
+    """Names bound to the result of ``_served_video_url(...)`` anywhere in a module.
+
+    The bug's shape was ``url = _served_video_url(path, key) or ""`` - the ``or ""`` wrap is why the check looks
+    through boolean operands instead of only at a direct call.
+    """
+    import ast
+
+    def holds_url(value) -> bool:  # noqa: ANN001
+        if isinstance(value, ast.Call):
+            return getattr(value.func, "id", "") == "_served_video_url"
+        if isinstance(value, ast.BoolOp):
+            return any(holds_url(operand) for operand in value.values)
+        return False
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.BoolOp | ast.Call):
+            if holds_url(node.value):
+                names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    return names
+
+
+def test_the_media_url_check_catches_the_bug_it_exists_for() -> None:
+    """A guard that cannot fail is not a guard: the detector must flag the exact code that broke the page."""
+    import ast
+
+    snippet = 'url = _served_video_url(target, "k") or ""\nif target.exists():\n    st.video(url)\n'
+    tree = ast.parse(snippet)
+    assert _media_url_variables(tree) == {"url"}
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", "") == "video"
+        and getattr(node.func.value, "id", "") == "st"
+        and any(isinstance(arg, ast.Name) and arg.id in _media_url_variables(tree) for arg in node.args)
+    ]
+    assert offenders == [3], "the guard did not catch the pattern that produced the live error"
+
+
+def test_streamlits_video_player_is_never_given_a_media_url() -> None:
+    """``st.video`` takes a path (or a real URL): a ``/media/<hash>`` string is read as a *local file path*.
+
+    Learned live, not in theory: the centred-clip panel registered a clip through the media endpoint and then
+    handed that URL to ``st.video``, which tried to open the URL as a path and failed with
+    ``MediaFileStorageError: Error opening '/media/<hash>.mp4'`` - so a clip that cut perfectly was reported as a
+    page-breaking error on every rerun. The endpoint URL is only for callers that fetch it themselves (the replay
+    component's clip pane); ``st.video`` must be given the file. This pins that no call site does it again.
+    """
+    import ast
+
+    tree = ast.parse(APP.read_text())
+    url_names = _media_url_variables(tree)
+    assert url_names, "no media URLs are registered at all - has the helper been renamed?"
+    offenders = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "attr", "") == "video"
+        and getattr(node.func.value, "id", "") == "st"
+        and any(isinstance(arg, ast.Name) and arg.id in url_names for arg in node.args)
+    ]
+    assert not offenders, f"st.video() was given a media URL at line(s) {offenders}: pass the file path instead"

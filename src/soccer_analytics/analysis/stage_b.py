@@ -46,7 +46,7 @@ _UNREACHABLE = 1e6  # cost above the gate: used to forbid an assignment rather t
 class TrackAssignment:
     track_id: np.ndarray  # (D,) -1 where unassigned
     team: dict[int, int]  # track id -> team index (0/1), absent if unknown
-    kit_quality: dict[int, float]  # track id -> how separable its kit was (0..1); low means "guess"
+    kit_quality: dict[int, float]  # track id -> how much its label can be trusted (0..1); low means "guess"
     tracks: dict[int, np.ndarray]  # track id -> detection row indices
 
 
@@ -62,6 +62,10 @@ class PlayerTrack:
     sigma_m: np.ndarray
     speed_kmh: np.ndarray
     distance_m: float
+    # (N, 4) the player's own detection boxes over the same observations, ``(x1, y1, x2, y2)`` normalised by frame
+    # width. Where the track is on the pitch is one question; where it is *in the picture* is another, and cutting
+    # a clip that follows this player needs the second. None when the caller built tracks without detections.
+    box: np.ndarray | None = None
 
 
 @dataclass
@@ -413,8 +417,10 @@ def _team_assignment(
 ) -> tuple[dict[int, int], dict[int, float], dict[int, np.ndarray]]:
     """Cluster per-track kit descriptors into teams, plus a possible "other" cluster for the referee.
 
-    Returns the team label per track (``-1`` for a cluster identified as neither team), how separable the basis was,
-    and each team's mean kit descriptor - the colour that tells the two teams apart, read back out for display.
+    Returns the team label per track (``-1`` for a cluster identified as neither team), how much each label can be
+    trusted (the voters by the clustering separation, the propagated tracks by how close their colour landed to a
+    centre), and each team's mean kit descriptor - the colour that tells the two teams apart, read back out for
+    display.
     Three things make this honest rather than confident:
     * only tracks with real colour evidence may vote: enough player-sized observations (the sqrt-weight also
       down-weights short tracks) and crops that were mostly kit rather than grass. Measured on the real game this
@@ -524,6 +530,7 @@ def _team_assignment(
     evidence_by_tid: dict[int, np.ndarray] = {tid: evidence[0] for tid, evidence in per_track.items()}
     weak_ids: list[int] = []
     weak_features: list[np.ndarray] = []
+    weak_quality: dict[int, float] = {}
     for tid, rows in assignment.tracks.items():
         if tid in strong:
             continue
@@ -540,11 +547,19 @@ def _team_assignment(
         nearest = distances.argmin(axis=1)
         best = distances[np.arange(len(weak_ids)), nearest]
         runner_up = np.partition(distances, 1, axis=1)[:, 1]
-        for tid, cluster, close, clear in zip(
-            weak_ids, nearest, best <= TEAM_LABEL_MAX_DISTANCE, runner_up - best >= TEAM_LABEL_MIN_MARGIN
+        for tid, cluster, close, clear, distance in zip(
+            weak_ids, nearest, best <= TEAM_LABEL_MAX_DISTANCE,
+            runner_up - best >= TEAM_LABEL_MIN_MARGIN, best,
         ):
             if close and clear:
-                teams[tid] = remap.get(int(cluster), -1)
+                label = remap.get(int(cluster), -1)
+                teams[tid] = label
+                if label >= 0:
+                    # How much of the trusted radius the match used: a track matched just inside the edge is a
+                    # guess, one matched near a centre is not. On the same 0..1 "how much to trust it" scale the
+                    # voters get from the clustering separation, so the report's weak-label note can count real
+                    # guesses instead of every track that was not a voter.
+                    weak_quality[tid] = float(np.clip(1.0 - distance / TEAM_LABEL_MAX_DISTANCE, 0.0, 1.0))
 
     # Each team's colour, medianed over the kit descriptors of the tracks that wear it (not the cluster centre,
     # which lives in standardised space and no longer means a colour). The median, not a saturation-weighted
@@ -568,6 +583,7 @@ def _team_assignment(
     between = float(np.linalg.norm(centres[team_clusters[0]] - centres[team_clusters[1]])) if len(team_clusters) >= 2 else 0.0
     separation = float(np.clip((between - within) / (between + within + 1e-9), 0.0, 1.0))
     quality: dict[int, float] = {tid: separation for tid in ids}
+    quality.update(weak_quality)
     for tid in assignment.tracks:
         quality.setdefault(tid, 0.0)
     return teams, quality, colours
@@ -615,7 +631,13 @@ def build_tracks(
         steps = np.linalg.norm(np.diff(xy, axis=0), axis=1)
         observed = np.diff(time) <= MAX_GAP_FOR_DISTANCE_S
         distance = float(np.sum(steps * observed * (speed[1:] > 0)))
-        out.append(PlayerTrack(tid, teams.get(tid, -1), detections.frame[rows], time, xy, sigma, speed, distance))
+        box = getattr(detections, "box", None)
+        out.append(
+            PlayerTrack(
+                tid, teams.get(tid, -1), detections.frame[rows], time, xy, sigma, speed, distance,
+                box=np.asarray(box[rows], dtype=np.float64) if box is not None else None,
+            )
+        )
     return out
 
 
@@ -688,6 +710,16 @@ def _momentum(
     return dict(sorted(out.items()))
 
 
+def _weak_labels(teams: dict[int, int], quality: dict[int, float]) -> list[int]:
+    """Tracks whose team label may be wrong: labelled, but with little confidence behind the kit reading.
+
+    Only labelled tracks count. The note this feeds exists to flag guesses, and counting every short fragment
+    whose label is ``-1`` (which the old rule did - measured on the real game it fired for 13,257 tracks in a
+    match of 9,164) told the reader nothing about the labels that are actually shown.
+    """
+    return [tid for tid, label in teams.items() if label >= 0 and quality.get(tid, 0.0) < 0.35]
+
+
 def build_report(
     detections: PitchDetections,
     *,
@@ -744,7 +776,7 @@ def build_report(
     notes = []
     if not any(p.team >= 0 for p in players):
         notes.append("Kit colours were not separable: team metrics are unavailable for this match.")
-    weak = [tid for tid, q in quality.items() if q < 0.35]
+    weak = _weak_labels(teams, quality)
     if weak:
         notes.append(f"{len(weak)} track(s) had weakly separated kit colours; their team label is a best guess.")
     notes.append(

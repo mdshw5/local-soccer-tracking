@@ -269,6 +269,7 @@ def _encode_clip(
     fps: int = 30,
     audio_only: bool = False,
     skip_frame: str | None = None,
+    video_filter: str | None = None,
     progress=None,
 ) -> Path:
     """Re-encode one moment window to a normalised H.264 MP4, trying each encoder until one works.
@@ -284,6 +285,10 @@ def _encode_clip(
     "is that a whistle?", which is a question about the sound. ``skip_frame`` (an ffmpeg input option, e.g.
     ``"nokey"``) is the other lever: it decodes only the frames the camera marked, which on this footage is one a
     second, so a whole window costs ten decodes rather than six hundred.
+
+    ``video_filter`` replaces the default scale-and-rate filter outright. The one caller that needs it is the
+    player-centred cut, whose filter is a 'sendcmd'-driven moving crop rather than a fixed scale - everything else
+    about the encode (encoder fallbacks, audio codec, progress) stays the same.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     last_error = ""
@@ -306,7 +311,7 @@ def _encode_clip(
             command += ["-vn", *_AUDIO_ENCODERS[codec]]
         else:
             command += [
-                "-vf", f"scale={width}:-2:flags=lanczos,fps={fps}",
+                "-vf", video_filter if video_filter else f"scale={width}:-2:flags=lanczos,fps={fps}",
                 "-c:v", "h264_nvenc" if gpu else "libx264",
                 "-preset", "p4" if gpu else "veryfast",
                 *_AUDIO_ENCODERS[codec],
@@ -323,6 +328,70 @@ def _encode_clip(
     if output_path.exists():
         output_path.unlink()
     raise RuntimeError(f"ffmpeg failed cutting the clip at {cut_start:.1f}s: {last_error}")
+
+
+def export_player_clip(
+    source: str | Path,
+    times,
+    boxes,
+    output_path: str | Path,
+    *,
+    start_s: float,
+    duration_s: float,
+    source_size: tuple[int, int] | None = None,
+    width: int = 1280,
+    use_gpu: bool = True,
+    progress=None,
+):  # noqa: ANN201 - (Path, FramingPlan)
+    """Cut a window out of ``source`` that stays centred on one player, cropping rather than following the ball.
+
+    ``times`` and ``boxes`` are the player's own observations: source seconds and width-normalised
+    ``(x1, y1, x2, y2)`` rectangles (exactly what the replay payload's ``boxes`` are). The crop is sized from the
+    player's median height, moved by ffmpeg's ``sendcmd`` at a handful of commands per second, and clamped to the
+    frame - see ``analysis.framing`` for why the trajectory is smoothed and what happens at a gap.
+
+    ``source_size`` is the video's ``(width, height)``; it is probed when not given, but callers that already know
+    it (the dashboard probes every video once) should pass it rather than pay for another ffprobe.
+
+    Returns ``(path, plan)``: the plan carries the window the clip *actually* covers, which is shorter than the
+    requested one when the appearance ends or has a gap in it - the caller can then say so instead of labelling a
+    short clip with the length that was asked for. Raises ``ValueError`` when the track cannot be framed (no
+    observations) and the ``RuntimeError`` from the encoder when ffmpeg fails - the page reports both rather than
+    showing a broken clip.
+    """
+    from soccer_analytics.analysis.framing import plan_framing, sendcmd_filter
+
+    source = Path(source)
+    if source_size is None:
+        from soccer_analytics.ingest.ffmpeg_reader import probe_video
+
+        probe = probe_video(source)
+        source_size = (int(probe.width), int(probe.height))
+    plan = plan_framing(
+        times, boxes,
+        start_s=float(start_s),
+        duration_s=float(duration_s),
+        source_width=int(source_size[0]),
+        source_height=int(source_size[1]),
+    )
+    if plan is None:
+        raise ValueError("this appearance has no observations to frame")
+    moment = Moment(
+        time_s=float(start_s), start_s=float(start_s), end_s=float(start_s) + plan.duration_s,
+        weight=0.0, reason="player-centred clip",
+    )
+    output = _encode_clip(
+        source,
+        moment,
+        Path(output_path),
+        duration_s=plan.duration_s,
+        width=width,
+        use_gpu=use_gpu,
+        fps=30,
+        video_filter=sendcmd_filter(plan, scale_width=width),
+        progress=progress,
+    )
+    return output, plan
 
 
 def export_reel(

@@ -56,17 +56,30 @@
         font-size: 13px;
         color: #cbd5e1;
       }
+      #controls .group {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding-left: 9px;
+        border-left: 1px solid #374151;
+      }
+      #controls .group-title {
+        color: #9ca3af;
+        font-size: 12px;
+      }
       #panes {
         display: flex;
         gap: 10px;
         align-items: flex-start;
       }
+      /* The two views are read side by side, so they split the row evenly: the pitch is a little taller from its
+         own aspect, the footage a fixed 16:9 pane - near enough the same size that neither reads as the annex. */
       #pitch-pane {
-        flex: 1 1 58%;
+        flex: 1 1 50%;
         min-width: 300px;
       }
-      #clip-pane {
-        flex: 1 1 42%;
+      #footage-pane {
+        flex: 1 1 50%;
         min-width: 260px;
       }
       #stage {
@@ -74,20 +87,22 @@
         background: #05240f;
         line-height: 0;
       }
-      #clip {
+      #footage {
         display: block;
         width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: contain;
         border-radius: 6px;
         background: #000;
       }
-      #clip-empty {
+      #footage-empty {
         border: 1px dashed #374151;
         border-radius: 6px;
         padding: 14px;
         font-size: 13px;
         color: #9ca3af;
       }
-      #clip-note {
+      #footage-note {
         font-size: 12px;
         color: #9ca3af;
         padding-top: 5px;
@@ -141,10 +156,10 @@
     <div id="controls">
       <button id="play" title="Play / pause">&#9654;</button>
       <button
-        id="follow-clip"
-        title="Jump the animation to the clip's moment and play both in step"
+        id="resync-footage"
+        title="Restart the footage stream at the animation's own second"
         disabled
-      >&#128279;</button>
+      >&#8635;</button>
       <button id="step-back" title="Previous frame">&#9664;&#9474;</button>
       <button id="step-fwd" title="Next frame">&#9474;&#9654;</button>
       <input id="scrub" type="range" min="0" max="1" step="0.05" value="0" />
@@ -158,8 +173,18 @@
       <label class="toggle"><input id="loop" type="checkbox" /> loop</label>
       <label class="toggle"><input id="trails" type="checkbox" checked /> trails</label>
       <label class="toggle"><input id="labels" type="checkbox" checked /> shirts</label>
-      <label class="toggle" title="Keep the clip on the same second of the match as the animation"
-        ><input id="sync" type="checkbox" checked /> sync clip</label>
+      <label class="toggle" title="Keep the footage on the same second of the match as the animation"
+        ><input id="sync" type="checkbox" checked /> sync footage</label>
+      <span class="group" title="What the annotated footage draws - the pitch markers above are unaffected">
+        <span class="group-title">footage:</span>
+        <label class="toggle"><input id="ov-pitch" type="checkbox" checked /> lines</label>
+        <label class="toggle"><input id="ov-boxes" type="checkbox" checked /> boxes</label>
+        <label class="toggle"><input id="ov-numbers" type="checkbox" checked /> numbers</label>
+        <label class="toggle"><input id="ov-ball" type="checkbox" checked /> ball</label>
+        <label class="toggle"><input id="ov-hud" type="checkbox" checked /> clock</label>
+        <label class="toggle" title="Session name, frame counter and the notes about what was left out"
+          ><input id="ov-debug" type="checkbox" checked /> debug</label>
+      </span>
       <label class="toggle"
         >heat
         <select id="heat">
@@ -173,13 +198,14 @@
       <div id="pitch-pane">
         <div id="stage"><canvas id="canvas"></canvas></div>
       </div>
-      <div id="clip-pane">
-        <video id="clip" controls playsinline preload="metadata" style="display: none"></video>
-        <div id="clip-empty">
-          No clip yet. Pick a moment under the pitch and press <b>Generate clip</b> - it is cut from the footage and
-          then plays here in step with the animation.
+      <div id="footage-pane">
+        <img id="footage" alt="annotated match footage" style="display: none" />
+        <div id="footage-empty">
+          The annotated match stream is not configured. Start it with
+          <b>python scripts/run_match_stream.py --port 8510</b> and it will play here in step with the animation:
+          a still of the moment while the animation is paused, the live stream while it plays.
         </div>
-        <div id="clip-note"></div>
+        <div id="footage-note"></div>
       </div>
     </div>
     <div id="timeline" title="Click to jump to that moment">
@@ -261,10 +287,32 @@
         events: [], // tagged and detected events, drawn on the timeline strip
         momentum: [], // [{minute, team_0, team_1}] sorted by minute
         halfMinute: null, // half-time in minutes, for the timeline's half marker
-        clipUrl: '', // the generated clip beside the pitch, if one has been cut
-        clipStart: null, // the clip's window on the strip's own clock (seconds)
-        clipEnd: null,
-        clipSync: true, // keep the clip on the same second of the match as the animation
+        // The annotated footage stream (scripts/run_match_stream.py) shown beside the pitch. ``footageBase`` and
+        // ``matchId`` say where it is; ``streamOffset`` is the recording time of strip second 0, so a strip time
+        // can be asked for as a stream ``start``.
+        footageBase: '',
+        matchId: '',
+        streamOffset: 0,
+        footageSync: true, // keep the footage on the same second of the match as the animation
+        // Which layers the footage draws. They are named after the stream server's own overlay names (the query
+        // parameter calls them pitch/boxes/numbers/ball/hud/debug); the labels above use the words a person
+        // would. "hud" is the watching set (teams, clock), "debug" the diagnosing set (session name, frame
+        // counter, notes).
+        footageOverlays: {pitch: true, boxes: true, numbers: true, ball: true, hud: true, debug: true},
+        footageKind: '', // what the pane currently shows: '' | 'still' | 'stream'
+        footageSeq: 0, // cache-buster per stream start
+        footageToken: '', // identifies the live stream to the server's /stop endpoint
+        footageError: false,
+        footageRetrying: false, // a load failed and a retry is scheduled
+        footageRetry: 0,
+        footageRetryTimer: null,
+        footageStartedAt: 0, // strip time the current stream was started at
+        footageWallAt: 0, // performance.now() of that start, for the drift check
+        footageAwaitingFirstFrame: false, // a stream was asked for; its clock starts when frame one arrives
+        footageLastRestartAt: 0,
+        footageStillTimer: null,
+        seekSeq: 0, // the last seek request acted on (from Python's moment buttons)
+        pendingSeek: null, // a seek that arrived before the replay payload finished loading
       };
 
       const canvas = document.getElementById('canvas');
@@ -272,16 +320,17 @@
       const clock = document.getElementById('clock');
       const scrub = document.getElementById('scrub');
       const playBtn = document.getElementById('play');
-      const followClipBtn = document.getElementById('follow-clip');
+      const resyncFootageBtn = document.getElementById('resync-footage');
       const legend = document.getElementById('legend');
       const emptyNote = document.getElementById('empty');
       const timeline = document.getElementById('timeline');
       const tl = document.getElementById('tl');
       const tlCtx = tl.getContext('2d');
       const pitchPane = document.getElementById('pitch-pane');
-      const clip = document.getElementById('clip');
-      const clipEmpty = document.getElementById('clip-empty');
-      const clipNote = document.getElementById('clip-note');
+      const footagePane = document.getElementById('footage-pane');
+      let footage = document.getElementById('footage');
+      const footageEmpty = document.getElementById('footage-empty');
+      const footageNote = document.getElementById('footage-note');
 
       function detectedKit(team) {
         const entry = team >= 0 ? (state.data.team_colours || [])[team] : null;
@@ -683,6 +732,9 @@
         clock.textContent = clockText(t);
         if (document.activeElement !== scrub) scrub.value = String(t);
         drawTimeline();
+        // The footage pane follows the animation's clock from every path that moves it - ticks, scrubs, steps
+        // and seeks - because all of them end in a draw.
+        syncFootage();
       }
 
       // ---------------------------------------------------------------------------------------------------
@@ -797,62 +849,190 @@
           cancelAnimationFrame(state.raf);
           state.raf = null;
         }
-        syncClip();
+        syncFootage();
       }
 
       // ---------------------------------------------------------------------------------------------------
-      // The clip beside the pitch.
+      // The annotated footage beside the pitch.
       //
-      // The clip is the footage of one moment; the animation is the whole analysed window. They are two
-      // different clocks, and the clip's window is known on the strip's clock (``clipStart``/``clipEnd``), so
-      // the two can be held together: the clip's own currentTime is the strip's time minus the window start.
-      // Sync is one-way and driven by the *animation*, because the animation is the thing that can be scrubbed
-      // to any second of the match - the clip only exists for its own ten seconds. Dragging the clip's own
-      // controls therefore does not move the animation; it just plays, and the next animation tick takes over.
+      // The pane is the match stream (``scripts/run_match_stream.py``): MJPEG of the analysed window with the
+      // pitch model, the detection boxes and the shirt numbers drawn on it. An MJPEG connection only ever moves
+      // forward - it cannot be seeked - so the animation stays the master clock and the pane follows it:
+      //
+      // * paused, the pane shows one annotated still of the animation's exact second, so scrubbing the animation
+      //   scrubs the footage with it (one still request per pause in the scrub, not one per pixel);
+      // * playing, it opens a stream at the animation's second and speed. A stream that falls behind - the
+      //   decode is capped by how fast the 4K footage decodes - is restarted at the animation's second once the
+      //   gap passes a tolerance, rather than left drifting away from the pitch beside it.
+      //
+      // The animation's clock is the strip's (0 = first analysed frame); the stream's is the recording's, so
+      // ``streamOffset`` is what makes "start at this second" mean the same on both clocks.
       // ---------------------------------------------------------------------------------------------------
-      function clipTimeFor(time) {
-        if (state.clipStart === null || state.clipEnd === null) return null;
-        if (time < state.clipStart || time > state.clipEnd) return null;
-        return time - state.clipStart;
+      const FOOTAGE_DRIFT_TOLERANCE_S = 2.0; // an MJPEG restart costs a seek: only correct a visible divergence
+      const FOOTAGE_MIN_RESTART_INTERVAL_MS = 4000; // never restart more often than this, or a slow decode loops
+      const FOOTAGE_STILL_DEBOUNCE_MS = 180; // scrubbing fires an event per pixel; one still per pause in them
+      // A restart can lose the race for the server's decode slot (the previous connection's slot is only freed
+      // when the server notices nobody is reading it), so a failed load is retried with backoff before the pane
+      // calls the server absent.
+      const FOOTAGE_RETRY_LIMIT = 5;
+      const FOOTAGE_RETRY_BASE_MS = 1000;
+
+      function footageEnabled() {
+        return Boolean(state.footageBase && state.matchId && state.data);
       }
 
-      function syncClip() {
-        if (!state.clipUrl || !state.clipSync) return;
-        const wanted = clipTimeFor(state.time);
-        if (wanted === null) {
-          // Outside the clip's window: pause it rather than let it run on past the moment it shows.
-          if (!clip.paused) clip.pause();
-          return;
+      function overlayParam() {
+        // "none" rather than an empty value: an empty query value parses as "absent" on the server, and absent
+        // means everything on - the opposite of what an empty toggle row asks for.
+        const on = Object.keys(state.footageOverlays).filter((name) => state.footageOverlays[name]);
+        return on.length ? on.join(',') : 'none';
+      }
+
+      function footageUrl(kind, time) {
+        const duration = state.data ? state.data.duration_s : 0;
+        const source = state.streamOffset + Math.max(0, Math.min(duration, time));
+        const pane = footagePane.clientWidth || 640;
+        const width = Math.max(480, Math.min(1600, Math.round(pane * (window.devicePixelRatio || 1))));
+        if (kind === 'still') {
+          return `${state.footageBase}/frame/${state.matchId}.jpg?t=${source.toFixed(1)}&width=${width}&overlays=${overlayParam()}`;
         }
-        // Only correct a real drift. Seeking every frame would stutter the video, and the two clocks run at
-        // the same rate, so a small difference is just the gap between the last tick and this one.
-        if (Math.abs(clip.currentTime - wanted) > 0.35) {
-          clip.currentTime = wanted;
-        }
-        if (state.playing && clip.paused) {
-          clip.play().catch(() => {});
-        } else if (!state.playing && !clip.paused) {
-          clip.pause();
+        return (
+          `${state.footageBase}/stream/${state.matchId}.mjpg` +
+          `?start=${source.toFixed(1)}&rate=${state.speed}&width=${width}&overlays=${overlayParam()}` +
+          `&token=${state.footageToken}&_=${++state.footageSeq}`
+        );
+      }
+
+      function bindFootage(node) {
+        node.addEventListener('error', onFootageError);
+        node.addEventListener('load', onFootageLoad);
+      }
+
+      function replaceFootageImage() {
+        // Removing the ``src`` of a live MJPEG <img> is not enough to stop the fetch: Chromium keeps *draining*
+        // the connection while the element exists, so every restart would leave a decode running here (and on
+        // the server, holding one of its slots) with nobody watching it. Clearing the src aborts the fetch and
+        // the fresh element starts the next one; the detached node is then free to be collected.
+        footage.removeAttribute('src');
+        const next = document.createElement('img');
+        next.id = 'footage';
+        next.alt = footage.alt;
+        next.style.display = footage.style.display;
+        footage.replaceWith(next);
+        footage = next;
+        bindFootage(next);
+      }
+
+      function setFootageSource(kind, url) {
+        state.footageKind = kind;
+        // A repeated render payload (Streamlit re-sends the args while the component is unchanged) can ask for
+        // the still that is already on screen - reloading it would abort a decode in flight for no visible
+        // change. An image that *failed* is the exception: its retry has to go through, so it is not skipped.
+        const failed = footage.complete && footage.naturalWidth === 0;
+        if (kind && url === footage.getAttribute('src') && !failed) return;
+        replaceFootageImage();
+        if (kind) footage.src = url;
+      }
+
+      function newFootageToken() {
+        return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      }
+
+      function stopFootageStream() {
+        // Tell the server to end the stream this pane is abandoning. A browser will not abort an MJPEG fetch on
+        // command - Chromium keeps *draining* it after the <img> is replaced or even detached, a decoder running
+        // for a picture nobody sees - so the deterministic end is the server closing the connection itself.
+        const token = state.footageToken;
+        state.footageToken = '';
+        if (!token) return;
+        fetch(`${state.footageBase}/stop?token=${encodeURIComponent(token)}`).catch(() => {});
+      }
+
+      function closeFootageStream() {
+        stopFootageStream();
+        if (state.footageKind === 'stream') setFootageSource('', '');
+      }
+
+      function openFootage() {
+        // The seek the pane cannot do: drop the current connection and open a new one at the animation's second.
+        if (!footageEnabled()) return;
+        stopFootageStream();
+        state.footageStartedAt = state.time;
+        state.footageWallAt = performance.now();
+        state.footageLastRestartAt = performance.now();
+        if (state.playing) {
+          state.footageToken = newFootageToken();
+          state.footageAwaitingFirstFrame = true;
+          setFootageSource('stream', footageUrl('stream', state.time));
+        } else {
+          // Paused: stop the push (a stream left running would walk away from the animation) and fetch the still.
+          if (state.footageKind === 'stream') setFootageSource('', '');
+          scheduleStill();
         }
       }
 
-      function showClip() {
-        const has = Boolean(state.clipUrl);
-        clip.style.display = has ? 'block' : 'none';
-        clipEmpty.style.display = has ? 'none' : 'block';
-        // The follow button is only meaningful once there is a clip and a window to jump into.
-        followClipBtn.disabled = !has || state.clipStart === null;
-        if (!has) {
-          clipNote.textContent = '';
+      function restartFootage() {
+        // A fresh intent (a seek, an overlay toggle, a resync): clear any retry state and open now.
+        state.footageRetry = 0;
+        state.footageRetrying = false;
+        state.footageError = false;
+        openFootage();
+      }
+
+      function scheduleStill() {
+        clearTimeout(state.footageStillTimer);
+        state.footageStillTimer = setTimeout(() => {
+          if (footageEnabled() && !state.playing) {
+            setFootageSource('still', footageUrl('still', state.time));
+          }
+        }, FOOTAGE_STILL_DEBOUNCE_MS);
+      }
+
+      function syncFootage() {
+        if (!footageEnabled()) return;
+        if (state.playing) {
+          if (state.footageKind !== 'stream') {
+            restartFootage();
+            return;
+          }
+          if (!state.footageSync) return; // streaming, uncoupled: nothing corrects it
+          if (state.footageAwaitingFirstFrame) return; // the request is in flight; its clock starts with frame one
+          // The animation's clock is the truth. Restart when the stream has visibly parted from it, at most
+          // once per minimum interval - a decode slower than real time would otherwise loop on restarts.
+          const elapsed = (performance.now() - state.footageWallAt) / 1000;
+          const drift = Math.abs(state.time - (state.footageStartedAt + elapsed * state.speed));
+          if (
+            drift > FOOTAGE_DRIFT_TOLERANCE_S &&
+            performance.now() - state.footageLastRestartAt >= FOOTAGE_MIN_RESTART_INTERVAL_MS
+          ) {
+            restartFootage();
+          }
+        } else {
+          closeFootageStream();
+          scheduleStill();
+        }
+      }
+
+      function showFootage() {
+        const enabled = Boolean(state.footageBase && state.matchId);
+        footage.style.display = enabled ? 'block' : 'none';
+        footageEmpty.style.display = enabled ? 'none' : 'block';
+        resyncFootageBtn.disabled = !enabled;
+        if (!enabled) {
+          footageNote.textContent = '';
           return;
         }
-        const window =
-          state.clipStart === null
-            ? ''
-            : ` - ${clockText(state.clipStart)} to ${clockText(state.clipEnd)} of the analysed window`;
-        clipNote.textContent = state.clipSync
-          ? `Playing in step with the animation${window}.`
-          : `Sync is off, so the clip plays on its own${window}.`;
+        if (state.footageError) {
+          footageNote.textContent = 'Could not load the footage - is the stream server running?';
+          return;
+        }
+        if (state.footageRetrying) {
+          footageNote.textContent = 'Footage busy on restart - retrying...';
+          return;
+        }
+        footageNote.textContent = state.footageSync
+          ? 'Annotated footage in step with the animation: a still while paused, the stream while playing.'
+          : 'Sync is off, so the footage streams on its own and is not restarted when the animation moves.';
       }
 
       let lastTimestamp = 0;
@@ -873,7 +1053,6 @@
           }
         }
         draw();
-        syncClip();
         state.raf = requestAnimationFrame(tick);
       }
 
@@ -893,7 +1072,7 @@
 
       function resize() {
         if (!state.data) return;
-        // The pitch shares the row with the clip, so its width is its own pane's, not the page's.
+        // The pitch shares the row with the footage pane, so its width is its own pane's, not the page's.
         state.cssW = Math.max(240, pitchPane.clientWidth - 2);
         const g = geometry();
         const dpr = window.devicePixelRatio || 1;
@@ -930,6 +1109,14 @@
         emptyNote.style.display = 'none';
         renderLegend();
         resize();
+        // A seek that arrived while the payload was still loading (the moment picker was pressed early) lands now.
+        if (state.pendingSeek !== null) {
+          state.time = Math.min(state.data.duration_s, Math.max(0, state.pendingSeek));
+          state.pendingSeek = null;
+          draw();
+          setPlaying(true);
+          restartFootage();
+        }
       }
 
       function renderLegend() {
@@ -977,21 +1164,17 @@
       }
 
       playBtn.addEventListener('click', () => setPlaying(!state.playing));
-      followClipBtn.addEventListener('click', () => {
-        // The clip's own controls may have moved it away from the animation; this takes the animation to the same
-        // second of the match and starts both. The clip's window is known on the strip's clock, so the animation
-        // time is the window start plus where the clip is now - always inside the window, so sync can hold them.
-        if (!state.clipUrl || state.clipStart === null || !state.data) return;
-        state.time = Math.min(state.data.duration_s, Math.max(0, state.clipStart + clip.currentTime));
-        // The button's whole point is playing the two together, so it re-couples them if sync was switched off.
-        if (!state.clipSync) {
-          state.clipSync = true;
+      resyncFootageBtn.addEventListener('click', () => {
+        // Restart the stream at the animation's own second - the way back into step after a stall - and re-couple
+        // sync if it was switched off; a button that says "match the animation" while leaving them free to
+        // drift apart again would not do what it says.
+        if (!footageEnabled()) return;
+        if (!state.footageSync) {
+          state.footageSync = true;
           document.getElementById('sync').checked = true;
-          showClip();
+          showFootage();
         }
-        draw();
-        if (!state.playing) setPlaying(true);
-        else syncClip();
+        restartFootage();
       });
       document.getElementById('step-back').addEventListener('click', () => {
         setPlaying(false);
@@ -1020,6 +1203,9 @@
       });
       document.getElementById('speed').addEventListener('change', (event) => {
         state.speed = Number(event.target.value);
+        // The stream's speed is its push rate, so a new speed means a new stream - otherwise the footage and
+        // the animation part company at once.
+        if (state.playing) restartFootage();
       });
       document.getElementById('loop').addEventListener('change', (event) => {
         state.loop = event.target.checked;
@@ -1038,13 +1224,73 @@
         draw();
       });
       document.getElementById('sync').addEventListener('change', (event) => {
-        state.clipSync = event.target.checked;
-        if (!state.clipSync && !clip.paused) clip.pause();
-        showClip();
-        syncClip();
+        state.footageSync = event.target.checked;
+        showFootage();
+        // Re-coupling means putting the footage back on the animation's second now, not on the next seek.
+        if (state.footageSync) restartFootage();
       });
-      // The clip's own controls are the browser's; a seek there is the user's business, not ours. Only the
-      // animation drives the clip, so nothing is listened for here beyond keeping the note honest.
+      for (const [name, id] of Object.entries({
+        pitch: 'ov-pitch',
+        boxes: 'ov-boxes',
+        numbers: 'ov-numbers',
+        ball: 'ov-ball',
+        hud: 'ov-hud',
+        debug: 'ov-debug',
+      })) {
+        document.getElementById(id).addEventListener('change', (event) => {
+          state.footageOverlays[name] = event.target.checked;
+          // A new set of layers is a new stream (and a new still): reopen from the animation's own second, so
+          // the picture changes without the two clocks parting company.
+          restartFootage();
+        });
+      }
+      function onFootageError() {
+        if (!footageEnabled()) return;
+        // A restart can lose the race for the server's decode slot - the previous connection's slot is only freed
+        // when the server notices nobody is reading it - so retry with backoff before calling the server absent.
+        if (state.footageRetry < FOOTAGE_RETRY_LIMIT) {
+          const delay = Math.min(8000, FOOTAGE_RETRY_BASE_MS * 2 ** state.footageRetry);
+          state.footageRetry += 1;
+          state.footageRetrying = true;
+          state.footageError = false;
+          clearTimeout(state.footageRetryTimer);
+          state.footageRetryTimer = setTimeout(() => {
+            state.footageRetryTimer = null;
+            openFootage();
+          }, delay);
+        } else {
+          state.footageRetrying = false;
+          state.footageError = true;
+        }
+        showFootage();
+      }
+
+      function onFootageLoad() {
+        state.footageRetry = 0;
+        state.footageRetrying = false;
+        // The stream's clock starts with its first *frame*, not with the request that asked for it: the seek
+        // and the first decode cost a second or two, and a model anchored at the request would read as
+        // permanently behind the animation - tripping the drift restart on a stream that is perfectly in step.
+        if (state.footageKind === 'stream' && state.footageAwaitingFirstFrame) {
+          state.footageAwaitingFirstFrame = false;
+          state.footageStartedAt = state.time;
+          state.footageWallAt = performance.now();
+        }
+        if (state.footageError) {
+          state.footageError = false;
+          showFootage();
+        }
+      }
+
+      bindFootage(footage);
+
+      window.addEventListener('pagehide', () => {
+        // The last chance to say goodbye: without it the server would keep this stream decoding until its write
+        // watchdog noticed nobody was reading (or never, if the connection stayed drained).
+        if (state.footageToken) {
+          navigator.sendBeacon(`${state.footageBase}/stop?token=${encodeURIComponent(state.footageToken)}`);
+        }
+      });
 
       window.addEventListener('resize', resize);
       new ResizeObserver(() => resize()).observe(document.body);
@@ -1057,24 +1303,37 @@
         state.events = args.events || [];
         state.momentum = args.momentum || [];
         state.halfMinute = args.half_minute === undefined ? null : args.half_minute;
-        // The clip is cut by Python and served through the media endpoint, so it arrives as a URL plus the
-        // window it covers on the strip's clock. A new URL is a new clip: load it and put it at the right
-        // second, so pressing Generate clip shows the moment the animation is already sitting on.
-        const clipUrl = args.clip_url || '';
-        const clipChanged = clipUrl !== state.clipUrl;
-        state.clipUrl = clipUrl;
-        state.clipStart = args.clip_start_s === undefined || args.clip_start_s === null ? null : Number(args.clip_start_s);
-        state.clipEnd = args.clip_end_s === undefined || args.clip_end_s === null ? null : Number(args.clip_end_s);
-        if (clipChanged) {
-          if (clipUrl) {
-            clip.src = clipUrl;
-            clip.load();
+        // The footage stream's whereabouts: the server's base URL (derived from this page's host and the port
+        // Python hands over, unless ``stream_base`` overrides it for a proxy), the match id, and the offset
+        // between the strip's clock and the recording's. A change re-points the pane.
+        const streamPort = Number(args.stream_port) || 8510;
+        const streamBase = (args.stream_base || '') || `${location.protocol}//${location.hostname}:${streamPort}`;
+        const matchId = args.match_id || '';
+        const streamOffset =
+          args.stream_offset_s === undefined || args.stream_offset_s === null ? 0 : Number(args.stream_offset_s);
+        const sourceChanged =
+          streamBase !== state.footageBase || matchId !== state.matchId || streamOffset !== state.streamOffset;
+        state.footageBase = streamBase;
+        state.matchId = matchId;
+        state.streamOffset = streamOffset;
+        if (sourceChanged) restartFootage();
+        // "Jump to this moment and play": the moment picker beside the pitch sends the strip second to move to
+        // and a sequence number that changes with every request, so a re-press acts again while an unrelated
+        // rerun (a scan's progress bar, a table redraw) does not re-seek.
+        const seekSeq = Number(args.seek_seq || 0);
+        const seekTo = args.seek_to_s === undefined || args.seek_to_s === null ? null : Number(args.seek_to_s);
+        if (seekSeq && seekSeq !== state.seekSeq && seekTo !== null) {
+          if (state.data) {
+            state.time = Math.min(state.data.duration_s, Math.max(0, seekTo));
+            draw();
+            setPlaying(true);
+            restartFootage(); // a seek must land the footage now, not on the next drift check
           } else {
-            clip.removeAttribute('src');
-            clip.load();
+            state.pendingSeek = seekTo; // the payload is still loading; the seek lands when it arrives
           }
         }
-        showClip();
+        state.seekSeq = seekSeq;
+        showFootage();
         const url = args.data_url || '';
         if (url && url !== state.loadedUrl) {
           loadData(url);
@@ -1087,7 +1346,6 @@
           renderLegend();
           draw();
           drawTimeline();
-          syncClip();
         }
         Streamlit.setFrameHeight(document.body.scrollHeight + 6);
       });

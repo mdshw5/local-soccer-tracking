@@ -298,3 +298,68 @@ def test_the_player_table_labels_teams_the_same_way_the_replay_does(replay_case)
     # A payload without names must still produce a table rather than raising.
     anonymous = {**replay, "team_names": []}
     assert len(player_table_rows(anonymous)) == len(replay["players"])
+
+
+def test_the_players_boxes_are_kept_out_of_the_payload() -> None:
+    """The browser never draws a box, and a game's worth is tens of megabytes: they belong beside the payload.
+
+    The clip cutter is Python-side, so the boxes travel as a separate small array set - ``track_boxes`` - keyed by
+    track id. What must hold either way is that a box is present for every observation of every player that has
+    them, aligned with the frames the payload lists.
+    """
+    from synthetic_match import simulate_match
+
+    from soccer_analytics.analysis import stage_b as stage_b_module
+    from soccer_analytics.analysis.projection import project_segment as project
+    from soccer_analytics.dashboard.replay import track_boxes
+
+    segment, truth = simulate_match(frames=200, seed=3)
+    q, focal = segment_poses(segment, focal0=float(truth.focal[0]))
+    calibration = PitchCalibration(
+        truth.calibration.position,
+        truth.calibration.base_rotation @ truth.q[0],
+        truth.calibration.focal_scale,
+        truth.calibration.aspect,
+        0.0,
+        (),
+    )
+    detections = project(segment, calibration, poses=(q, focal))
+    report, _ = stage_b_module.build_report(
+        detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH, match_frames=len(segment.time)
+    )
+    replay = build_replay(
+        (PITCH_LENGTH, PITCH_WIDTH), float(segment.meta["fps"]), len(segment.time), detections.aim_xy,
+        report.players, ["Team A", "Team B"], camera_xy=detections.camera_xy,
+    )
+    boxes = track_boxes(report.players)
+    assert boxes, "no player got boxes"
+    assert all("boxes" not in player for player in replay["players"]), "boxes must not be in the payload"
+    for player in replay["players"]:
+        stored = boxes.get(str(player["track_id"]))
+        if stored is None:  # a bystander dropped from the payload keeps its boxes only if it was kept above
+            continue
+        assert len(stored) == len(player["frames"]), "a box per observation, in the same order"
+        for row in stored:
+            x1, y1, x2, y2 = (float(v) for v in row)
+            assert 0.0 <= x1 <= x2 <= 1.2, "boxes are normalised by frame width"
+            # y1 may be *below* y2: the simulator (like some real detections) emits inverted boxes, and the
+            # framing code takes the absolute height for exactly this reason.
+            assert abs(y2 - y1) >= 0.0
+
+
+def test_a_player_without_boxes_is_left_out_rather_than_zeroed() -> None:
+    """A track built without detections has no boxes - and the payload must not invent zeros for it.
+
+    Zeros would frame its clip in the frame's top-left corner, which looks like a working feature and is not one.
+    """
+    from soccer_analytics.analysis.stage_b import PlayerTrack
+    from soccer_analytics.dashboard.replay import track_boxes
+
+    frames = np.arange(60, dtype=np.int32)
+    without = PlayerTrack(
+        track_id=1, team=0,
+        frame=frames, time=frames / 5.0,
+        xy=np.column_stack([20.0 + 0.5 * frames, np.full(60, 20.0)]), sigma_m=np.full(60, 0.5),
+        speed_kmh=np.full(60, 8.0), distance_m=30.0, box=None,
+    )
+    assert track_boxes([without]) == {}

@@ -34,6 +34,10 @@ class PitchDetections:
     sigma_m: np.ndarray  # (D,) ground uncertainty of this position (m); inf where invalid
     valid: np.ndarray  # (D,) bool: foot ray hits the ground and the camera state was trustworthy
     height_px: np.ndarray  # (D,) box height, pixels at 1920 wide
+    # (D, 4) the detection's own box, ``(x1, y1, x2, y2)`` normalised by frame width. The pitch position is where
+    # the player stands; this is where they *are in the picture*, which is what a clip cropped around them has to
+    # follow - so it travels with the detections instead of being looked up again from the segment by every caller.
+    box: np.ndarray
     conf: np.ndarray  # (D,)
     kit: np.ndarray  # (D, K)
     # (D,) Stage A's BoT-SORT identity per detection, -1 where the tracker had none (v1 chunks, or a detection
@@ -121,6 +125,7 @@ def project_segment(
         sigma_m=sigma,
         valid=valid,
         height_px=(boxes[:, 3] - boxes[:, 1]) * 1920.0,
+        box=boxes.copy(),
         conf=segment.det_conf,
         kit=segment.det_kit,
         det_track=getattr(segment, "det_track", np.full(n, -1, dtype=np.int32)),

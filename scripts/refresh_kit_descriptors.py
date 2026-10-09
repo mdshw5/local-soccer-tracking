@@ -12,6 +12,9 @@ confidences - is copied through untouched, and the write is atomic (temp file + 
 leaves the segment exactly as it was and a re-run continues from the first chunk not yet refreshed.
 
 Resuming is implicit and recorded in ``kit_refresh.json``: a chunk is only marked done after its file is replaced.
+Progress only counts against the *same descriptor code* that produced it (a hash of the descriptor and the
+grass-window estimator rides in the status): when the masking changes, a re-run re-reads every chunk instead of
+trusting descriptors that the current code would never write.
 
 Usage::
 
@@ -21,6 +24,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -58,15 +62,37 @@ def _publish(path: Path, **changes) -> None:
     os.replace(tmp, path)
 
 
-def _done_chunks(status_path: Path, total_chunks: int) -> int:
+def _code_fingerprint() -> str:
+    """A hash of the code that computes a descriptor: the descriptor itself and the grass-window estimator it
+    masks with.
+
+    Saved beside the progress so that chunks refreshed by an older masking are re-read instead of trusted.
+    Measured on the real 2026-10-03 game: the masking changed after a refresh had completed, every stored
+    descriptor on disk was stale, and the status still said "done" - so a plain re-run skipped the whole segment
+    and the pipeline quietly kept reading the old descriptors. The fingerprint makes that failure impossible to
+    repeat: progress only counts against the exact code that produced it.
+    """
+    from soccer_analytics.analysis import kit as kit_module
+    from soccer_analytics.tracking import team_classifier
+
+    digest = hashlib.sha256()
+    for module in (kit_module, team_classifier):
+        digest.update(Path(module.__file__).read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def _done_chunks(status_path: Path, total_chunks: int, fingerprint: str) -> int:
     """How many chunks an interrupted run had already rewritten, so a re-run resumes instead of repeating.
 
     Only trusted for a run that got far enough to be trustworthy: a status still saying "running" is assumed
     complete up to its own count (the alternative - re-reading them - is merely slower, never wrong), while a run
-    that ended in "error" is trusted only up to the count it had reached when it failed.
+    that ended in "error" is trusted only up to the count it had reached when it failed. A status written by
+    different descriptor code is trusted for nothing: its chunks were refreshed for a masking that no longer
+    exists, and re-reading them is the only way the segment describes the pipeline that is about to read it.
     """
     status = _status(status_path)
-    if not status:
+    if not status or status.get("kit_code_hash") != fingerprint:
         return 0
     return max(0, min(int(status.get("chunks_done") or 0), total_chunks))
 
@@ -94,8 +120,10 @@ def refresh(segment_dir: Path, limit_chunks: int = 0) -> dict:
     changed = 0
     # Chunks a previous run already refreshed are counted, not re-read: re-decoding them would change nothing
     # (the pass is idempotent) and would cost the same minutes again. The count of *what changed* is reset,
-    # because it describes this run's edits, not the segment's history.
-    already = _done_chunks(status_path, total_chunks)
+    # because it describes this run's edits, not the segment's history. Progress only counts against the code
+    # that produced it (see `_code_fingerprint`); a status from a different masking restarts at chunk 0.
+    code_hash = _code_fingerprint()
+    already = _done_chunks(status_path, total_chunks, code_hash)
     started = time.monotonic()
     # One sequential pass over the footage: the chunks are contiguous frame ranges, so the reader is positioned
     # once per chunk (at that chunk's first frame) and read forward, rather than seeking per frame.
@@ -111,7 +139,7 @@ def refresh(segment_dir: Path, limit_chunks: int = 0) -> dict:
         times = rows["time"]
         if len(times) == 0:
             _publish(status_path, state="running", chunks_done=index + 1, total_chunks=total_chunks,
-                     descriptors_changed=changed, progress=(index + 1) / total_chunks)
+                     descriptors_changed=changed, progress=(index + 1) / total_chunks, kit_code_hash=code_hash)
             done += 1
             continue
         chunk_start = float(times[0])
@@ -161,6 +189,7 @@ def refresh(segment_dir: Path, limit_chunks: int = 0) -> dict:
             descriptors_changed=changed,
             progress=(index + 1) / total_chunks,
             chunks_per_min=60.0 * done / elapsed,
+            kit_code_hash=code_hash,
         )
         print(
             f"chunk {index + 1}/{total_chunks} refreshed ({len(rows['det_frame'])} detections, "
@@ -173,6 +202,7 @@ def refresh(segment_dir: Path, limit_chunks: int = 0) -> dict:
         "chunks_done": done,
         "total_chunks": total_chunks,
         "descriptors_changed": changed,
+        "kit_code_hash": code_hash,
         "updated": time.time(),
     }
     _publish(status_path, **final)

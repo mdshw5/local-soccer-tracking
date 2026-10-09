@@ -179,6 +179,9 @@ def test_the_status_file_says_what_happened_and_where(analysed: Path) -> None:
     assert status["chunks_done"] == status["total_chunks"]
     assert status["descriptors_changed"] >= 0
     assert status["updated"] > 0
+    assert status["kit_code_hash"] == module._code_fingerprint(), (
+        "the status must name the descriptor code that wrote the chunks"
+    )
     assert "error" not in status, "a finished run must not still carry the error of an earlier failed one"
 
 
@@ -237,6 +240,44 @@ def test_the_chunk_times_are_read_as_absolute_source_times(analysed: Path, monke
         f"the reader was pointed at {seeks[0]:.1f}s but the chunk starts at {chunk_start:.1f}s - a doubled "
         "offset walks off the end of the video"
     )
+
+
+def test_the_done_count_is_only_trusted_for_the_same_descriptor_code(tmp_path: Path) -> None:
+    """Progress written by other descriptor code is worth nothing: those chunks were refreshed for a masking
+    that no longer exists, and trusting them leaves the fix on disk unapplied."""
+    module = _script()
+    status_path = tmp_path / module.STATUS_FILE
+    status_path.write_text(json.dumps({"chunks_done": 7, "kit_code_hash": "aaaa"}))
+
+    assert module._done_chunks(status_path, 10, "aaaa") == 7
+    assert module._done_chunks(status_path, 10, "bbbb") == 0
+    assert module._done_chunks(status_path, 5, "aaaa") == 5, "the count must be capped at the chunks that exist"
+    assert module._done_chunks(tmp_path / "missing.json", 10, "aaaa") == 0
+
+
+def test_a_status_from_older_code_forces_the_chunks_to_be_re_read(analysed: Path) -> None:
+    """The whole point of the fingerprint, end to end: stale descriptors on disk must be recomputed, not skipped.
+
+    Measured on the real 2026-10-03 game: the previous refresh said "done" while every stored descriptor had
+    been written by masking that the current code no longer uses. This is that situation, staged: the chunks are
+    blanked, the status claims they are fresh, and only the mismatching hash can reveal otherwise.
+    """
+    module = _script()
+    module.refresh(analysed)
+    chunk = sorted(analysed.glob("chunk_*.npz"))[0]
+    with np.load(chunk) as data:
+        rows = {key: data[key] for key in data.files}
+    # A descriptor no current code would write: a mid-grey "kit" on boxes whose crops are too small to read.
+    rows["det_kit"] = np.full_like(rows["det_kit"], 0.5)
+    np.savez_compressed(chunk, **rows)
+    status_path = analysed / module.STATUS_FILE
+    status = json.loads(status_path.read_text())
+    status["kit_code_hash"] = "not-the-current-code"
+    status_path.write_text(json.dumps(status))
+
+    result = module.refresh(analysed, limit_chunks=1)
+
+    assert result["descriptors_changed"] > 0, "a stale status must not skip the re-read"
 
 
 def test_a_previous_runs_error_is_cleared_by_the_run_that_succeeds(analysed: Path, tmp_path: Path) -> None:

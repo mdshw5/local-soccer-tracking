@@ -20,6 +20,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from soccer_analytics.analysis.events import EventLog
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration
 
@@ -166,11 +168,26 @@ class MatchLibrary:
         path = self.path(match_id) / "report.json"
         return json.loads(path.read_text()) if path.exists() else None
 
-    def save_replay(self, match_id: str, payload: dict) -> Path:
-        """Per-frame track data for the animated pitch view (fetched by the browser as a media file)."""
+    def save_replay(self, match_id: str, payload: dict, boxes: dict | None = None) -> Path:
+        """Per-frame track data for the animated pitch view (fetched by the browser as a media file).
+
+        ``boxes`` - each track's own image boxes, ``{track_id: (N, 4)}`` - are written beside it as an ``npz``
+        instead of inside the payload: the browser never draws them, and a whole game's worth is tens of megabytes
+        of JSON that every view of the match would download. The centred-clip cutter reads them from here.
+        """
         path = self.path(match_id) / "replay.json"
         _atomic_write(path, payload)
+        if boxes is not None:
+            np.savez_compressed(self.path(match_id) / "boxes.npz", **boxes)
         return path
+
+    def load_replay_boxes(self, match_id: str) -> dict:
+        """``{track_id: (N, 4)}`` boxes for the replay's tracks; {} when the report predates them."""
+        path = self.path(match_id) / "boxes.npz"
+        if not path.exists():
+            return {}
+        with np.load(path) as data:
+            return {key: data[key] for key in data.files}
 
     def load_replay(self, match_id: str) -> dict | None:
         path = self.path(match_id) / "replay.json"
@@ -208,6 +225,12 @@ class MatchLibrary:
         """Progress of the background whistle scan: {} until it has ever run."""
         path = self.path(match_id) / "audio_scan.json"
         return json.loads(path.read_text()) if path.exists() else {}
+
+    def identities_dir(self, match_id: str) -> Path:
+        """Where a still of each appearance is kept, so recognising who a track is costs one seek and no scan."""
+        path = self.path(match_id) / "identities"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def events(self, match_id: str) -> EventLog:
         return EventLog.load(self.path(match_id) / "events.json")

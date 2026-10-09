@@ -32,6 +32,7 @@ def _detections(rows: list[tuple[int, float, float, list[float]]]) -> PitchDetec
         sigma_m=np.full(n, 0.3),
         valid=np.ones(n, dtype=bool),
         height_px=np.full(n, 200.0),
+        box=np.full((n, 4), 0.25),
         conf=np.full(n, 0.9),
         kit=kit,
         det_track=np.full(n, -1, dtype=np.int32),
