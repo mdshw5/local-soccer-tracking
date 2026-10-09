@@ -1698,11 +1698,17 @@ def replay_section(
         _jersey_scan_status(library, match_id, watch_key=f"jersey_watch::{match_id}")
 
         def _start_scan() -> None:
+            # The scan decodes at the SEGMENT's clock - the clock of the video the segment was built from, which
+            # is not necessarily whatever the picker holds. One raw clip of a combined game keeps its own shorter
+            # clock, and decoding it at game-clock offsets reads the wrong film entirely. So the segment's own
+            # video wins when it is still reachable; the picker is only the fallback.
+            segment_video = str(segment.meta.get("video") or "") if segment is not None else ""
+            scan_video = segment_video if segment_video and Path(segment_video).exists() else video
             command = [
                 sys.executable,
                 str(REPO_ROOT / "scripts" / "extract_jerseys.py"),
                 "--match", match_id,
-                "--video", video,
+                "--video", scan_video,
                 "--segment", str(segment_dir),
             ]
             subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

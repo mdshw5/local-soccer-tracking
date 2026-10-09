@@ -18,6 +18,9 @@ TORSO_TOP = 0.14
 TORSO_BOTTOM = 0.62
 # A crop smaller than this at the analysed resolution cannot contain a readable number; skip it upstream.
 MIN_CROP_HEIGHT_PX = 20
+# Readings that must agree before a track is reported. The scan uses this to skip tracks that cannot possibly
+# reach the quorum (fewer usable crops than readings needed).
+MIN_VOTES = 3
 
 
 @dataclass(frozen=True)
@@ -63,15 +66,23 @@ def sanitize_digits(text: str) -> str:
 def aggregate_candidates(
     candidates: dict[int, list[JerseyCandidate]],
     *,
-    min_votes: int = 3,
+    min_votes: int = MIN_VOTES,
     min_confidence: float = 0.40,
     min_share: float = 0.5,
 ) -> dict[int, dict]:
     """Vote the readings of each track into one number, or leave the track unassigned.
 
-    A number is only reported when readings agree: at least ``min_votes`` readings back it, they are at least
-    ``min_share`` of the track's valid readings, and their mean confidence clears ``min_confidence``. A track whose
-    readings scatter (two-digit numbers are easily half-read) stays unassigned rather than wearing a guess.
+    Three acceptance routes, each requiring the winning digits' *mean confidence* to clear its threshold - a
+    cheap reading is not evidence, however many times it repeats:
+
+    * majority (the default): at least ``min_votes`` readings and at least ``min_share`` of the valid readings.
+    * strong minority: at least ``min_votes`` readings at >= 0.75 confidence and >= 40% of the valid readings.
+      A clean reading moment is short, and junk crops (hands, folds, half-turned backs) can outnumber it even
+      when the footage is unambiguous: track 9238 read "22" three times at ~1.0 confidence among four junk
+      readings (3/7) and a plain majority rule loses it.
+    * unanimous pair: exactly two readings that agree, both at >= 0.90 mean confidence. Some tracks offer a
+      single clear moment of two crops (track 928: "14" twice at 0.98/1.00; track 1373: "5" twice at 1.00);
+      demanding a third reading there buys no more certainty, it only loses the number.
     """
     out: dict[int, dict] = {}
     for track_id, items in candidates.items():
@@ -84,11 +95,15 @@ def aggregate_candidates(
         winner, winner_items = max(by_digits.items(), key=lambda pair: (len(pair[1]), sum(i.confidence for i in pair[1])))
         mean_confidence = float(np.mean([item.confidence for item in winner_items]))
         share = len(winner_items) / len(readings)
-        if len(winner_items) < min_votes or share < min_share or mean_confidence < min_confidence:
+        votes = len(winner_items)
+        majority = votes >= min_votes and share >= min_share and mean_confidence >= min_confidence
+        minority = votes >= min_votes and share >= 0.4 and mean_confidence >= 0.75
+        pair = votes == 2 and share == 1.0 and mean_confidence >= 0.90
+        if not (majority or minority or pair):
             continue
         out[int(track_id)] = {
             "number": int(winner),
-            "votes": len(winner_items),
+            "votes": votes,
             "readings": len(readings),
             "confidence": round(mean_confidence, 2),
         }

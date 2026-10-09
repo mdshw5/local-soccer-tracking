@@ -62,7 +62,22 @@ def test_aggregate_rejects_a_scattered_track() -> None:
 
 def test_aggregate_rejects_low_confidence_and_small_samples() -> None:
     assert aggregate_candidates({5: [_candidate("10", 0.2)] * 6}) == {}, "confident agreement, but not confident"
-    assert aggregate_candidates({6: [_candidate("10", 0.9)] * 2}) == {}, "two readings are not a vote"
+    assert aggregate_candidates({6: [_candidate("10", 0.7)] * 2}) == {}, "two middling readings are not a vote"
+
+
+def test_aggregate_accepts_a_unanimous_high_confidence_pair() -> None:
+    # Measured on the real game: track 928 read "14" twice at 0.98/1.00 across its only two clear crops, and a
+    # three-vote quorum lost a number the footage shows plainly.
+    out = aggregate_candidates({928: [_candidate("14", 0.98), _candidate("14", 1.0)]})
+    assert out[928]["number"] == 14 and out[928]["votes"] == 2
+
+
+def test_aggregate_accepts_a_strong_minority() -> None:
+    # Measured on the real game: track 9238 read "22" three times at ~1.0 confidence among four junk readings
+    # (24s and a 12), 3/7 of the crops - below the majority share, but the reading itself is unambiguous.
+    readings = [_candidate("22", 1.0)] * 2 + [_candidate("24", 0.8)] * 2 + [_candidate("12", 0.3), _candidate("22", 0.95), _candidate("4", 1.0)]
+    out = aggregate_candidates({9238: readings})
+    assert out[9238]["number"] == 22 and out[9238]["votes"] == 3
 
 
 def test_manual_entries_beat_the_scan() -> None:
