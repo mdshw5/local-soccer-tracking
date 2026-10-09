@@ -160,6 +160,50 @@
         color: #9ca3af;
         font-size: 14px;
       }
+      /* The tag bar sits directly under the pitch and the footage: a tag is stamped with the playback's own second
+         at the moment the button is pressed, so tagging while watching cannot land on the wrong moment. */
+      #tag-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 0 2px;
+      }
+      #tag-bar .tag-title {
+        color: #9ca3af;
+        font-size: 12px;
+      }
+      #tag-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      #tag-bar button {
+        background: #1f2937;
+        color: white;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        padding: 3px 9px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      #tag-bar button:hover {
+        border-color: #6b7280;
+      }
+      #tag-note {
+        background: #1f2937;
+        color: white;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        padding: 4px 6px;
+        font-size: 13px;
+        flex: 1 1 130px;
+        min-width: 110px;
+      }
+      #tag-status {
+        color: #9ca3af;
+        font-size: 12px;
+      }
     </style>
   </head>
   <body>
@@ -221,6 +265,16 @@
         <div id="footage-note"></div>
       </div>
     </div>
+    <!-- Quick tags: the buttons stamp the event on the second being watched, so a goal, shot, tackle or anything
+         else is tagged while it is on screen rather than remembered and typed in later. The tag goes to Python
+         (which stores it in the match's event log); the strip draws it faded until the store is confirmed. -->
+    <div id="tag-bar">
+      <span class="tag-title">tag this moment:</span>
+      <select id="tag-team" title="Which team the event belongs to"></select>
+      <span id="tag-buttons"></span>
+      <input id="tag-note" type="text" placeholder="note (optional)" maxlength="200" />
+      <span id="tag-status"></span>
+    </div>
     <div id="timeline" title="Click to jump to that moment">
       <canvas id="tl"></canvas>
     </div>
@@ -238,6 +292,14 @@
       const Streamlit = {
         RENDER_EVENT: 'streamlit:render',
         events: new EventTarget(),
+        setComponentValue(value) {
+          // Only the tag buttons use this. Playback never round-trips to Python: a value per frame would re-render
+          // the whole page per frame, which is exactly what this component exists to avoid.
+          window.parent.postMessage(
+            {isStreamlitMessage: true, type: 'streamlit:setComponentValue', value},
+            '*'
+          );
+        },
         setFrameHeight(height) {
           window.parent.postMessage(
             {isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: height || document.body.scrollHeight},
@@ -327,6 +389,11 @@
         footageStillTimer: null,
         seekSeq: 0, // the last seek request acted on (from Python's moment buttons)
         pendingSeek: null, // a seek that arrived before the replay payload finished loading
+        // Quick tags: every press gets a sequence number so Python can acknowledge exactly what it has stored,
+        // and the pending list keeps the markers on the strip until that acknowledgement comes back.
+        tagSeq: 0,
+        pendingTags: [],
+        tagTeamValue: '-1',
       };
 
       const canvas = document.getElementById('canvas');
@@ -346,6 +413,10 @@
       const footageVideo = document.getElementById('footage-video');
       const footageEmpty = document.getElementById('footage-empty');
       const footageNote = document.getElementById('footage-note');
+      const tagTeam = document.getElementById('tag-team');
+      const tagButtons = document.getElementById('tag-buttons');
+      const tagNote = document.getElementById('tag-note');
+      const tagStatus = document.getElementById('tag-status');
 
       function detectedKit(team) {
         const entry = team >= 0 ? (state.data.team_colours || [])[team] : null;
@@ -759,6 +830,75 @@
         return EVENT_COLOURS[type] || EVENT_COLOURS.other;
       }
 
+      // ---------------------------------------------------------------------------------------------------
+      // Quick tags.
+      //
+      // The tag bar under the pitch stamps an event with the second being watched *at the moment of the press*:
+      // waiting for a round trip to Python before reading the clock would land the tag wherever playback got to
+      // meanwhile. Python stores the tag in the match's event log and acknowledges by the sequence number, so a
+      // press is never lost to a slow rerun and never stored twice. The vocabulary and the colours match the
+      // timeline strip's, so a button, its marker and its table row read as one thing.
+      // ---------------------------------------------------------------------------------------------------
+      const TAG_TYPES = [
+        'goal',
+        'shot',
+        'save',
+        'block',
+        'corner',
+        'penalty',
+        'clearance',
+        'tackle',
+        'foul',
+        'substitution',
+        'other',
+      ];
+      let tagTeamNames = '';
+
+      function buildTagBar() {
+        for (const type of TAG_TYPES) {
+          const button = document.createElement('button');
+          button.textContent = type.charAt(0).toUpperCase() + type.slice(1);
+          button.title = `Tag a ${type} at the second being watched`;
+          button.style.borderLeft = `3px solid ${eventColour(type)}`;
+          button.addEventListener('click', () => sendTag(type));
+          tagButtons.appendChild(button);
+        }
+        tagTeam.addEventListener('change', () => {
+          state.tagTeamValue = tagTeam.value;
+        });
+      }
+
+      function renderTagTeam(names) {
+        // Rebuild only when the names change: rebuilding on every render would fight the user's own selection.
+        const label = JSON.stringify((names || []).slice(0, 2));
+        if (label === tagTeamNames) return;
+        tagTeamNames = label;
+        const chosen = state.tagTeamValue;
+        tagTeam.innerHTML =
+          '<option value="-1">unspecified</option>' +
+          (names || [])
+            .slice(0, 2)
+            .map((name, index) => `<option value="${index}">${name}</option>`)
+            .join('');
+        tagTeam.value = chosen;
+      }
+
+      function sendTag(type) {
+        if (!state.data) return;
+        const tag = {
+          seq: ++state.tagSeq,
+          type: type,
+          team: tagTeam.value === '' ? -1 : Number(tagTeam.value),
+          time_s: Math.min(state.data.duration_s, Math.max(0, state.time)),
+          note: tagNote.value.trim(),
+        };
+        state.pendingTags.push(tag);
+        tagNote.value = '';
+        tagStatus.textContent = `Tagged ${type} at ${clockText(tag.time_s)}`;
+        drawTimeline(); // the marker shows now, faded, and solidifies when the store is acknowledged
+        Streamlit.setComponentValue({action: 'tag', tags: state.pendingTags.slice()});
+      }
+
       function drawTimeline() {
         if (!state.data) return;
         const dpr = window.devicePixelRatio || 1;
@@ -852,6 +992,25 @@
         tlCtx.moveTo(headX, 0);
         tlCtx.lineTo(headX, TL_HEIGHT);
         tlCtx.stroke();
+
+        // tags still on their way to Python: drawn faded from the press, replaced by the stored marker when the
+        // store is acknowledged, so the button gives feedback in the same frame it is pressed.
+        for (const tag of state.pendingTags || []) {
+          const x = xOf(tag.time_s);
+          const colour = eventColour(tag.type);
+          tlCtx.globalAlpha = 0.45;
+          tlCtx.strokeStyle = colour;
+          tlCtx.lineWidth = 1;
+          tlCtx.beginPath();
+          tlCtx.moveTo(x, midY - amp - 4);
+          tlCtx.lineTo(x, midY + amp + 4);
+          tlCtx.stroke();
+          tlCtx.beginPath();
+          tlCtx.arc(x, midY, 4.5, 0, Math.PI * 2);
+          tlCtx.fillStyle = colour;
+          tlCtx.fill();
+          tlCtx.globalAlpha = 1;
+        }
       }
 
       function setPlaying(playing) {
@@ -1216,6 +1375,7 @@
             : '');
       }
 
+      buildTagBar();
       playBtn.addEventListener('click', () => setPlaying(!state.playing));
       resyncFootageBtn.addEventListener('click', () => {
         // Restart the stream at the animation's own second - the way back into step after a stall - and re-couple
@@ -1374,6 +1534,14 @@
         state.events = args.events || [];
         state.momentum = args.momentum || [];
         state.halfMinute = args.half_minute === undefined ? null : args.half_minute;
+        // Tags Python has already stored, acknowledged by sequence: anything up to the acknowledgement is on the
+        // strip as a real marker (it came with ``args.events``), so the faded pending copy is dropped. The team
+        // names are the same list the legend uses, offered beside the buttons so a tag carries its team.
+        const ackTagSeq = Number(args.ack_tag_seq || 0);
+        if (ackTagSeq > 0) {
+          state.pendingTags = state.pendingTags.filter((tag) => tag.seq > ackTagSeq);
+        }
+        renderTagTeam(args.team_names);
         // The footage stream's whereabouts: the server's base URL (derived from this page's host and the port
         // Python hands over, unless ``stream_base`` overrides it for a proxy), the match id, and the offset
         // between the strip's clock and the recording's. A change re-points the pane.

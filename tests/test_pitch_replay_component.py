@@ -2,6 +2,8 @@
 
 Like the annotation component, this is a static frontend read as a file. The checks exist because the interesting
 property is easy to lose: a playback control that round-trips to Python would re-render the whole page per frame.
+The one deliberate exception is the tag bar: a tag press is a discrete gesture whose whole point is to be stored,
+so it posts one value - with the playback's own second - and nothing else does.
 """
 
 from __future__ import annotations
@@ -21,8 +23,33 @@ COMPONENT = (
 def test_playback_controls_exist_and_run_locally() -> None:
     html = COMPONENT.read_text()
     assert 'id="play"' in html and 'id="scrub"' in html and "requestAnimationFrame" in html
-    # A play/pause or scrub must not talk to Python: no component value is ever set.
-    assert "setComponentValue" not in html
+    # Play/pause, stepping and scrubbing must not talk to Python: a component value per gesture (let alone per
+    # frame) would re-render the whole page. The one exception is a tag press, which is exactly the gesture that
+    # *should* be stored in the match's event log - so the single round trip in the file must sit in ``sendTag``.
+    assert html.count("Streamlit.setComponentValue(") == 1, "only the tag press may round-trip to Python"
+    assert html.index("Streamlit.setComponentValue(") > html.index("function sendTag(")
+
+
+def test_the_tag_bar_offers_every_event_type_on_the_playback_second() -> None:
+    """The quick-tag buttons are the only thing that talks to Python, one press at a time.
+
+    Each press posts the event type with the playback's own second *at the press* - reading the clock after the
+    round trip would land the tag wherever playback got to meanwhile - and unacknowledged presses ride along in
+    ``pendingTags``, so a slow rerun can neither drop a press nor cause it to be stored twice.
+    """
+    from soccer_analytics.analysis.events import EVENT_TYPES
+
+    html = COMPONENT.read_text()
+    assert 'id="tag-bar"' in html and 'id="tag-buttons"' in html and 'id="tag-team"' in html
+    tag_types_block = html.split("const TAG_TYPES = [", 1)[1].split("];", 1)[0]
+    for event_type in EVENT_TYPES:
+        assert f"'{event_type}'" in tag_types_block, f"the tag bar has no button for {event_type}"
+    send_tag = html.split("function sendTag(", 1)[1]
+    assert "state.time" in send_tag, "the tag must be stamped with the playback's own second"
+    assert "Math.min(state.data.duration_s" in send_tag, "a tag before a payload has loaded must not be sent"
+    assert "pendingTags" in send_tag, "unacknowledged presses must ride along with the next one"
+    assert "args.ack_tag_seq" in html, "the acknowledgement is what clears a stored press"
+    assert "state.pendingTags = state.pendingTags.filter" in html
 
 
 def test_the_component_fetches_the_replay_by_url() -> None:

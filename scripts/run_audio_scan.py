@@ -149,6 +149,7 @@ def scan(
             stage="done",
             progress=1.0,
             message="Done",
+            video=str(video),
             minutes=samples.size / max(1, rate) / 60.0,
             found=len(whistles),
             added=added,

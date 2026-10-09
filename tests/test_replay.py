@@ -11,7 +11,7 @@ import pytest
 
 from soccer_analytics.analysis import stage_b
 from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
-from soccer_analytics.dashboard.replay import build_replay, player_table_rows
+from soccer_analytics.dashboard.replay import build_replay, event_from_tag, player_table_rows
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration, pitch_to_pixels
 from synthetic_match import PITCH_LENGTH, PITCH_WIDTH, simulate_match
 
@@ -363,3 +363,38 @@ def test_a_player_without_boxes_is_left_out_rather_than_zeroed() -> None:
         speed_kmh=np.full(60, 8.0), distance_m=30.0, box=None,
     )
     assert track_boxes([without]) == {}
+
+
+def test_a_quick_tag_lands_on_the_recordings_clock() -> None:
+    """The tag bar sends the strip's clock (0 at the first analysed frame); events store the recording's own
+    seconds. The window's start is added back here, once, for every tag - the same translation the strip, the
+    table and the reel cutter apply in reverse when they read it.
+
+    Getting this wrong is the classic bug in this codebase (three clocks: the clip, the combined game, and the
+    analysed window), and a tag made while watching is otherwise indistinguishable from one typed in by hand.
+    """
+    event = event_from_tag(
+        {"type": "goal", "team": 0, "time_s": 12.5, "note": "  header  "},
+        video="/videos/match.mp4",
+        window_start=540.0,
+        duration_s=600.0,
+    )
+    assert event.time_s == pytest.approx(552.5)
+    assert event.type == "goal" and event.team == 0
+    assert event.note == "header", "the note is trimmed"
+    assert event.video == "/videos/match.mp4"
+    assert event.source == "manual"
+
+
+def test_a_quick_tag_is_clamped_to_the_window_and_rejects_unknown_types() -> None:
+    """A stale component value must never store a tag off the end of the match."""
+    late = event_from_tag(
+        {"type": "shot", "time_s": 9999.0}, video="v.mp4", window_start=10.0, duration_s=60.0
+    )
+    assert late.time_s == pytest.approx(70.0)
+    early = event_from_tag(
+        {"type": "shot", "time_s": -5.0}, video="v.mp4", window_start=10.0, duration_s=60.0
+    )
+    assert early.time_s == pytest.approx(10.0)
+    with pytest.raises(ValueError):
+        event_from_tag({"type": "wobble"}, video="v.mp4", window_start=0.0, duration_s=60.0)

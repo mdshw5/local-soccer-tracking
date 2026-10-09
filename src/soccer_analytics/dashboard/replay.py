@@ -17,6 +17,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
+from soccer_analytics.analysis.events import EVENT_TYPES, Event
 from soccer_analytics.analysis.stage_b import PlayerTrack
 from soccer_analytics.dashboard.reports import team_name
 
@@ -67,6 +68,30 @@ def _is_bystander(track: PlayerTrack) -> bool:
 
 def _round(value: float) -> float:
     return float(round(float(value), 1))
+
+
+def event_from_tag(tag: dict, *, video: str, window_start: float, duration_s: float) -> Event:
+    """A manual tag from the playback's tag bar, as an ``Event`` on the recording's own clock.
+
+    The tag bar sends the strip's own second (0 at the first analysed frame), because that is the clock the
+    playback shows. Events are stored with seconds of the *recording* they were made against - the clock every
+    reader (the table, the strip, the reel cutter) translates back through the game manifest - so the analysed
+    window's start is added back here, once, for every tag from the page.
+
+    Raises ``ValueError`` for an event type outside :data:`EVENT_TYPES`; the time is clamped into the analysed
+    window, so a tag arriving from a stale component value can never be stored off the end of the match.
+    """
+    tag_type = str(tag.get("type") or "")
+    if tag_type not in EVENT_TYPES:
+        raise ValueError(f"unknown event type {tag_type!r}; expected one of {EVENT_TYPES}")
+    strip_s = min(max(float(tag.get("time_s") or 0.0), 0.0), max(0.0, float(duration_s)))
+    return Event(
+        time_s=float(window_start) + strip_s,
+        type=tag_type,
+        team=int(tag.get("team", -1)),
+        note=str(tag.get("note") or "").strip()[:200],
+        video=str(video),
+    )
 
 
 def _kit_colour(entry: Sequence[int] | None) -> list[int] | None:

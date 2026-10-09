@@ -86,11 +86,18 @@ The dashboard walks through four steps in order, and every step stores its resul
    reveals it is the clicks disagreeing with each other.
 3. **Build the report.** Project detections to the pitch, track players across frames, split them into two teams from
    their kit colours, and compute distances, speeds, territory and a momentum chart. This step takes seconds, so you
-   can re-run it after re-clicking landmarks without touching the video again.
-4. **Tag events and cut highlights.** Whistles are detected in the audio track and offered as candidates; goals,
-   shots, corners, penalties, clearances and tackles are inferred from the ball scan and the player tracks (press
-   *Detect events* once the report and the ball scan exist); saves and blocks are tagged by hand. Reels are then cut
-   in three tiers: `clip` (15-30 s), `goals` (1-2 min) and `match` (up to 5 min).
+   can re-run it after re-clicking landmarks without touching the video again. **Build report + run all detections**
+   does the same and then everything else in the background: the ball scan, the whistle scan and the shirt-number
+   scan, the event detectors over what they find, and a final report + replay rebuild - one press for a full report.
+   Every stage skips or resumes finished work, so a long ball scan can be left running.
+4. **Watch, tag and cut highlights.** Tag buttons sit under the pitch and the footage (Goal, Shot, Save, Tackle,
+   Foul, Corner, Penalty, Block, Clearance, Substitution, Other, with a team picker and an optional note): a press
+   stamps the event on the playback's own second, so tagging happens while the moment is on screen. Whistles are
+   detected in the audio track and offered as candidates; goals, shots, corners, penalties, clearances and tackles
+   are inferred from the ball scan and the player tracks (*Detect events*, or the one-press build above); saves and
+   blocks are tagged by hand. The review queue, the scan controls and the reels sit directly under the playback,
+   so watching, tagging, reviewing and exporting never leave the game. Reels are cut in three tiers: `clip`
+   (15-30 s), `goals` (1-2 min) and `match` (up to 5 min).
 
    The event detectors are conservative and every one of them says in its note what it measured, because a wrong
    event on the timeline is worse than a missing one. A **goal** needs the ball to reach a goal mouth moving in

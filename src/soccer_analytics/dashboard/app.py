@@ -7,9 +7,12 @@ Workflow, in the order it appears on screen:
 2. **Register the pitch** - click landmarks in a reference frame; the camera's motion is already known, so this
    calibrates position and orientation and reports how well it fits, per landmark.
 3. **Build the report** - cheap and re-runnable: pitch-space tracking, teams, distances, momentum, and the
-   separately-scanned ball track when one has run.
-4. **Tag events and cut highlights** - whistle candidates from the audio, manual tags for goals/shots/saves, and the
-   three highlight tiers.
+   separately-scanned ball track when one has run. One press of "Build report + run all detections" also starts
+   the ball, whistle and shirt-number scans in the background, infers the detectable events and rebuilds the
+   replay with everything the scans found.
+4. **Watch, tag and cut highlights** - the playback's own tag buttons stamp an event on the current second, and
+   the review queue, the detectors' settings and the highlight reels sit directly under the pitch, so tagging
+   happens while the game is on screen rather than in a section of its own further down the page.
 
 Every number on the page is either measured or explicitly labelled as a guess or a manual tag. Where a metric is
 beyond what the footage (and the scans built on it) can honestly support, the page says so rather than inventing one.
@@ -41,10 +44,8 @@ if str(SRC_ROOT) not in sys.path:
 from soccer_analytics.analysis import game as game_lib
 from soccer_analytics.analysis import identity as identity_lib
 from soccer_analytics.analysis import stage_a, stage_b
-from soccer_analytics.analysis import event_detection
-from soccer_analytics.analysis.event_detection import detect_events
+from soccer_analytics.analysis import detect_run
 from soccer_analytics.analysis.events import (
-    EVENT_TYPES,
     MIN_PROMINENCE,
     VERDICT_FALSE,
     VERDICT_TRUE,
@@ -52,16 +53,11 @@ from soccer_analytics.analysis.events import (
 )
 from soccer_analytics.analysis.framing import SHORTEST_CLIP_SECONDS, default_clip_length
 from soccer_analytics.analysis.highlights import (
-    PREVIEW_DIR,
-    PREVIEW_SETTINGS,
     TIER_SECONDS,
     build_moments,
-    clamp_moment,
-    export_moment,
     export_player_clip,
     export_reel,
     moment_for_event,
-    preview_clip_name,
     select_reel,
     write_manifest,
 )
@@ -106,7 +102,7 @@ from soccer_analytics.dashboard.reports import (
     team_colours,
     team_name,
 )
-from soccer_analytics.dashboard.replay import build_replay, player_table_rows, track_boxes
+from soccer_analytics.dashboard.replay import build_replay, event_from_tag, player_table_rows, track_boxes
 from soccer_analytics.dashboard.stream import configured_base, configured_port, is_reachable
 from soccer_analytics.geometry.pitch_calibration import (
     MIN_CLICKS_PER_ANCHOR,
@@ -204,15 +200,6 @@ def _event_label(event: Event, index: int, match_clock: str | None = None) -> st
     note = f" - {event.note[:48]}" if event.note else ""
     when = match_clock if match_clock and match_clock != "-" else _clock(event.time_s)
     return f"#{index + 1}  {when}  {event.type} ({origin}){note}"
-
-
-# What each preview mode costs, in the words of the person choosing. Reviewing a scan means ninety clips one after
-# another, so the cheap end is the default and the labels say what is being traded away.
-PREVIEW_MODE_LABELS = {
-    "audio": "Sound only",
-    "quick": "Light video",
-    "full": "Full video",
-}
 
 
 def _encode(frame: np.ndarray) -> str:
@@ -354,7 +341,8 @@ def replay_view(
     stream_base: str = "",
     seek_to_s: float | None = None,
     seek_seq: int = 0,
-) -> None:
+    ack_tag_seq: int = 0,
+) -> dict | None:
     """Draw the animated pitch view; playback lives entirely in the browser.
 
     ``events`` and ``momentum`` are the timeline strip's data: the tagged and detected events (as JSON dicts) and
@@ -366,8 +354,13 @@ def replay_view(
     beside the pitch at the annotated match stream, so it can play the footage of any second the animation is
     showing. ``seek_to_s`` plus ``seek_seq`` is the "jump to this moment" request from the picker above; the
     component acts when the sequence changes, so unrelated reruns never re-seek.
+
+    The component's tag buttons under the pitch post their tags back (the playback controls never round-trip), so
+    the return value is what they sent - ``{"action": "tag", "tags": [...]}`` - or None. ``ack_tag_seq`` is the
+    newest tag already stored; the component drops everything up to it, so a tag is neither lost nor stored
+    twice. Returns the value so the caller can store the new tags and redraw with them on the strip.
     """
-    REPLAY_COMPONENT(
+    return REPLAY_COMPONENT(
         data_url=data_url,
         numbers={str(track): entry for track, entry in numbers.items()},
         selected_track=int(selected_track),
@@ -385,8 +378,67 @@ def replay_view(
         stream_base=stream_base,
         seek_to_s=seek_to_s,
         seek_seq=int(seek_seq),
+        ack_tag_seq=int(ack_tag_seq),
         key=key,
+        default=None,
     )
+
+
+def _apply_quick_tags(
+    library: MatchLibrary,
+    match_id: str,
+    video: str,
+    window_start: float,
+    replay_duration_s: float,
+    tag_result,
+) -> None:
+    """Store the tags the playback's own buttons sent, then redraw with the new markers on the strip.
+
+    The component's value is sticky: it comes back on every later run until the component sees an acknowledgement,
+    so only tags newer than the newest already stored are applied. The acknowledgement is written before the
+    rerun, which is what clears the component's pending list and stops a tag being stored twice. A tag is stamped
+    with the playback's own second when the button was pressed - not with the moment the round trip finishes - so
+    tagging while watching lands on what was on screen.
+    """
+    if not isinstance(tag_result, dict) or str(tag_result.get("action")) != "tag":
+        return
+    ack_key = f"replay_tag_ack::{match_id}"
+    newest = int(st.session_state.get(ack_key, 0))
+    fresh: list[Event] = []
+    for tag in tag_result.get("tags") or []:
+        if not isinstance(tag, dict):
+            continue
+        newest = max(newest, int(tag.get("seq") or 0))
+        if int(tag.get("seq") or 0) <= int(st.session_state.get(ack_key, 0)):
+            continue
+        try:
+            fresh.append(
+                event_from_tag(
+                    tag, video=str(Path(video).resolve()), window_start=window_start, duration_s=replay_duration_s
+                )
+            )
+        except (TypeError, ValueError):
+            continue  # a malformed tag is dropped, but its sequence still advances the acknowledgement
+    if newest <= int(st.session_state.get(ack_key, 0)):
+        return  # nothing new: the sticky value was already applied on an earlier run
+    st.session_state[ack_key] = newest
+    if fresh:
+        log = library.events(match_id)
+        for event in fresh:
+            log.add(event)
+        library.save_events(match_id, log)
+        last = fresh[-1]
+        st.session_state["events_flash"] = (
+            "success",
+            f"Tagged {last.type} at {_clock(last.time_s)} - it is on the timeline strip above.",
+        )
+    else:
+        st.session_state["events_flash"] = (
+            "warning",
+            "A tag arrived in a shape the page could not read; it was skipped.",
+        )
+    # Rerun so the strip, the table and the acknowledged tag bar all see the stored event in this same gesture.
+    st.rerun()
 
 
 def _team_name_editor(library: MatchLibrary, match_id: str, payload: dict) -> list[str]:
@@ -520,6 +572,173 @@ def _ball_track_for_replay(
     return project_ball_track(records, calibration, q, focal)
 
 
+def _build_report_and_replay(
+    library: MatchLibrary,
+    match_id: str,
+    segment,
+    segment_dir: Path,
+    calibration: PitchCalibration,
+    q: np.ndarray,
+    focal: np.ndarray,
+) -> None:
+    """Project, track, and save the report and the replay - the work behind both build buttons.
+
+    The pipeline reports fractions of its own work; the bar maps them onto the whole job so it is one honest line
+    from 0 to 100 instead of three bars that each restart. The replay needs the same tracks the report was built
+    from, so it is built here rather than in a second pass over the segment.
+    """
+    record = library.load(match_id)
+    length_m, width_m = record.pitch_length_m, record.pitch_width_m
+    report_box = st.status("Building the report and the replay...", expanded=True)
+    bar = st.progress(0.0, text="Projecting detections to the pitch...")
+    advance = progress_reporter(bar, "Building the report...")
+    with report_box:
+        detections = project_segment(
+            segment,
+            calibration,
+            on_progress=lambda fraction: advance(0.40 * fraction, "Projecting detections to the pitch..."),
+        )
+        report, _assignment = stage_b.build_report(
+            detections,
+            pitch_length_m=length_m,
+            pitch_width_m=width_m,
+            match_frames=len(segment.time),
+            on_progress=lambda fraction: advance(
+                0.40 + 0.45 * fraction, "Tracking players, teams and momentum..."
+            ),
+        )
+        advance(0.88, "Building the replay...")
+        ball = _ball_track_for_replay(segment_dir, calibration, q, focal)
+        replay = build_replay(
+            (length_m, width_m),
+            float(segment.meta["fps"]),
+            len(segment.time),
+            detections.aim_xy,
+            report.players,
+            record.team_names,
+            ball=ball,
+            team_colours=[metrics.kit_rgb for metrics in report.teams],
+            camera_xy=detections.camera_xy,
+        )
+        advance(0.97, "Saving the report and the replay...")
+        st.session_state["report"] = {
+            "teams": [vars(team) for team in report.teams],
+            "players": [
+                {
+                    "track_id": player.track_id,
+                    "team": player.team,
+                    "observations": len(player.frame),
+                    "distance_m": round(player.distance_m, 1),
+                    "top_speed_kmh": round(float(player.speed_kmh.max()), 1),
+                    "xy": [[round(float(x), 1), round(float(y), 1)] for x, y in player.xy],
+                }
+                for player in report.players
+            ],
+            "momentum": report.momentum,
+            "notes": report.notes,
+            "pitch": [length_m, width_m],
+            "detections_used": report.detections_used,
+            "frames_analysed": report.frames_analysed,
+        }
+        library.save_report(match_id, st.session_state["report"])
+        library.save_replay(match_id, replay, boxes=track_boxes(report.players))
+    advance(1.0, "Report and replay built.")
+    report_box.update(
+        label=f"Report built: {len(report.players)} tracks, {len(report.teams)} teams, replay ready",
+        state="complete",
+        expanded=False,
+    )
+
+
+DETECTIONS_STATUS_FILE = "detections.json"  # written by scripts/run_detections.py
+DETECTIONS_STATUS_STALE_S = 300.0
+
+
+def _detections_status(library: MatchLibrary, match_id: str) -> dict:
+    """The all-detections run's status file beside the match; {} until it has ever run."""
+    try:
+        return json.loads((library.path(match_id) / DETECTIONS_STATUS_FILE).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _detections_alive(library: MatchLibrary, match_id: str) -> bool:
+    """Whether the enrichment run is actually in progress, not just leaving "running" behind after a crash."""
+    status = _detections_status(library, match_id)
+    if status.get("state") != "running":
+        return False
+    return (time.time() - float(status.get("updated") or 0.0)) < DETECTIONS_STATUS_STALE_S
+
+
+def _start_all_detections(library: MatchLibrary, match_id: str, video: str, segment_dir: Path) -> None:
+    """Start the enrichment pipeline - the scans, the detectors and the rebuild - as its own process.
+
+    The same settings the individual scan controls show are baked into the command, because the background process
+    reads nothing from this session. Each stage checks its own previous result, so pressing this again after a
+    failure resumes rather than redoing the hour-long ball scan.
+    """
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "run_detections.py"),
+        "--match", match_id,
+        "--video", str(video),
+        "--segment", str(segment_dir),
+        "--strictness", f"{float(st.session_state.get('whistle_strictness', MIN_PROMINENCE)):.1f}",
+    ]
+    if not st.session_state.get("whistle_reject_voices", True):
+        command.append("--keep-voices")
+    # The child takes a moment to boot and write its first status; writing the same "starting" payload now closes
+    # the window where the button still looks pressable and a second click would race the first run.
+    status_path = library.path(match_id) / DETECTIONS_STATUS_FILE
+    try:
+        status_path.write_text(
+            json.dumps(
+                {
+                    "state": "running",
+                    "stage": "ball",
+                    "progress": 0.0,
+                    "message": "Starting all detections...",
+                    "updated": time.time(),
+                }
+            )
+        )
+    except OSError:
+        pass  # an unwritable match directory fails the child too, and its error lands in the status file
+    subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@st.fragment(run_every=POLL_SECONDS)
+def _detections_run_status(library: MatchLibrary, match_id: str, watch_key: str) -> None:
+    """Live progress of the all-detections run; the report and the replay are rebuilt when it lands."""
+    status = _detections_status(library, match_id)
+    if not status:
+        return  # never run: the button's own help text says what it would do
+    state = status.get("state")
+    previous = st.session_state.get(watch_key)
+    st.session_state[watch_key] = state
+    if state == "running":
+        if _detections_alive(library, match_id):
+            st.progress(
+                min(1.0, float(status.get("progress") or 0.0)),
+                text=str(status.get("message") or "Running the detections..."),
+            )
+            st.caption(
+                "Running in the background - this bar updates by itself. The scans check their own checkpoints, "
+                "so the run can be left overnight; the report and the replay are rebuilt when everything is in."
+            )
+        else:
+            st.warning(
+                "The run says it is running but has not reported for minutes, so it has probably stopped. Press "
+                "the button again: every stage that already finished is skipped."
+            )
+    elif state == "error":
+        st.error(f"All-detections run failed: {status.get('error') or status.get('message')}")
+    else:
+        st.caption(f"Last all-detections run: {status.get('message') or 'finished'}.")
+    if previous == "running" and state != "running":
+        st.rerun()
+
+
 def _clip_offsets(video: str) -> dict[str, float]:
     """Where each of the game's clips starts inside ``video``, for mapping a moment onto the file being cut.
 
@@ -544,7 +763,7 @@ def _footage_moment(
     event_log,
     game_record,
     window_start: float,
-) -> tuple[float | None, int]:
+) -> tuple[float | None, int, int | None]:
     """The moment picker beside the footage pane: the strip second to jump to, and a sequence for the request.
 
     The pane's footage is a live MJPEG stream, and an MJPEG connection cannot be seeked - so the way to watch
@@ -552,12 +771,14 @@ def _footage_moment(
     same event log the table and the strip show and translated onto the strip's clock exactly as the strip's own
     markers are, so the picker, the marker and the stream all agree on when the moment is.
 
-    Returns ``(seek_to_s, seek_seq)``. ``seek_to_s`` is ``None`` when the selected moment lies outside the
+    Returns ``(seek_to_s, seek_seq, index)``. ``seek_to_s`` is ``None`` when the selected moment lies outside the
     analysed window (there is no second to jump to); ``seek_seq`` changes only when the button is pressed, and
-    the component acts on a changed sequence so an unrelated rerun never re-seeks.
+    the component acts on a changed sequence so an unrelated rerun never re-seeks. ``index`` is the selected
+    event's position in the log - the review buttons under the pitch act on it - or ``None`` when there are no
+    events at all.
     """
     if not event_log.events:
-        return None, 0
+        return None, 0, None
     # The picker is the same list the table shows, so a moment is chosen once and read everywhere. Its label leads
     # with the match clock where the game is marked, because that is the time a coach reads out.
     def _label(index: int) -> str:
@@ -612,7 +833,7 @@ def _footage_moment(
             st.session_state[seq_key] = int(st.session_state.get(seq_key, 0)) + 1
     if strip_start is None:
         st.caption("This moment is outside the analysed window, so there is no second to jump to.")
-    return strip_start, int(st.session_state.get(seq_key, 0))
+    return strip_start, int(st.session_state.get(seq_key, 0)), index
 
 
 @st.cache_data(show_spinner=False)
@@ -1310,7 +1531,7 @@ def replay_section(
     # The moment to watch with the footage: the picker translates the chosen event onto the strip's clock and the
     # button asks the component to jump the animation there. The stream pane follows the animation, so one jump
     # moves both clocks.
-    seek_to_s, seek_seq = _footage_moment(
+    seek_to_s, seek_seq, review_index = _footage_moment(
         match_id, float(replay.get("duration_s", 0.0)), event_log, game_record_for_video, window_start
     )
     # The pane needs the stream server (Streamlit cannot serve a route of its own). Say whether it is up - and
@@ -1341,7 +1562,7 @@ def replay_section(
             st.session_state["replay_flash"] = ("success", f"Footage stream starting on port {stream_port}.")
 
         st.button("Start the footage stream", key=f"start_stream::{match_id}", on_click=_start_stream)
-    replay_view(
+    tag_result = replay_view(
         _replay_media_url(replay_path),
         numbers,
         selected,
@@ -1356,7 +1577,11 @@ def replay_section(
         stream_base=configured_base(),
         seek_to_s=seek_to_s,
         seek_seq=seek_seq,
+        ack_tag_seq=int(st.session_state.get(f"replay_tag_ack::{match_id}", 0)),
     )
+    # A button in the tag bar under the pitch posts its tag back with the playback's own second; storing it is a
+    # rerun away from the strip carrying the new marker, so the tag lands and the page redraws in one gesture.
+    _apply_quick_tags(library, match_id, video, window_start, float(replay.get("duration_s", 0.0)), tag_result)
     has_ball = any(entry is not None for entry in (replay.get("ball") or []))
     excluded = int(replay.get("bystanders_excluded") or 0)
     st.caption(
@@ -1380,6 +1605,9 @@ def replay_section(
             else ""
         )
     )
+    # Everything that used to be Step 4 - the tag review, the detectors' controls and the highlight reels - lives
+    # directly under the playback now, so tagging and reviewing happen while the game is on screen.
+    events_section(library, match_id, segment_dir, video, calibration, review_index)
     only_major = st.checkbox(
         "Show only main tracks (seen for 6 s or more)",
         value=True,
@@ -1498,6 +1726,339 @@ def replay_section(
     show_flash("replay_flash")
 
 
+def events_section(
+    library: MatchLibrary,
+    match_id: str,
+    segment_dir: Path,
+    video: str,
+    calibration,
+    review_index: int | None,
+) -> None:
+    """Tag review, the detector controls and the highlight reels - directly under the playback.
+
+    This is where Step 4 used to live. Tagging itself is the playback's own tag bar (a button stamps the second
+    being watched, so no round trip can move the tag); what remains Python-side is everything around it: the
+    review queue of detected candidates, the scans and detectors that fill it, and the reel exports. All of it
+    sits below the pitch so a coach can watch, tag, review and cut without leaving the game.
+
+    ``review_index`` is the moment the jump picker above the pitch is on: the verdict buttons act on it, so
+    choosing a moment to watch is also choosing it to review, and marking it moves the picker to the next
+    unreviewed candidate.
+    """
+    events = library.events(match_id)
+    team_names = library.load(match_id).team_names
+    # The game's marks turn an event's own recording time into a half and a match clock. They are re-found here
+    # rather than read from a module global, because this section must stand on its own once the report exists.
+    game_record_here = game_lib.find_for_video(video)
+    game_marks_here = game_record_here.bounds() if game_record_here is not None else None
+
+    def _match_clock_for(event: Event) -> str | None:
+        if game_record_here is None or game_marks_here is None:
+            return None
+        on_game = game_lib.game_time(game_record_here, event.time_s, event.video or game_record_here.output)
+        if on_game is None:
+            return None
+        half = game_record_here.half_of(on_game)
+        if half is None:
+            return None
+        return _clock(on_game - game_marks_here[0]) if half == 1 else f"{_clock(on_game - game_marks_here[1])} (2H)"
+
+    # These run before the next run's body, so the table below is rebuilt with the change already in it. Doing the
+    # work inline instead would need a st.rerun() to redraw it, which is a second full run for one button.
+    def _start_audio_scan() -> None:
+        """Start the whistle scan as its own process: the decode and the transform take minutes on a full game.
+
+        The strictness and voice settings are baked into the command now, because the background process reads
+        nothing from this session - the page has moved on long before the scan finishes.
+        """
+        command = [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "run_audio_scan.py"),
+            "--match",
+            str(match_id),
+            "--video",
+            str(video),
+            "--strictness",
+            f"{float(st.session_state.get('whistle_strictness', MIN_PROMINENCE)):.1f}",
+        ]
+        if not st.session_state.get("whistle_reject_voices", True):
+            command.append("--keep-voices")
+        subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        st.session_state["events_flash"] = ("success", "Whistle scan started in the background.")
+
+    def _discard_detected() -> None:
+        log = library.events(match_id)
+        removed = log.discard_detected()
+        library.save_events(match_id, log)
+        st.session_state["events_flash"] = (
+            "success",
+            f"Discarded {removed} auto-detected event(s); {len(log.events)} manual tag(s) left.",
+        )
+
+    def _detect_events() -> None:
+        """Infer goals, shots, corners, penalties, clearances and tackles from the ball and player tracks.
+
+        The ball scan and the report are the inputs, so both have to exist first; the shared runner is what the
+        background "run all detections" pass calls too, so the two cannot disagree. Its output is added as review
+        candidates (``source="ball"``), exactly like the whistle scan's, so the same verdict buttons and the same
+        "discard detected" button apply.
+        """
+        try:
+            segment_here, q_here, focal_here = segment_and_poses_cached(
+                str(segment_dir), segment_fingerprint(segment_dir, stage_a.completed_chunks(segment_dir))
+            )
+        except Exception as exc:  # a partially written segment must not take the page down
+            st.session_state["events_flash"] = ("warning", f"Could not read the segment results: {exc}")
+            return
+        try:
+            result = detect_run.run_detection(
+                library,
+                match_id,
+                segment_dir,
+                video=str(Path(video).resolve()),
+                half_bounds=game_marks_here,
+                segment=segment_here,
+                poses=(q_here, focal_here),
+            )
+        except detect_run.MissingInput as exc:
+            st.session_state["events_flash"] = ("warning", str(exc))
+            return
+        stale = f", {result['dropped']} stale removed" if result["dropped"] else ""
+        st.session_state["events_flash"] = (
+            "success",
+            f"Detected {result['detected']} event(s); {result['added']} new{stale}. Review them below.",
+        )
+
+    def _mark_verdict(index: int, verdict: str) -> None:
+        """Record the review verdict for the moment the picker showed, then move on to the next one.
+
+        The index arrives as a button argument rather than being read back out of session state: a selectbox's
+        state is only guaranteed to be the option where it has been able to match the frontend's label against the
+        options, and this has to work either way. The callback runs before the next run's body, so the log is read
+        from disk here - the list below is then rebuilt with the new verdict already in it, in one run.
+
+        Moving the picker on is the point of a review queue: ninety candidates one at a time is only bearable if
+        deciding does not also mean finding the next row by hand.
+        """
+        log = library.events(match_id)
+        try:
+            number = int(index)
+            log.set_verdict(number, verdict)
+        except (IndexError, TypeError, ValueError):
+            st.session_state["events_flash"] = ("warning", "That moment is not in the list any more - pick it again.")
+            return
+        library.save_events(match_id, log)
+        what = {VERDICT_TRUE: "a true positive", VERDICT_FALSE: "a false positive"}.get(verdict, "unreviewed")
+        st.session_state["events_flash"] = ("success", f"Marked #{number + 1} as {what}.")
+        if verdict in (VERDICT_TRUE, VERDICT_FALSE):
+            order = list(range(number + 1, len(log.events))) + list(range(0, number + 1))
+            next_unreviewed = next((i for i in order if log.events[i].verdict == ""), None)
+            if next_unreviewed is not None:
+                # The next unreviewed moment, over the *current* list, so the review keeps moving without the
+                # reviewer hunting for the next row. The picker above the pitch is moved, so the next press of
+                # its jump button plays that moment with its clip.
+                st.session_state[f"pitch_clip_event::{match_id}"] = next_unreviewed
+
+    def _discard_false() -> None:
+        log = library.events(match_id)
+        removed = log.discard_false()
+        library.save_events(match_id, log)
+        st.session_state["events_flash"] = (
+            "success",
+            f"Discarded {removed} rejected candidate(s); {len(log.events)} event(s) left.",
+        )
+
+    st.subheader("Events and review")
+    show_flash("events_flash")
+    st.caption(
+        "The tag bar under the playback stamps an event on the second being watched. Whistles are found in the "
+        "audio and offered as candidates; goals, shots, corners, penalties, clearances and tackles can also be "
+        "inferred from the ball scan and the player tracks once both exist. Saves and blocks stay yours to tag: a "
+        "keeper's save and a shot wide look the same to a ball track. The detector is deliberately strict - it "
+        "would rather miss a call than invent one - so every candidate carries a note saying what it measured, "
+        "and the weak ones are yours to reject."
+    )
+    if events.events:
+        counts = events.review_counts()
+        hide_false = st.checkbox(
+            "Hide the rejected candidates",
+            value=False,
+            key=f"hide_false::{match_id}",
+            help=(
+                "Only changes what the table shows - the verdicts themselves are kept, and so is everything you "
+                "have not reviewed yet."
+            ),
+        )
+        shown = [e for e in events.events if not (hide_false and e.verdict == VERDICT_FALSE)]
+        # The video path is not in the table: it is long, it is the same file for every candidate, and it is
+        # already named under the player when a candidate needs a different one from the selected video. The team
+        # is the name the user gave it, so a row reads the way the report does.
+        event_rows = [
+            {
+                **{key: value for key, value in event.to_json().items() if key != "video"},
+                "team": "unspecified" if event.team < 0 else team_name(event.team, team_names),
+            }
+            for event in shown
+        ]
+        if game_marks_here is not None and game_record_here is not None:
+            # The half is a question about the game clock, so it comes from the marks, not from the analysed
+            # window: an event outside kick-off/full-time is labelled "-" rather than guessed at. Each event is
+            # translated out of its own recording's clock first - a whistle candidate's seconds are seconds of a
+            # single camera file, and 5 s of that clip is 30 minutes into the match.
+            labels = game_lib.half_labels_for_events(game_record_here, shown)
+            event_rows = [{**row, "half": label} for row, label in zip(event_rows, labels)]
+            # A candidate's time is a time on *its own recording* - a camera clip's 5:00 is the game's 35:00 - so
+            # the table also shows the match time a coach would read out. Events outside the marked game (a
+            # whistle scanned on a clip that is not part of it) keep "-".
+            event_rows = [
+                {**row, "match clock": _match_clock_for(event) or "-"} for row, event in zip(event_rows, shown)
+            ]
+        st.dataframe(pd.DataFrame(event_rows), hide_index=True, use_container_width=True)
+        st.caption(
+            f"Reviewed: {counts[VERDICT_TRUE]} true · {counts[VERDICT_FALSE]} false · "
+            f"{counts['unreviewed']} still to look at."
+        )
+        # Review the moment the jump picker above is on. Watching it, judging it and moving on all happen here,
+        # next to the buttons that tag the same list - no separate preview panel to find and wait on a clip cut.
+        if review_index is not None and 0 <= review_index < len(events.events):
+            picked = events.events[review_index]
+            when = _match_clock_for(picked) or _clock(picked.time_s)
+            verdict_columns = st.columns([1, 1, 1, 2])
+            with verdict_columns[0]:
+                st.button(
+                    "True positive",
+                    key=f"verdict_true::{match_id}",
+                    on_click=_mark_verdict,
+                    args=(review_index, VERDICT_TRUE),
+                    disabled=picked.verdict == VERDICT_TRUE,
+                    help="A real stoppage: keep it, and let the reels use it.",
+                )
+            with verdict_columns[1]:
+                st.button(
+                    "False positive",
+                    key=f"verdict_false::{match_id}",
+                    on_click=_mark_verdict,
+                    args=(review_index, VERDICT_FALSE),
+                    disabled=picked.verdict == VERDICT_FALSE,
+                    help="Not a real event: rejected candidates are left out of the reels.",
+                )
+            with verdict_columns[2]:
+                st.button(
+                    "Clear verdict",
+                    key=f"verdict_clear::{match_id}",
+                    on_click=_mark_verdict,
+                    args=(review_index, ""),
+                    disabled=not picked.verdict,
+                    help="Back to unreviewed.",
+                )
+            with verdict_columns[3]:
+                st.caption(
+                    f"Reviewing #{review_index + 1}: {picked.type} at {when} - press **Jump to this moment** "
+                    "above to watch it with the footage, then mark it here."
+                )
+        detected = events.detected()
+        if detected:
+            st.button(
+                f"Discard {len(detected)} auto-detected event(s)",
+                key="discard_detected_events",
+                help=(
+                    "Remove the candidates the scans added and keep the tags you made yourself. Re-running a scan "
+                    "finds them again, so nothing is lost that cannot be brought back."
+                ),
+                on_click=_discard_detected,
+            )
+        if counts[VERDICT_FALSE]:
+            st.button(
+                f"Discard the {counts[VERDICT_FALSE]} rejected candidate(s)",
+                key="discard_false_events",
+                help=(
+                    "Drop the candidates you marked as false positives and keep everything else, including "
+                    "the ones you have not reviewed yet. A re-scan brings rejected candidates back."
+                ),
+                on_click=_discard_false,
+            )
+    else:
+        st.info("No events yet - tag one from the buttons under the playback, or run the detectors below.")
+
+    with st.expander("Detectors and scans"):
+        st.caption(
+            "**Build report + run all detections** in Step 3 runs all of this in one go after the report: the "
+            "ball scan, the whistle scan and the shirt-number scan, then the event detectors and a final rebuild. "
+            "The individual controls stay here for running one scan on its own or changing the whistle settings."
+        )
+        # The clock is named because there are two of them: the selected video's own seconds (what all the scans
+        # use) and the match clock the table adds beside it.
+        st.number_input(
+            "Detector strictness (x the match's own level)",
+            min_value=10.0,
+            max_value=2000.0,
+            value=float(MIN_PROMINENCE),
+            step=10.0,
+            key="whistle_strictness",
+            help=(
+                "How far above the match's typical level in the whistle band a blast must sit to be reported. "
+                "Higher means fewer, more confident candidates. Bump it up if the pitches next door dominate the "
+                "list; drop it if the referee's own whistle is being missed."
+            ),
+        )
+        st.checkbox(
+            "Reject voices and calls (keep only lone tones)",
+            value=True,
+            key="whistle_reject_voices",
+            help=(
+                "A whistle puts everything into its own narrow band. A shout - at any pitch - and a bird of prey's "
+                "call bring their own lower harmonics and formants with them, so a blast that lifts the region "
+                "below the band is dropped as a voice or a call. The thresholds were set from this match's own "
+                "confirmed and rejected candidates; turn it off if a real referee's whistle is being missed."
+            ),
+        )
+        st.button(
+            "Scan audio for whistles (background)",
+            on_click=_start_audio_scan,
+            disabled=library.load_audio_scan_status(match_id).get("state") == "running",
+            key=f"scan_audio::{match_id}",
+        )
+        _audio_scan_status(library, match_id, watch_key=f"whistle_watch::{match_id}")
+        st.button(
+            "Detect events from the ball and player tracks",
+            on_click=_detect_events,
+            key=f"detect_events::{match_id}",
+            help=(
+                "Reads the ball scan and the player tracks to infer goals, shots, corners, penalties, clearances "
+                "and tackles. Needs the report (Step 3) and the ball scan. The results are review candidates, like "
+                "the whistle scan's - check them and mark the false ones."
+            ),
+        )
+
+    payload = st.session_state.get("report") or report_from_library(library, match_id)
+    st.subheader("Highlight reels")
+    if not events.events:
+        st.info("Tag an event, or run the detectors above, before cutting highlights.")
+    else:
+        moments = build_moments(events.events, (payload or {}).get("momentum"))
+        st.write(f"{len(moments)} candidate moment(s).")
+        for tier, seconds in TIER_SECONDS.items():
+            reel = select_reel(tier, moments, match_duration_s=probe_cached(video).duration_s)
+            tier_col, button_col = st.columns([3, 1])
+            with tier_col:
+                st.write(f"**{tier}** - {len(reel.moments)} moment(s), {reel.duration_s:.0f}s of a {seconds:.0f}s target")
+            with button_col:
+                export_clicked = st.button(
+                    f"Export {tier}", key=f"export_{tier}", disabled=not reel.moments
+                )
+            if export_clicked:
+                # Outside the narrow column, so the progress bar has the full width to breathe.
+                out_path = library.highlights_dir(match_id) / f"{tier}.mp4"
+                bar = st.progress(0.0, text=f"Cutting the {tier} reel ({len(reel.moments)} moments)...")
+                reporter = progress_reporter(bar, f"Cutting the {tier} reel...")
+                # Moments found in another recording are mapped onto this one through the game manifest, so a
+                # whistle scanned on a camera clip lands at the right second of the combined game.
+                export_reel(video, reel, out_path, use_gpu=True, progress=reporter, clip_offsets=_clip_offsets(video))
+                write_manifest(reel, video, out_path.with_suffix(".json"))
+                reporter(1.0, f"{tier} reel ready")
+                st.success(f"Wrote `{out_path.relative_to(REPO_ROOT)}`")
+
+
 def show_flash(key: str) -> None:
     """Show a message that a save-then-rerun action left behind.
 
@@ -1524,25 +2085,11 @@ st.caption(
     "even though the camera pans and zooms to follow the ball."
 )
 
-library = MatchLibrary(MATCHES_ROOT)
+# There is no options sidebar any more: every clip the page cuts or plays is built at full detail, because the
+# cheap preview modes were there to make reviewing a scan bearable and the scan's candidates are now reviewed
+# straight off the playback instead of as cut clips.
 
-# The preview detail is a global preference, not a per-match one: how much picture a review clip is worth is about
-# the reviewer's patience and the machine's speed, which do not change from match to match. It lives in the sidebar
-# so it is reachable from anywhere on the page.
-with st.sidebar:
-    st.subheader("Options")
-    preview_mode = st.radio(
-        "Preview detail",
-        list(PREVIEW_SETTINGS),
-        index=list(PREVIEW_SETTINGS).index("full"),
-        format_func=lambda name: PREVIEW_MODE_LABELS.get(name, name),
-        key="preview_mode",
-        help=(
-            "What each preview costs to cut, cheapest first: the sound alone is near instant (~0.2 s), the light "
-            "video shows one picture a second for a few seconds' wait, and the full-size one takes about as long "
-            "as the clip lasts. The verdict buttons work the same for all three."
-        ),
-    )
+library = MatchLibrary(MATCHES_ROOT)
 
 # Everything the page keeps in the session belongs to one match: the calibration just fitted, the report just
 # built, the landmarks behind the residual table. Selecting another archive has to drop all of it - otherwise the
@@ -2717,71 +3264,32 @@ calibration = saved_calibration(library, match_id)
 if segment is None or calibration is None:
     st.info("Steps 1 and 2 are needed first: the report uses the segment results and the pitch calibration.")
 else:
-    # Same source of truth as Step 2: the pitch size recorded with the match, which is what was calibrated against.
-    length_m, width_m = library.load(match_id).pitch_length_m, library.load(match_id).pitch_width_m
-    if st.button("Build report", type="primary"):
-        report_box = st.status("Building the report and the replay...", expanded=True)
-        bar = st.progress(0.0, text="Projecting detections to the pitch...")
-        advance = progress_reporter(bar, "Building the report...")
-        with report_box:
-            # The pipeline reports fractions of its own work; the bar maps them onto the whole job so it is one
-            # honest line from 0 to 100 instead of three bars that each restart.
-            detections = project_segment(
-                segment,
-                calibration,
-                on_progress=lambda fraction: advance(0.40 * fraction, "Projecting detections to the pitch..."),
-            )
-            report, _assignment = stage_b.build_report(
-                detections,
-                pitch_length_m=length_m,
-                pitch_width_m=width_m,
-                match_frames=len(segment.time),
-                on_progress=lambda fraction: advance(
-                    0.40 + 0.45 * fraction, "Tracking players, teams and momentum..."
-                ),
-            )
-            # The replay needs the same tracks, so it is built here rather than in a second pass over the segment.
-            advance(0.88, "Building the replay...")
-            ball = _ball_track_for_replay(segment_dir, calibration, q, focal)
-            replay = build_replay(
-                (length_m, width_m),
-                float(segment.meta["fps"]),
-                len(segment.time),
-                detections.aim_xy,
-                report.players,
-                library.load(match_id).team_names,
-                ball=ball,
-                team_colours=[metrics.kit_rgb for metrics in report.teams],
-                camera_xy=detections.camera_xy,
-            )
-            advance(0.97, "Saving the report and the replay...")
-            st.session_state["report"] = {
-                "teams": [vars(team) for team in report.teams],
-                "players": [
-                    {
-                        "track_id": player.track_id,
-                        "team": player.team,
-                        "observations": len(player.frame),
-                        "distance_m": round(player.distance_m, 1),
-                        "top_speed_kmh": round(float(player.speed_kmh.max()), 1),
-                        "xy": [[round(float(x), 1), round(float(y), 1)] for x, y in player.xy],
-                    }
-                    for player in report.players
-                ],
-                "momentum": report.momentum,
-                "notes": report.notes,
-                "pitch": [length_m, width_m],
-                "detections_used": report.detections_used,
-                "frames_analysed": report.frames_analysed,
-            }
-            library.save_report(match_id, st.session_state["report"])
-            library.save_replay(match_id, replay, boxes=track_boxes(report.players))
-        advance(1.0, "Report and replay built.")
-        report_box.update(
-            label=f"Report built: {len(report.players)} tracks, {len(report.teams)} teams, replay ready",
-            state="complete",
-            expanded=False,
+    # Two ways in: build just the report, or build it and let the background pipeline finish everything else -
+    # the scans, the detectors and a final rebuild - so a rich report is one press.
+    build_col, build_all_col = st.columns(2)
+    with build_col:
+        build_clicked = st.button("Build report", type="primary")
+    with build_all_col:
+        build_all_clicked = st.button(
+            "Build report + run all detections",
+            type="primary",
+            disabled=_detections_alive(library, match_id),
+            help=(
+                "Builds the report and the replay, then runs in the background: the ball scan, the whistle scan "
+                "and the shirt-number scan, the event detectors over what they find, and a final report + replay "
+                "rebuild so the ball and the numbers land on it. Every stage skips finished work and resumes from "
+                "its checkpoint, so a long ball scan can be closed and picked up again."
+            ),
         )
+    if build_clicked or build_all_clicked:
+        _build_report_and_replay(library, match_id, segment, segment_dir, calibration, q, focal)
+        if build_all_clicked:
+            _start_all_detections(library, match_id, chosen, segment_dir)
+            st.success(
+                "All detections are running in the background - progress below. The page stays usable while "
+                "they run; everything they find is saved as they go."
+            )
+    _detections_run_status(library, match_id, watch_key=f"detections_watch::{match_id}")
 
     payload = st.session_state.get("report") or report_from_library(library, match_id)
     if payload:
@@ -2808,507 +3316,7 @@ else:
         for note in payload["notes"]:
             st.caption(f"- {note}")
 
-# --------------------------------------------------------------------------------------------------------------
-# Step 4 - events and highlights
-# --------------------------------------------------------------------------------------------------------------
-st.header("Step 4 - Tag events and cut highlights")
 
-if match_id is None:
-    st.info("Create a match in Step 1 to store events and highlights.")
-else:
-    events = library.events(match_id)
-    team_names = library.load(match_id).team_names
-    show_flash("events_flash")
-
-    # These run before the next run's body, so the table below is rebuilt with the change already in it. Doing the
-    # work inline instead would need a st.rerun() to redraw it, which is a second full run for one button.
-    def _add_tag() -> None:
-        """Store a hand tag. Its time is a time on the *selected video's* clock, and the tag says so.
-
-        A tag is made while looking at the page's video, so that is the recording its seconds belong to - and
-        stamping ``video`` is what lets the table, the timeline and the reel export translate it onto the game clock
-        like any other event. Without it a tag made against a single camera clip would be read as a time on the
-        combined game and land nine minutes out.
-        """
-        added = Event(
-            time_s=float(st.session_state.get("tag_time", 0.0)),
-            type=str(st.session_state.get("tag_type", EVENT_TYPES[0])),
-            team=int(st.session_state.get("tag_team", -1)),
-            note=str(st.session_state.get("tag_note", "")),
-            video=str(Path(chosen).resolve()),
-        )
-        log = library.events(match_id)
-        log.add(added)
-        library.save_events(match_id, log)
-        st.session_state["events_flash"] = ("success", f"Tagged {added.type} at {_clock(added.time_s)}.")
-
-    def _start_audio_scan() -> None:
-        """Start the whistle scan as its own process: the decode and the transform take minutes on a full game.
-
-        The strictness and voice settings are baked into the command now, because the background process reads
-        nothing from this session - the page has moved on long before the scan finishes.
-        """
-        command = [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "run_audio_scan.py"),
-            "--match",
-            str(match_id),
-            "--video",
-            str(chosen),
-            "--strictness",
-            f"{float(st.session_state.get('whistle_strictness', MIN_PROMINENCE)):.1f}",
-        ]
-        if not st.session_state.get("whistle_reject_voices", True):
-            command.append("--keep-voices")
-        subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        st.session_state["events_flash"] = ("success", "Whistle scan started in the background.")
-
-    def _discard_detected() -> None:
-        log = library.events(match_id)
-        removed = log.discard_detected()
-        library.save_events(match_id, log)
-        st.session_state["events_flash"] = (
-            "success",
-            f"Discarded {removed} auto-detected event(s); {len(log.events)} manual tag(s) left.",
-        )
-
-    def _detect_events() -> None:
-        """Infer goals, shots, corners, penalties, clearances and tackles from the ball and player tracks.
-
-        The ball scan and the report are the inputs, so both have to exist first; the detector is pure and quick, so
-        it runs inline rather than in the background. Its output is added as review candidates (``source="ball"``),
-        exactly like the whistle scan's, so the same verdict buttons and the same "discard detected" button apply.
-        """
-        replay = library.load_replay(match_id)
-        if replay is None:
-            st.session_state["events_flash"] = ("warning", "Build the report first - the detectors need the tracks.")
-            return
-        ball_payload = None
-        try:
-            ball_payload = json.loads((Path(segment_dir) / BALL_TRACK_FILE).read_text())
-        except (OSError, json.JSONDecodeError):
-            ball_payload = None
-        if not ball_payload or not ball_payload.get("frames"):
-            st.session_state["events_flash"] = (
-                "warning",
-                "Run the ball scan first - the detectors read the ball's track.",
-            )
-            return
-        calibration = saved_calibration(library, match_id)
-        if calibration is None:
-            st.session_state["events_flash"] = ("warning", "Register the pitch first.")
-            return
-        segment, q, focal = segment_and_poses_cached(
-            str(segment_dir), segment_fingerprint(segment_dir, stage_a.completed_chunks(segment_dir))
-        )
-        ball = project_ball_track(ball_payload["frames"], calibration, q, focal)
-        fps = float(segment.meta["fps"])
-        # Frame indices are within the analysed window, so the tracks' times need the window's own start offset -
-        # the kick-off offset from Step 1. Without it every player-derived event lands `start_s` too early.
-        players = event_detection.player_tracks_from_replay(replay, fps, float(segment.meta.get("start_s", 0.0)))
-        times = np.asarray(segment.time, dtype=np.float64)
-        # The whistle candidates are what tell a penalty from a free kick; the roster gives the shirt numbers.
-        whistles = [e.time_s for e in library.events(match_id).events if e.source == "audio"]
-        roster = library.load_roster(match_id)
-        jerseys = library.load_jerseys(match_id)
-        numbers = merge_numbers(
-            [int(p["track_id"]) for p in replay.get("players", [])],
-            auto={int(k): v for k, v in (jerseys.get("suggestions") or {}).items()},
-            manual=roster,
-        )
-        detected = detect_events(
-            ball[0],
-            ball[1],
-            times,
-            players,
-            (float(library.load(match_id).pitch_length_m), float(library.load(match_id).pitch_width_m)),
-            whistles=whistles,
-            numbers=numbers,
-            half_bounds=game_marks,
-            video=str(Path(chosen).resolve()),
-        )
-        log = library.events(match_id)
-        # Reconcile rather than append: the detector's own rows are replaced, so a re-run after a fix (or after a
-        # better ball scan) cannot leave the previous run's rows behind. Whistle candidates are a different source
-        # and are left alone.
-        added, dropped = log.reconcile_detected(detected, source="ball")
-        library.save_events(match_id, log)
-        stale = f", {dropped} stale removed" if dropped else ""
-        st.session_state["events_flash"] = (
-            "success",
-            f"Detected {len(detected)} event(s); {added} new{stale}. Review them below.",
-        )
-
-    def _mark_verdict(index: int, verdict: str) -> None:
-        """Record the review verdict for the moment the picker showed, then move on to the next one.
-
-        The index arrives as a button argument rather than being read back out of session state: a selectbox's
-        state is only guaranteed to be the option where it has been able to match the frontend's label against the
-        options, and this has to work either way. The callback runs before the next run's body, so the log is read
-        from disk here - the list below is then rebuilt with the new verdict already in it, in one run.
-
-        Moving the picker on is the point of a review queue: ninety candidates one at a time is only bearable if
-        deciding does not also mean finding the next row by hand.
-        """
-        log = library.events(match_id)
-        try:
-            number = int(index)
-            log.set_verdict(number, verdict)
-        except (IndexError, TypeError, ValueError):
-            st.session_state["events_flash"] = ("warning", "That moment is not in the list any more - pick it again.")
-            return
-        library.save_events(match_id, log)
-        what = {VERDICT_TRUE: "a true positive", VERDICT_FALSE: "a false positive"}.get(verdict, "unreviewed")
-        st.session_state["events_flash"] = ("success", f"Marked #{number + 1} as {what}.")
-        if verdict in (VERDICT_TRUE, VERDICT_FALSE):
-            order = list(range(number + 1, len(log.events))) + list(range(0, number + 1))
-            next_unreviewed = next((i for i in order if log.events[i].verdict == ""), None)
-            if next_unreviewed is not None:
-                # The next unreviewed moment, over the *current* list, so the review keeps moving without the
-                # reviewer hunting for the next row. Its clip is cut on the run this triggers, as any selection is.
-                st.session_state["preview_event"] = next_unreviewed
-                st.session_state.pop("preview_cut_failed", None)
-
-    def _discard_false() -> None:
-        log = library.events(match_id)
-        removed = log.discard_false()
-        library.save_events(match_id, log)
-        st.session_state["events_flash"] = (
-            "success",
-            f"Discarded {removed} rejected candidate(s); {len(log.events)} event(s) left.",
-        )
-
-    st.caption(
-        "Whistles are found in the audio and offered as candidates. The detector is deliberately strict: it wants a "
-        "loud, sustained, tonal blast, because a venue with several pitches produces a great deal of whistle-like "
-        "noise at a distance - on the real sample the first version of this reported 191 candidates in five minutes. "
-        "A shout or a bird of prey's call can clear that bar too, so a blast that brings its own low frequencies "
-        "with it is rejected: the thresholds for that were measured against the candidates you confirmed and "
-        "rejected. Each candidate's note records how far above the match's own level it sat. Goals, shots, corners, "
-        "penalties, clearances and tackles can also be inferred from the ball scan and the player tracks - press "
-        "**Detect events** below once the report and the ball scan exist. Saves and blocks stay yours to tag: a "
-        "keeper's save and a shot wide look the same to a ball track."
-    )
-    tag_col, list_col = st.columns(2)
-    with tag_col:
-        with st.form("tag_event"):
-            # The clock is named because there are two of them: the selected video's own seconds (what the player
-            # shows) and the match clock (what a coach reads out). A tag is made while watching the video, so its
-            # time is the video's - and the table shows the match clock beside it.
-            event_time = st.number_input(
-                f"Time (s) in `{Path(chosen).name}`",
-                min_value=0.0,
-                value=0.0,
-                step=1.0,
-                key="tag_time",
-                help=(
-                    "Seconds into the video selected in Step 1 - the time the player shows. The table adds the "
-                    "match clock beside it, so a tag made on a camera clip still reads as the right minute of the "
-                    "game."
-                ),
-            )
-            event_type = st.selectbox("Type", EVENT_TYPES, index=0, key="tag_type")
-            event_team = st.selectbox(
-                "Team",
-                [-1, 0, 1],
-                format_func=lambda t: "unspecified" if t < 0 else team_name(t, team_names),
-                key="tag_team",
-            )
-            event_note = st.text_input("Note", "", key="tag_note")
-            st.form_submit_button("Add tag", on_click=_add_tag)
-        st.number_input(
-            "Detector strictness (x the match's own level)",
-            min_value=10.0,
-            max_value=2000.0,
-            value=float(MIN_PROMINENCE),
-            step=10.0,
-            key="whistle_strictness",
-            help=(
-                "How far above the match's typical level in the whistle band a blast must sit to be reported. "
-                "Higher means fewer, more confident candidates. Bump it up if the pitches next door dominate the "
-                "list; drop it if the referee's own whistle is being missed."
-            ),
-        )
-        st.checkbox(
-            "Reject voices and calls (keep only lone tones)",
-            value=True,
-            key="whistle_reject_voices",
-            help=(
-                "A whistle puts everything into its own narrow band. A shout - at any pitch - and a bird of prey's "
-                "call bring their own lower harmonics and formants with them, so a blast that lifts the region "
-                "below the band is dropped as a voice or a call. The thresholds were set from this match's own "
-                "confirmed and rejected candidates; turn it off if a real referee's whistle is being missed."
-            ),
-        )
-        st.button(
-            "Scan audio for whistles (background)",
-            on_click=_start_audio_scan,
-            disabled=library.load_audio_scan_status(match_id).get("state") == "running",
-            key=f"scan_audio::{match_id}",
-        )
-        _audio_scan_status(library, match_id, watch_key=f"whistle_watch::{match_id}")
-        st.button(
-            "Detect events from the ball and player tracks",
-            on_click=_detect_events,
-            key=f"detect_events::{match_id}",
-            help=(
-                "Reads the ball scan and the player tracks to infer goals, shots, corners, penalties, clearances "
-                "and tackles. Needs the report (Step 3) and the ball scan. The results are review candidates, like "
-                "the whistle scan's - check them and mark the false ones."
-            ),
-        )
-    with list_col:
-        if events.events:
-            counts = events.review_counts()
-            hide_false = st.checkbox(
-                "Hide the rejected candidates",
-                value=False,
-                key=f"hide_false::{match_id}",
-                help=(
-                    "Only changes what the table shows - the verdicts themselves are kept, and so is everything "
-                    "you have not reviewed yet."
-                ),
-            )
-            shown = [e for e in events.events if not (hide_false and e.verdict == VERDICT_FALSE)]
-            # The video path is not in the table: it is long, it is the same file for every candidate, and it is
-            # already named under the player when a candidate needs a different one from the selected video. The
-            # team is the name the user gave it, so a row reads the way the report does.
-            event_rows = [
-                {
-                    **{key: value for key, value in event.to_json().items() if key != "video"},
-                    "team": "unspecified" if event.team < 0 else team_name(event.team, team_names),
-                }
-                for event in shown
-            ]
-            if game_marks is not None and game_record is not None:
-                # The half is a question about the game clock, so it comes from the marks, not from the analysed
-                # window: an event outside kick-off/full-time is labelled "-" rather than guessed at. Each event is
-                # translated out of its own recording's clock first - a whistle candidate's seconds are seconds of
-                # a single camera file, and 5 s of that clip is 30 minutes into the match.
-                labels = game_lib.half_labels_for_events(game_record, shown)
-                event_rows = [{**row, "half": label} for row, label in zip(event_rows, labels)]
-                # A candidate's time is a time on *its own recording* - a camera clip's 5:00 is the game's 35:00 -
-                # so the table also shows the match time a coach would read out. Events outside the marked game
-                # (a whistle scanned on a clip that is not part of it) keep "-".
-                match_clocks = []
-                for event in shown:
-                    on_game = game_lib.game_time(game_record, event.time_s, event.video or game_record.output)
-                    half = None if on_game is None else game_record.half_of(on_game)
-                    if half is None:
-                        match_clocks.append("-")
-                    elif half == 1:
-                        match_clocks.append(_clock(on_game - game_marks[0]))
-                    else:
-                        match_clocks.append(f"{_clock(on_game - game_marks[1])} (2H)")
-                event_rows = [{**row, "match clock": c} for row, c in zip(event_rows, match_clocks)]
-            st.dataframe(pd.DataFrame(event_rows), hide_index=True, use_container_width=True)
-            st.caption(
-                f"Reviewed: {counts[VERDICT_TRUE]} true · {counts[VERDICT_FALSE]} false · "
-                f"{counts['unreviewed']} still to look at."
-            )
-            detected = events.detected()
-            if detected:
-                st.button(
-                    f"Discard {len(detected)} auto-detected event(s)",
-                    key="discard_detected_events",
-                    help=(
-                        "Remove the whistle candidates the audio scan added and keep the tags you made yourself. "
-                        "Re-running the scan finds them again, so nothing is lost that cannot be brought back."
-                    ),
-                    on_click=_discard_detected,
-                )
-            if counts[VERDICT_FALSE]:
-                st.button(
-                    f"Discard the {counts[VERDICT_FALSE]} rejected candidate(s)",
-                    key="discard_false_events",
-                    help=(
-                        "Drop the candidates you marked as false positives and keep everything else, including "
-                        "the ones you have not reviewed yet. A re-scan brings rejected candidates back."
-                    ),
-                    on_click=_discard_false,
-                )
-        else:
-            st.info("No events yet.")
-
-    # Preview a tagged moment in place: the same window a reel would cut, cut as soon as a moment is selected and
-    # cached with the match so re-selecting it is instant. This is what lets a coach check a tag before committing
-    # it to a reel.
-    if events.events:
-        st.subheader("Preview a tagged moment")
-        st.caption("Pick a moment and its clip is cut and played here; clips are cached beside the match.")
-        preview_dir = library.highlights_dir(match_id) / PREVIEW_DIR
-        # The detail is the global sidebar option: how much picture a review clip is worth is about the reviewer's
-        # patience, which does not change from match to match.
-        # The picker leads with the match clock where the game is marked, because that is the time a coach reads
-        # out; the candidate's own recording time is the fallback for a match with no marks.
-        def _match_clock_for(event: Event) -> str | None:
-            if game_record is None or game_marks is None:
-                return None
-            on_game = game_lib.game_time(game_record, event.time_s, event.video or game_record.output)
-            if on_game is None:
-                return None
-            half = game_record.half_of(on_game)
-            if half is None:
-                return None
-            return _clock(on_game - game_marks[0]) if half == 1 else f"{_clock(on_game - game_marks[1])} (2H)"
-
-        selected = st.selectbox(
-            "Moment",
-            range(len(events.events)),
-            format_func=lambda index: _event_label(
-                events.events[index], index, _match_clock_for(events.events[index])
-            ),
-            key="preview_event",
-        )
-        preview_event = events.events[selected]
-        # Cut from the recording the candidate was found in. Its timestamp is a time on *that* file's clock: a
-        # single camera file's 10:00 and the combined game's 10:00 are minutes apart, so previewing one against the
-        # other cuts the wrong part of the match - or, near the end of the shorter file, nothing at all.
-        preview_source = Path(preview_event.video) if preview_event.video else Path(chosen)
-        preview_source_missing = bool(preview_event.video) and not preview_source.exists()
-        windowed = moment_for_event(preview_event)
-        if preview_source_missing:
-            st.error(
-                f"This candidate was found in `{Path(preview_event.video).name}`, which is not available any "
-                "more, so its clip cannot be cut. Re-scan the audio on the selected video for candidates on it."
-            )
-            preview_moment = None
-        else:
-            source_length = probe_cached(str(preview_source)).duration_s
-            preview_moment = clamp_moment(windowed, source_length)
-            if preview_moment is None:
-                st.error(
-                    f"This candidate sits at {_clock(preview_event.time_s)}, which is past the end of "
-                    f"`{preview_source.name}` ({_clock(source_length)}) - it was found in another recording. "
-                    "Select that video in Step 1, or scan this one for its own candidates."
-                )
-        if preview_moment is not None:
-            preview_file = preview_dir / preview_clip_name(preview_moment, preview_mode)
-
-            def _play_preview() -> None:
-                """Play whatever the mode produced: an MP3 has no picture to show."""
-                if preview_mode == "audio":
-                    st.audio(str(preview_file))
-                else:
-                    st.video(str(preview_file))
-
-            # The window is stated in the recording's own seconds (that is what the clip is cut from) with the match
-            # clock beside it where the game is marked - the two differ by the clip's offset, and a coach reads the
-            # match clock while the file's seconds are what the cut uses.
-            match_clock = _match_clock_for(preview_event)
-            when = f"{match_clock} of the match" if match_clock else f"{preview_moment.start_s:.1f}s"
-            st.write(
-                f"**{preview_event.type}** - {preview_moment.reason} "
-                f"({when}; {preview_moment.start_s:.1f}s to {preview_moment.end_s:.1f}s of "
-                f"`{preview_source.name}`, {preview_moment.end_s - preview_moment.start_s:.1f}s)"
-            )
-            # Where the verdict is stated for the moment on screen. The picker's own label carries it too, but
-            # Streamlit only redraws a selectbox's text when its value changes, so a marker added there is a beat
-            # behind the button that was just pressed.
-            if preview_event.verdict:
-                decided = "a true positive" if preview_event.verdict == VERDICT_TRUE else "a false positive"
-                st.write(f"You marked this **{decided}** - press again to change it, or clear it below.")
-            # Both of these are things the page used to leave the player to discover: that the clip came from
-            # another file, and that it had to stop short of the window because the recording does.
-            if Path(preview_source).resolve() != Path(chosen).resolve():
-                st.caption(f"Cut from `{preview_source.name}` - the recording this candidate was found in.")
-            if preview_moment is not windowed:
-                st.caption(
-                    "The recording covers only part of this window, so the clip ends where the footage does."
-                )
-            # The selection *is* the request, so there is no button to press. A failed cut is remembered, so a rerun
-            # caused by some other widget does not quietly hammer ffmpeg again - that moment can be retried.
-            failed = st.session_state.get("preview_cut_failed")
-            if preview_file.exists():
-                _play_preview()
-            elif failed == preview_file.name:
-                st.error("The preview for this moment could not be cut.")
-
-                def _retry_preview() -> None:
-                    st.session_state.pop("preview_cut_failed", None)
-
-                st.button("Retry cutting the preview", on_click=_retry_preview)
-            else:
-                bar = st.progress(0.0, text="Cutting the preview clip...")
-                reporter = progress_reporter(bar, "Cutting the preview clip...")
-                try:
-                    export_moment(
-                        preview_source,
-                        preview_moment,
-                        preview_file,
-                        mode=preview_mode,
-                        use_gpu=True,
-                        progress=reporter,
-                        clip_offsets=_clip_offsets(str(preview_source)),
-                    )
-                except Exception as exc:  # a failed preview must not take the page down
-                    st.session_state["preview_cut_failed"] = preview_file.name
-                    st.error(f"Could not cut the preview: {exc}")
-                if preview_file.exists():
-                    reporter(1.0, "Preview ready")
-                    _play_preview()
-            # Review the detection this clip shows, without moving off it to hunt for a row in the table. The
-            # index is passed as an argument - what the picker showed when these buttons were drawn - so the
-            # verdict cannot land on a different moment if the list is rebuilt between the click and the run.
-            verdict_columns = st.columns([1, 1, 1, 2])
-            with verdict_columns[0]:
-                st.button(
-                    "True positive",
-                    key=f"verdict_true::{match_id}",
-                    on_click=_mark_verdict,
-                    args=(selected, VERDICT_TRUE),
-                    disabled=preview_event.verdict == VERDICT_TRUE,
-                    help="A real stoppage: keep it, and let the reels use it.",
-                )
-            with verdict_columns[1]:
-                st.button(
-                    "False positive",
-                    key=f"verdict_false::{match_id}",
-                    on_click=_mark_verdict,
-                    args=(selected, VERDICT_FALSE),
-                    disabled=preview_event.verdict == VERDICT_FALSE,
-                    help="Not a whistle's stoppage: rejected candidates are left out of the reels.",
-                )
-            with verdict_columns[2]:
-                st.button(
-                    "Clear verdict",
-                    key=f"verdict_clear::{match_id}",
-                    on_click=_mark_verdict,
-                    args=(selected, ""),
-                    disabled=not preview_event.verdict,
-                    help="Back to unreviewed.",
-                )
-
-    payload = st.session_state.get("report") or report_from_library(library, match_id)
-    st.subheader("Highlight reels")
-    if not events.events:
-        st.info("Tag an event, or scan the audio, before cutting highlights.")
-    else:
-        moments = build_moments(events.events, (payload or {}).get("momentum"))
-        st.write(f"{len(moments)} candidate moment(s).")
-        for tier, seconds in TIER_SECONDS.items():
-            reel = select_reel(tier, moments, match_duration_s=probe.duration_s)
-            tier_col, button_col = st.columns([3, 1])
-            with tier_col:
-                st.write(f"**{tier}** - {len(reel.moments)} moment(s), {reel.duration_s:.0f}s of a {seconds:.0f}s target")
-            with button_col:
-                export_clicked = st.button(
-                    f"Export {tier}", key=f"export_{tier}", disabled=not reel.moments
-                )
-            if export_clicked:
-                # Outside the narrow column, so the progress bar has the full width to breathe.
-                out_path = library.highlights_dir(match_id) / f"{tier}.mp4"
-                bar = st.progress(0.0, text=f"Cutting the {tier} reel ({len(reel.moments)} moments)...")
-                reporter = progress_reporter(bar, f"Cutting the {tier} reel...")
-                # Moments found in another recording are mapped onto this one through the game manifest, so a
-                # whistle scanned on a camera clip lands at the right second of the combined game.
-                export_reel(chosen, reel, out_path, use_gpu=True, progress=reporter, clip_offsets=_clip_offsets(chosen))
-                write_manifest(reel, chosen, out_path.with_suffix(".json"))
-                reporter(1.0, f"{tier} reel ready")
-                st.success(f"Wrote `{out_path.relative_to(REPO_ROOT)}`")
-
-# --------------------------------------------------------------------------------------------------------------
-# Library
 # --------------------------------------------------------------------------------------------------------------
 st.divider()
 st.header("Archive contents")

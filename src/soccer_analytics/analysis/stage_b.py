@@ -816,8 +816,8 @@ def build_report(
         notes.append(f"{len(weak)} track(s) had weakly separated kit colours; their team label is a best guess.")
     notes.append(
         "Goals, shots, corners, penalties, clearances and tackles can be inferred from the ball scan and these "
-        "tracks (Step 4's Detect events); saves and blocks stay manual tags, because a keeper's save and a shot "
-        "wide look the same to a ball track."
+        "tracks (the playback's own Detect events button, or the one-press build in Step 3); saves and blocks stay "
+        "manual tags, because a keeper's save and a shot wide look the same to a ball track."
     )
     notes.append("Only part of the pitch is in view at once, so no full-pitch formation is reported.")
     report(1.0)

@@ -60,6 +60,21 @@ def test_dashboard_offers_the_next_step_either_way() -> None:
     assert actionable or explained, f"Step 3 said neither. buttons={buttons} messages={messages!r}"
 
 
+def test_the_option_sidebar_is_gone_and_the_one_press_build_is_offered() -> None:
+    """The preview-detail sidebar was removed - every clip is full quality now - and Step 3 offers the one-press
+    "Build report + run all detections" beside "Build report" whenever it can build at all."""
+    app = streamlit_testing.AppTest.from_file(str(APP), default_timeout=120)
+    app.run()
+    assert not app.exception, [str(e.value) for e in app.exception]
+    assert not list(app.sidebar.radio), "the sidebar still offers options - it was to be removed entirely"
+    if _no_footage(app):
+        pytest.skip("no footage available in this environment")
+    buttons = [button.label for button in app.button]
+    if "Build report" not in buttons:
+        pytest.skip("this machine has no analysed, calibrated match to build a report for")
+    assert "Build report + run all detections" in buttons
+
+
 def test_the_unique_players_panel_renders_when_a_report_exists() -> None:
     """The centred-clip panel must render against real artefacts - or say why it cannot.
 
