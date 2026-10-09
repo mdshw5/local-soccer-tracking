@@ -94,6 +94,28 @@ def event_from_tag(tag: dict, *, video: str, window_start: float, duration_s: fl
     )
 
 
+def repeated_manual_tag(events: Sequence[Event], event: Event, *, within_s: float = 0.01) -> Event | None:
+    """The already-stored manual tag that ``event`` repeats, if there is one.
+
+    A press is delivered *at least* once, not exactly once: a page that reconnects after a server restart re-sends
+    the component's sticky value, and the new session has no acknowledgement to compare it against - so without
+    this check the same press would be stored again on every reconnect (a duplicate tag on the timeline, and in
+    every reel that uses it). Two manual tags of the same type for the same team on the same recording within a
+    centisecond are one press; a different type, team, second or recording is a different event and is left alone.
+    Detected candidates never match - a human tagging an event a detector also found is two rows on purpose.
+    """
+    for other in events:
+        if (
+            getattr(other, "source", "manual") == "manual"
+            and other.type == event.type
+            and int(other.team) == int(event.team)
+            and str(other.video) == str(event.video)
+            and abs(float(other.time_s) - float(event.time_s)) < within_s
+        ):
+            return other
+    return None
+
+
 def _kit_colour(entry: Sequence[int] | None) -> list[int] | None:
     """One team's kit colour as a plain JSON list of three ints, or None when there is none to show.
 

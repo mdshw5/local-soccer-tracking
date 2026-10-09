@@ -11,7 +11,7 @@ import pytest
 
 from soccer_analytics.analysis import stage_b
 from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
-from soccer_analytics.dashboard.replay import build_replay, event_from_tag, player_table_rows
+from soccer_analytics.dashboard.replay import build_replay, event_from_tag, player_table_rows, repeated_manual_tag
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration, pitch_to_pixels
 from synthetic_match import PITCH_LENGTH, PITCH_WIDTH, simulate_match
 
@@ -398,3 +398,22 @@ def test_a_quick_tag_is_clamped_to_the_window_and_rejects_unknown_types() -> Non
     assert early.time_s == pytest.approx(10.0)
     with pytest.raises(ValueError):
         event_from_tag({"type": "wobble"}, video="v.mp4", window_start=0.0, duration_s=60.0)
+
+
+def test_a_re_delivered_press_is_recognised_as_already_stored() -> None:
+    """A page that reconnects after a server restart re-sends the component's sticky value; the session that
+    would remember the acknowledgement is gone, so the store has to be idempotent by content or every reconnect
+    duplicates the user's last tags. Same type, team, recording and second means the same press."""
+    from soccer_analytics.analysis.events import Event
+
+    stored = Event(time_s=552.5, type="goal", team=0, video="/v.mp4")
+    same = Event(time_s=552.5, type="goal", team=0, video="/v.mp4")
+    assert repeated_manual_tag([stored], same) is stored
+    # A different team, type, second or recording is a different event, so it goes in.
+    assert repeated_manual_tag([stored], Event(time_s=552.5, type="goal", team=1, video="/v.mp4")) is None
+    assert repeated_manual_tag([stored], Event(time_s=552.5, type="shot", team=0, video="/v.mp4")) is None
+    assert repeated_manual_tag([stored], Event(time_s=600.0, type="goal", team=0, video="/v.mp4")) is None
+    assert repeated_manual_tag([stored], Event(time_s=552.5, type="goal", team=0, video="/other.mp4")) is None
+    # A detected candidate is not a manual tag: a human tagging what a detector also found is two rows on purpose.
+    detected = Event(time_s=552.5, type="goal", team=0, source="ball", video="/v.mp4")
+    assert repeated_manual_tag([detected], same) is None

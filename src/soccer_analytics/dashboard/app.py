@@ -102,7 +102,13 @@ from soccer_analytics.dashboard.reports import (
     team_colours,
     team_name,
 )
-from soccer_analytics.dashboard.replay import build_replay, event_from_tag, player_table_rows, track_boxes
+from soccer_analytics.dashboard.replay import (
+    build_replay,
+    event_from_tag,
+    player_table_rows,
+    repeated_manual_tag,
+    track_boxes,
+)
 from soccer_analytics.dashboard.stream import configured_base, configured_port, is_reachable
 from soccer_analytics.geometry.pitch_calibration import (
     MIN_CLICKS_PER_ANCHOR,
@@ -399,6 +405,10 @@ def _apply_quick_tags(
     rerun, which is what clears the component's pending list and stops a tag being stored twice. A tag is stamped
     with the playback's own second when the button was pressed - not with the moment the round trip finishes - so
     tagging while watching lands on what was on screen.
+
+    A page that reconnects after a server restart re-sends the component's sticky value, and the new session has
+    no acknowledgement to compare against - so the store is also idempotent: a press that is already on the
+    timeline (same type, team, recording and second) is skipped rather than duplicated.
     """
     if not isinstance(tag_result, dict) or str(tag_result.get("action")) != "tag":
         return
@@ -422,16 +432,26 @@ def _apply_quick_tags(
     if newest <= int(st.session_state.get(ack_key, 0)):
         return  # nothing new: the sticky value was already applied on an earlier run
     st.session_state[ack_key] = newest
+    added: list[Event] = []
     if fresh:
         log = library.events(match_id)
         for event in fresh:
+            if repeated_manual_tag(log.events, event) is not None:
+                continue  # the same press delivered twice: it is already on the timeline
             log.add(event)
-        library.save_events(match_id, log)
-        last = fresh[-1]
-        st.session_state["events_flash"] = (
-            "success",
-            f"Tagged {last.type} at {_clock(last.time_s)} - it is on the timeline strip above.",
-        )
+            added.append(event)
+        if added:
+            library.save_events(match_id, log)
+            last = added[-1]
+            st.session_state["events_flash"] = (
+                "success",
+                f"Tagged {last.type} at {_clock(last.time_s)} - it is on the timeline strip above.",
+            )
+        else:
+            st.session_state["events_flash"] = (
+                "success",
+                "That tag is already on the timeline - nothing was added.",
+            )
     else:
         st.session_state["events_flash"] = (
             "warning",
@@ -734,7 +754,7 @@ def _detections_run_status(library: MatchLibrary, match_id: str, watch_key: str)
     elif state == "error":
         st.error(f"All-detections run failed: {status.get('error') or status.get('message')}")
     else:
-        st.caption(f"Last all-detections run: {status.get('message') or 'finished'}.")
+        st.caption(f"Last all-detections run: {str(status.get('message') or 'finished').rstrip('.')}.")
     if previous == "running" and state != "running":
         st.rerun()
 
