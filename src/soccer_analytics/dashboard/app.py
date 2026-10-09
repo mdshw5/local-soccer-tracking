@@ -51,7 +51,7 @@ from soccer_analytics.analysis.events import (
     VERDICT_TRUE,
     Event,
 )
-from soccer_analytics.analysis.framing import SHORTEST_CLIP_SECONDS, default_clip_length
+from soccer_analytics.analysis.framing import COMMAND_RATE_HZ, SHORTEST_CLIP_SECONDS, default_clip_length
 from soccer_analytics.analysis.highlights import (
     TIER_SECONDS,
     build_moments,
@@ -1219,8 +1219,13 @@ def _load_replay_boxes_cached(path: str, mtime_ns: int) -> dict:
 
 
 def _centred_clip_name(track_id: int, start_s: float, duration_s: float) -> str:
-    """A stable name for a centred clip, so re-cutting the same window reuses the file instead of re-encoding."""
-    key = f"{track_id}|{start_s:.2f}|{duration_s:.2f}"
+    """A stable name for a centred clip, so re-cutting the same window reuses the file instead of re-encoding.
+
+    The framing command rate is part of the key: it *is* the pan's update rate (ffmpeg's ``sendcmd`` cannot
+    interpolate), so a cached clip cut by a choppier planner must not be served after the planner is fixed -
+    re-cutting the same window gets a fresh file.
+    """
+    key = f"{track_id}|{start_s:.2f}|{duration_s:.2f}|{COMMAND_RATE_HZ:g}hz"
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
     return f"player_{track_id}_{digest}.mp4"
 

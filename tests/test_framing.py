@@ -18,6 +18,7 @@ from soccer_analytics.analysis.framing import (
     DEFAULT_PLAYER_FRACTION,
     CropCommand,
     FramingPlan,
+    command_schedule,
     crop_size,
     crop_times,
     plan_framing,
@@ -119,6 +120,29 @@ def test_smoothing_removes_box_jitter_from_the_crop_path() -> None:
     assert np.abs(np.diff(path, 2)).max() < np.abs(np.diff(raw, 2)).max()
 
 
+def test_the_pan_updates_every_frame_rather_than_a_few_times_a_second() -> None:
+    """``sendcmd`` cannot interpolate, so the command grid *is* the pan's update rate.
+
+    At the old 6 Hz the crop stood still for four frames of a 30 fps cut and then jumped a few percent of the
+    frame - the "choppy while panning" this pins down. A player crossing the middle of the frame at a walking
+    pace must be followed in steps far below a percent of the crop, with a command at least every output frame.
+    The crossing stays away from the frame's edges so nothing is clamped (a clamped stretch legitimately holds
+    one position and would read as a gap here).
+    """
+    times = np.arange(0.0, 6.0, 0.2)
+    centres = np.linspace(0.30, 0.70, len(times))
+    boxes = _boxes([(float(c), 0.04) for c in centres])
+    plan = plan_framing(
+        times, boxes, start_s=0.0, duration_s=6.0, source_width=1920, source_height=1080,
+        player_fraction=0.25, min_crop_height_px=200.0,
+    )
+    assert plan is not None
+    gaps = np.diff([command.time_s for command in plan.commands])
+    assert gaps.max() <= 1.0 / 30.0 + 1e-9, "the crop must move at least as often as a 30 fps cut shows a frame"
+    steps = np.abs(np.diff(np.asarray([command.x for command in plan.commands], dtype=np.float64)))
+    assert steps.max() < 0.02 * plan.crop_w, "a pan must not jump a visible fraction of the crop in one step"
+
+
 def test_a_gap_in_the_track_ends_the_window_before_it() -> None:
     """Across a long gap the player's position is unknown; the clip stops rather than sliding to a guess."""
     times = np.concatenate([np.arange(0.0, 3.0, 0.2), np.arange(10.0, 13.0, 0.2)])
@@ -165,6 +189,16 @@ def test_sendcmd_filter_names_the_crop_and_puts_the_schedule_in_order() -> None:
     assert chain.endswith(",scale=1280:-2:flags=lanczos,fps=30")
     # No scale/fps asked for, no scale/fps added.
     assert "scale" not in sendcmd_filter(plan)
+    # The file variant references the file verbatim; the caller writes command_schedule()'s text there, which is
+    # the same syntax ffmpeg accepts inline - so a long schedule escapes the 128 KiB argument limit unchanged.
+    assert command_schedule(plan) == (
+        "0.000 crop@follow x 10, crop@follow y 20; "
+        "0.500 crop@follow x 30, crop@follow y 40; "
+        "1.000 crop@follow x 50, crop@follow y 60"
+    )
+    file_chain = sendcmd_filter(plan, schedule_file="/tmp/schedule.txt", scale_width=640)
+    assert file_chain.startswith("sendcmd=f='/tmp/schedule.txt',crop@follow=w=640:h=360:x=10:y=20")
+    assert file_chain.endswith(",scale=640:-2:flags=lanczos")
 
 
 def test_sendcmd_filter_refuses_an_empty_plan() -> None:
@@ -218,10 +252,12 @@ def test_a_real_cut_keeps_the_moving_player_in_the_middle_of_the_frame(tmp_path)
     )
     assert plan is not None and plan.crop_h <= height and plan.crop_w <= width
     out = tmp_path / "centred.mp4"
+    schedule = tmp_path / "schedule.txt"  # the production path: the schedule reaches ffmpeg as a file
+    schedule.write_text(command_schedule(plan))
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
         "-i", str(source), "-t", f"{duration_s:.3f}",
-        "-vf", sendcmd_filter(plan, scale_width=320),
+        "-vf", sendcmd_filter(plan, schedule_file=str(schedule), scale_width=320),
         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(out),
     ]
     result = subprocess.run(command, capture_output=True, text=True)

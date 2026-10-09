@@ -7,7 +7,9 @@ calibration is involved: a centred clip can be cut for any track, registered pit
 The crop does not chase the detector frame by frame - it would twitch with every box jitter, and a clip that
 shudders is worse than one that lags. Instead the trajectory is interpolated onto a fixed command grid, smoothed
 with a short centred window, and clamped to the frame; ffmpeg's ``sendcmd`` then drives a ``crop`` filter with the
-result, which is how the cut follows the player without re-encoding the whole picture through Python.
+result, which is how the cut follows the player without re-encoding the whole picture through Python. The grid is
+dense on purpose - once per source frame: ``sendcmd`` cannot interpolate, so the command rate *is* the camera's
+update rate, and a sparse grid reads as a stuttering pan even when the trajectory underneath is smooth.
 
 Everything here is pure: the numbers go in, the crop commands and the filter string come out, and the ffmpeg call
 that consumes them lives in ``analysis.highlights`` with the other clip cuts.
@@ -26,9 +28,11 @@ DEFAULT_PLAYER_FRACTION = 0.25
 # the fraction would ask for a postage stamp that then has to be blown up; below this floor the player simply
 # occupies less of the frame.
 MIN_CROP_HEIGHT_PX = 480.0
-# How often ``sendcmd`` is told where to put the crop. At 6 Hz - the rate a broadcast operator would move a
-# virtual camera at most - the motion reads as a pan rather than a teleport, and the filter string stays small.
-COMMAND_RATE_HZ = 6.0
+# How often ``sendcmd`` is told where to put the crop: once per frame of a 60 fps source. Not a taste knob - the
+# crop filter does not interpolate, so whatever this is becomes the pan's update rate (the old 6 Hz moved the crop
+# in ~167 ms step-and-holds, which is what "choppy while panning" was). Stationary stretches collapse to two
+# commands and the schedule goes to ffmpeg by file, so the density costs nothing but a few dozen kilobytes.
+COMMAND_RATE_HZ = 60.0
 # Centred moving average over the crop centre. Long enough to ride out box jitter and detection flicker, short
 # enough that a sprint is followed without visible lag.
 SMOOTH_WINDOW_S = 0.7
@@ -206,9 +210,27 @@ def plan_framing(
     return FramingPlan(crop_w, crop_h, tuple(deduped), round(end_s - start_s, 3), truncated)
 
 
+def command_schedule(plan: FramingPlan) -> str:
+    """The schedule text ``sendcmd`` consumes: one interval per command, ``"; "``-separated.
+
+    The same text is what a schedule *file* holds - ffmpeg's file option takes identical syntax (``";"`` separates
+    intervals; newlines alone do not). Exporting through a file keeps a minute-long clip's command list out of a
+    single command-line argument, which Linux caps at 128 KiB; at frame rate the list is larger than that.
+    """
+    if not plan.commands:
+        raise ValueError("the plan has no commands to send")
+    # Each interval lists the x and y together: the pair is applied as one reposition, so the crop never moves
+    # along one axis alone between two commands.
+    return "; ".join(
+        f"{command.time_s:.3f} crop@follow x {command.x}, crop@follow y {command.y}"
+        for command in plan.commands
+    )
+
+
 def sendcmd_filter(
     plan: FramingPlan,
     *,
+    schedule_file: str | None = None,
     scale_width: int | None = None,
     fps: int | None = None,
 ) -> str:
@@ -216,18 +238,16 @@ def sendcmd_filter(
 
     ``sendcmd`` sends each command at its own time (seconds from the first frame of the filter graph's input, which
     is the cut's start, because the cut seeks first); its targets are named filters, hence ``crop@follow``. The
-    scale is a plain filter after the crop, so the moving window is always resampled from full resolution and the
-    output size stays constant as the crop moves.
+    schedule goes inline by default; ``schedule_file`` points ffmpeg at a file holding the same text instead, which
+    is what a long clip needs (see :func:`command_schedule`). The scale is a plain filter after the crop, so the
+    moving window is always resampled from full resolution and the output size stays constant as the crop moves.
     """
     if not plan.commands:
         raise ValueError("the plan has no commands to send")
-    # Each interval lists the x and y together: the pair is applied as one reposition, so the crop never moves
-    # along one axis alone between two commands.
-    spans = [f"{command.time_s:.3f} crop@follow x {command.x}, crop@follow y {command.y}" for command in plan.commands]
-    schedule = "; ".join(spans)
+    head = f"sendcmd=f='{schedule_file}'" if schedule_file else f"sendcmd=c='{command_schedule(plan)}'"
     first = plan.commands[0]
     chain = (
-        f"sendcmd=c='{schedule}',"
+        f"{head},"
         f"crop@follow=w={plan.crop_w}:h={plan.crop_h}:x={first.x}:y={first.y}"
     )
     if scale_width:

@@ -347,8 +347,9 @@ def export_player_clip(
 
     ``times`` and ``boxes`` are the player's own observations: source seconds and width-normalised
     ``(x1, y1, x2, y2)`` rectangles (exactly what the replay payload's ``boxes`` are). The crop is sized from the
-    player's median height, moved by ffmpeg's ``sendcmd`` at a handful of commands per second, and clamped to the
-    frame - see ``analysis.framing`` for why the trajectory is smoothed and what happens at a gap.
+    player's median height, moved by ffmpeg's ``sendcmd`` once per source frame, and clamped to the frame - see
+    ``analysis.framing`` for why the trajectory is smoothed, why the command rate is the pan's update rate, and
+    what happens at a gap.
 
     ``source_size`` is the video's ``(width, height)``; it is probed when not given, but callers that already know
     it (the dashboard probes every video once) should pass it rather than pay for another ffprobe.
@@ -359,7 +360,7 @@ def export_player_clip(
     observations) and the ``RuntimeError`` from the encoder when ffmpeg fails - the page reports both rather than
     showing a broken clip.
     """
-    from soccer_analytics.analysis.framing import plan_framing, sendcmd_filter
+    from soccer_analytics.analysis.framing import command_schedule, plan_framing, sendcmd_filter
 
     source = Path(source)
     if source_size is None:
@@ -380,17 +381,27 @@ def export_player_clip(
         time_s=float(start_s), start_s=float(start_s), end_s=float(start_s) + plan.duration_s,
         weight=0.0, reason="player-centred clip",
     )
-    output = _encode_clip(
-        source,
-        moment,
-        Path(output_path),
-        duration_s=plan.duration_s,
-        width=width,
-        use_gpu=use_gpu,
-        fps=30,
-        video_filter=sendcmd_filter(plan, scale_width=width),
-        progress=progress,
-    )
+    # The schedule goes to ffmpeg by *file*, not inline: at frame rate a minute-long clip's command list is
+    # larger than the 128 KiB Linux allows in a single argument, and the whole encode would die on it. The file
+    # is written where the temp directory lives and removed when the encode ends, either way.
+    schedule = tempfile.NamedTemporaryFile("w", prefix="framing_schedule_", suffix=".txt", delete=False)
+    schedule_path = Path(schedule.name)
+    try:
+        with schedule:
+            schedule.write(command_schedule(plan))
+        output = _encode_clip(
+            source,
+            moment,
+            Path(output_path),
+            duration_s=plan.duration_s,
+            width=width,
+            use_gpu=use_gpu,
+            fps=30,
+            video_filter=sendcmd_filter(plan, schedule_file=str(schedule_path), scale_width=width),
+            progress=progress,
+        )
+    finally:
+        schedule_path.unlink(missing_ok=True)
     return output, plan
 
 
