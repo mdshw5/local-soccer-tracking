@@ -133,7 +133,9 @@ The dashboard walks through four steps in order, and every step stores its resul
    The animated pitch replay carries a **timeline strip** above it: the momentum curve (each team's share of
    contested frames, drawn above and below the centre line) with every tagged and detected event marked on it -
    filled dots for manual tags, hollow rings for detected candidates, one colour per event type. Clicking the strip
-   seeks the replay to that moment, so the timeline doubles as the animation's scrubber.
+   seeks the replay to that moment, so the timeline doubles as the animation's scrubber; hovering a marker names
+   the event (type, time, team, tagged or detected, note) in a popover, and the arrows beside play step to the
+   previous/next event.
 
    Beside the animation sits the **annotated footage** of the match itself (the stream described further down), kept
    in step with it: a still of the exact second while the animation is paused - so scrubbing the animation scrubs
@@ -177,9 +179,7 @@ stream in an `<img>` - browsers download a bare multipart URL instead of playing
 markings projected back through the same corrected camera chain the report uses (the homography drawn on the
 field), a box on each tracked player in their measured team colour with a chip showing their shirt number - or
 `#track_id` while nobody has named them - the ball from the segment's scan (a filled dot when a detector saw it, a
-hollow ring where the scan coasted across a miss), and a clock/legend HUD. The clock reads the same time as the
-animation beside it - elapsed on the analysed window's own clock, whose zero is kick-off on a marked build - not
-the recording's own clock, which starts minutes earlier.
+hollow ring where the scan coasted across a miss), and a clock/legend HUD.
 
 The encoded form of the same stream is what the dashboard pane plays where the browser can: `/live/<match_id>.mp4`
 (an endless fragmented MP4: `fps=`, `rate=`, `width=`, `overlays=`, `audio=`), `/video/<match_id>.mp4` (a bounded,

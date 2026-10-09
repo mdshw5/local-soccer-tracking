@@ -133,6 +133,45 @@ def test_the_timeline_strip_draws_momentum_and_events() -> None:
     assert "timeline.addEventListener('click'" in html, "clicking the strip must seek the replay"
 
 
+def test_the_arrows_step_between_timeline_events_instead_of_frames() -> None:
+    """One analysis frame is nothing to look at between events; the events are the moments a review moves
+    between. The arrows jump to the previous/next event on the strip - strictly past the current second, so a
+    cluster of events at one moment takes one press - wrap at the ends, and pause like a strip click does."""
+    html = COMPONENT.read_text()
+    assert 'id="prev-event"' in html and 'id="next-event"' in html, "the arrows live beside play"
+    assert 'id="step-back"' not in html and 'id="step-fwd"' not in html, "frame stepping is replaced, not kept"
+    seek = html.split("function seekToEvent", 1)[1].split("\n      function ", 1)[0]
+    assert "state.events" in seek and "event.time_s" in seek, "the steps are the events the strip draws"
+    assert "> state.time + epsilon" in seek and "< state.time - epsilon" in seek, "strictly past the current second"
+    assert "times[0]" in seek and "times[times.length - 1]" in seek, "wrap at both ends"
+    assert "setPlaying(false)" in seek and "draw();" in seek, "pause and show the moment"
+    assert "prevEventBtn.disabled" in html, "with no events there is nowhere to step"
+    listeners = html.split("prevEventBtn.addEventListener", 1)[1].split("tl.addEventListener('mousemove'", 1)[0]
+    assert "seekToEvent(-1)" in listeners and "seekToEvent(1)" in listeners
+
+
+def test_timeline_markers_name_their_event_on_hover() -> None:
+    """The strip is a canvas, so hovering needs a hit test in the drawing's own coordinates and a fixed-position
+    popover (which the canvas cannot clip): the event's type, its second, the team, whether it was tagged or
+    detected and any note - the glance the marker colours alone cannot give. The arrows flash the same popover
+    for the event they land on."""
+    html = COMPONENT.read_text()
+    assert 'id="tl-popover"' in html and "#tl-popover {" in html
+    assert "pointer-events: none" in html, "the popover must never eat the strip's clicks"
+    hit = html.split("function eventAt", 1)[1].split("\n      function ", 1)[0]
+    assert "tl.getBoundingClientRect()" in hit and "timelineMarkerX" in hit, "hit test in the drawing's coordinates"
+    assert "const TL_PAD" in html and html.count("const pad = TL_PAD") == 2, (
+        "one padding for drawing, clicking and hit testing"
+    )
+    text = html.split("function eventPopoverText", 1)[1].split("\n      function ", 1)[0]
+    assert "event.type" in text and "clockText(event.time_s)" in text, "type and time at a glance"
+    assert "'tagged' : 'detected'" in text
+    assert "event.note" in text and "player_number" in text
+    assert "tl.addEventListener('mousemove'" in html and "tl.addEventListener('mouseleave'" in html
+    assert "function hideEventPopover" in html
+    assert "flashEventPopover" in html, "a jump with the arrows names what it landed on"
+
+
 def test_the_legend_is_redrawn_when_events_arrive_without_a_reload() -> None:
     """The legend's event chips must follow the events argument, not only the replay payload.
 

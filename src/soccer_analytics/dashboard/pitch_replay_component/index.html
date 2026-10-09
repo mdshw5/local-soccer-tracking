@@ -139,6 +139,22 @@
         color: #9ca3af;
         padding: 2px 2px 0;
       }
+      #tl-popover {
+        position: fixed;
+        z-index: 30;
+        display: none;
+        transform: translate(-50%, -100%);
+        max-width: 340px;
+        background: #1f2937;
+        color: white;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        padding: 5px 8px;
+        font-size: 12px;
+        white-space: pre-line;
+        pointer-events: none; /* the strip's own clicks still land on the canvas under it */
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+      }
       #legend {
         display: flex;
         flex-wrap: wrap;
@@ -214,8 +230,8 @@
         title="Restart the footage stream at the animation's own second"
         disabled
       >&#8635;</button>
-      <button id="step-back" title="Previous frame">&#9664;&#9474;</button>
-      <button id="step-fwd" title="Next frame">&#9474;&#9654;</button>
+      <button id="prev-event" title="Previous annotated event (wraps around)" disabled>&#9198;</button>
+      <button id="next-event" title="Next annotated event (wraps around)" disabled>&#9197;</button>
       <input id="scrub" type="range" min="0" max="1" step="0.05" value="0" />
       <span id="clock">0:00.0</span>
       <select id="speed" title="Playback speed">
@@ -280,8 +296,10 @@
     </div>
     <div id="tl-hint">
       The strip above is the match timeline: the momentum curve (share of contested frames, team 1 above the
-      centre line) with every tagged and detected event marked. Click it to jump the replay to that moment.
+      centre line) with every tagged and detected event marked. Click it to jump the replay to that moment,
+      hover a marker to see the event, or use the event arrows beside play to step between them.
     </div>
+    <div id="tl-popover"></div>
     <div id="legend"></div>
     <div id="empty">Waiting for the replay data...</div>
 
@@ -326,6 +344,7 @@
       const TRAIL_SECONDS = 4.0;
       const HEAT_RADIUS_M = 2.6;
       const TL_HEIGHT = 74; // the timeline strip's height in CSS pixels
+      const TL_PAD = 6; // the strip's drawing padding: the click maths and the marker hit test share it
       // One colour per event type, so a glance at the strip says what happened. Detected events are drawn hollow
       // (a ring) and manual tags filled, so a machine's guess never reads as a human's certainty.
       const EVENT_COLOURS = {
@@ -422,6 +441,9 @@
       const timeline = document.getElementById('timeline');
       const tl = document.getElementById('tl');
       const tlCtx = tl.getContext('2d');
+      const prevEventBtn = document.getElementById('prev-event');
+      const nextEventBtn = document.getElementById('next-event');
+      const tlPopover = document.getElementById('tl-popover');
       const pitchPane = document.getElementById('pitch-pane');
       const footagePane = document.getElementById('footage-pane');
       let footage = document.getElementById('footage');
@@ -932,7 +954,7 @@
         tlCtx.clearRect(0, 0, width, TL_HEIGHT);
 
         const duration = state.data.duration_s || 1;
-        const pad = 6;
+        const pad = TL_PAD;
         const plotW = width - 2 * pad;
         const midY = TL_HEIGHT / 2;
         const amp = TL_HEIGHT / 2 - 12;
@@ -1035,6 +1057,97 @@
         }
       }
 
+      // Navigating by events, and naming them on hover: the markers are canvas pixels, so both live in the
+      // strip's own coordinates - a hit test that uses the same padding the drawing does, and a fixed-position
+      // popover (a fixed box cannot be clipped by the canvas or the page's edges).
+      function timelineMarkerX(eventTime, rectWidth) {
+        const duration = state.data.duration_s || 1;
+        const plotW = rectWidth - 2 * TL_PAD;
+        return TL_PAD + (Math.min(duration, Math.max(0, eventTime)) / duration) * plotW;
+      }
+
+      function eventAt(clientX) {
+        if (!state.data || !(state.events || []).length) return null;
+        const rect = tl.getBoundingClientRect();
+        const x = clientX - rect.left;
+        let best = null;
+        let bestDistance = 9; // the marker's radius plus a little slack for a steady hand
+        for (const event of state.events) {
+          const distance = Math.abs(timelineMarkerX(event.time_s, rect.width) - x);
+          if (distance <= bestDistance) {
+            bestDistance = distance;
+            best = event;
+          }
+        }
+        return best;
+      }
+
+      function eventPopoverText(event) {
+        const name = String(event.type || 'event');
+        const parts = [`${name.charAt(0).toUpperCase()}${name.slice(1)} · ${clockText(event.time_s)}`];
+        const team = event.team >= 0 ? ((state.data && state.data.team_names) || [])[event.team] : '';
+        const attribution = [team, event.source === 'manual' ? 'tagged' : 'detected'].filter(Boolean).join(' · ');
+        if (attribution) {
+          parts.push(event.player_number ? `${attribution} · #${event.player_number}` : attribution);
+        }
+        if (event.note) parts.push(event.note);
+        return parts.join(String.fromCharCode(10));
+      }
+
+      let popoverTimer = null;
+      function showEventPopover(event, clientX, clientY) {
+        if (!event) return;
+        clearTimeout(popoverTimer);
+        popoverTimer = null;
+        tlPopover.textContent = eventPopoverText(event);
+        tlPopover.style.display = 'block';
+        const half = tlPopover.offsetWidth / 2;
+        const x = Math.min(Math.max(clientX, 8 + half), window.innerWidth - 8 - half);
+        tlPopover.style.left = `${x}px`;
+        tlPopover.style.top = `${Math.max(4, clientY - 10)}px`;
+      }
+
+      function hideEventPopover() {
+        clearTimeout(popoverTimer);
+        popoverTimer = null;
+        tlPopover.style.display = 'none';
+      }
+
+      function flashEventPopover(event) {
+        // Landing on an event from the arrows names it too, so a press answers "what did I just jump to?".
+        if (!event) return;
+        const rect = tl.getBoundingClientRect();
+        showEventPopover(event, rect.left + timelineMarkerX(event.time_s, rect.width), rect.top - 4);
+        popoverTimer = setTimeout(hideEventPopover, 1800);
+      }
+
+      function seekToEvent(step) {
+        // Previous/next event on the strip, wrapping at the ends so repeated presses cycle the match. The jump
+        // is strictly past the current second - a cluster of events at one moment takes one press, not one per
+        // event - and it pauses, like a strip click: the point is to look at the moment the footage shows.
+        if (!state.data || !(state.events || []).length) return;
+        const times = state.events.map((event) => event.time_s).sort((a, b) => a - b);
+        const epsilon = 1e-3;
+        let target;
+        if (step > 0) {
+          target = times.find((t) => t > state.time + epsilon);
+          if (target === undefined) target = times[0];
+        } else {
+          for (let i = times.length - 1; i >= 0; i -= 1) {
+            if (times[i] < state.time - epsilon) {
+              target = times[i];
+              break;
+            }
+          }
+          if (target === undefined) target = times[times.length - 1];
+        }
+        setPlaying(false);
+        state.time = Math.min(state.data.duration_s, Math.max(0, target));
+        draw();
+        const landed = (state.events || []).filter((event) => Math.abs(event.time_s - target) < epsilon);
+        flashEventPopover(landed.find((event) => event.source === 'manual') || landed[0]);
+      }
+
       function setPlaying(playing) {
         state.playing = playing;
         playBtn.innerHTML = playing ? '&#10074;&#10074;' : '&#9654;';
@@ -1070,9 +1183,8 @@
       // * in the fallback mode there is no clock to read (an <img> has none), so the MJPEG stream is opened at
       //   the animation's second and left alone until the next seek, speed or layer change moves it.
       //
-      // The animation's clock is the strip's (0 = first analysed frame); the stream asks for times in the
-      // recording's seconds (its HUD draws the strip clock - see dashboard/stream.py), so ``streamOffset`` is
-      // what makes "start at this second" mean the same on both clocks.
+      // The animation's clock is the strip's (0 = first analysed frame); the stream's is the recording's, so
+      // ``streamOffset`` is what makes "start at this second" mean the same on both clocks.
       // ---------------------------------------------------------------------------------------------------
       const FOOTAGE_FPS = 30; // full motion for the pane; 60 outruns this box's render at 1280 with overlays
       const FOOTAGE_DRIFT_TOLERANCE_S = 2.0; // a restart costs an encode: only correct a visible divergence
@@ -1459,16 +1571,14 @@
         }
         restartFootage();
       });
-      document.getElementById('step-back').addEventListener('click', () => {
-        setPlaying(false);
-        state.time = Math.max(0, state.time - 1 / state.data.fps);
-        draw();
+      prevEventBtn.addEventListener('click', () => seekToEvent(-1));
+      nextEventBtn.addEventListener('click', () => seekToEvent(1));
+      tl.addEventListener('mousemove', (event) => {
+        const hit = eventAt(event.clientX);
+        if (hit) showEventPopover(hit, event.clientX, event.clientY);
+        else hideEventPopover();
       });
-      document.getElementById('step-fwd').addEventListener('click', () => {
-        setPlaying(false);
-        state.time = Math.min(state.data.duration_s, state.time + 1 / state.data.fps);
-        draw();
-      });
+      tl.addEventListener('mouseleave', hideEventPopover);
       scrub.addEventListener('input', () => {
         setPlaying(false);
         state.time = Number(scrub.value);
@@ -1477,7 +1587,7 @@
       timeline.addEventListener('click', (event) => {
         if (!state.data) return;
         const rect = tl.getBoundingClientRect();
-        const pad = 6;
+        const pad = TL_PAD;
         const plotW = rect.width - 2 * pad;
         const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left - pad) / plotW));
         setPlaying(false);
@@ -1629,6 +1739,8 @@
         state.numbers = args.numbers || {};
         state.events = args.events || [];
         state.momentum = args.momentum || [];
+        // The event arrows have nowhere to step until the timeline has events to step between.
+        prevEventBtn.disabled = nextEventBtn.disabled = state.events.length === 0;
         state.halfMinute = args.half_minute === undefined ? null : args.half_minute;
         // Tags Python has already stored, acknowledged by sequence: anything up to the acknowledgement is on the
         // strip as a real marker (it came with ``args.events``), so the faded pending copy is dropped. The team
