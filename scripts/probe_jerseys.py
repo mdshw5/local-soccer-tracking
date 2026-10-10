@@ -35,7 +35,7 @@ from soccer_analytics.analysis.jerseys import crop_torso
 from soccer_analytics.analysis.library import MatchLibrary
 from soccer_analytics.analysis.projection import on_pitch_mask, project_segment
 from soccer_analytics.analysis.stage_a import load_segment
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader
+from soccer_analytics.ingest.source import open_reader
 
 MIN_CONFIDENCE = 0.55
 PLAYER_MAX_HEIGHT_PX = 200.0
@@ -103,7 +103,7 @@ def track_mode(args: argparse.Namespace) -> int:
             print(f"t{tid}: not in the replay payload / no boxes")
             continue
         hs = (box[:, 3] - box[:, 1]) * 1920.0
-        picks = [i for i in range(len(hs)) if hs[i] >= 60.0]  # 60px is the kit-descriptor floor; colours read fine there
+        picks = [i for i in range(len(hs)) if hs[i] >= 60.0]  # 60px is the kit-descriptor floor; colors read fine there
         picks.sort(key=lambda i: -hs[i])
         picks = picks[: max(8, args.picks * 3)]
         if len(picks) > args.picks:
@@ -133,7 +133,7 @@ def track_mode(args: argparse.Namespace) -> int:
             first_frame = int(player["frames"][group[0]])
             group_wanted = {int(player["frames"][i]): i for i in group}
             span_frames = int(player["frames"][group[-1]]) - first_frame
-            stream = FFmpegFrameReader(
+            stream = open_reader(
                 video,
                 fps=fps,
                 width=args.width,
@@ -148,8 +148,8 @@ def track_mode(args: argparse.Namespace) -> int:
                 crop = crop_torso(image, tuple(box[i]))
                 if crop is None:
                     continue
-                grey = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                blur = float(cv2.Laplacian(grey, cv2.CV_64F).var())
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                blur = float(cv2.Laplacian(gray, cv2.CV_64F).var())
                 scaled = crop
                 scale = min(4.0, max(1.0, 96.0 / max(1, crop.shape[0])))
                 if scale > 1.05:
@@ -302,7 +302,7 @@ def main() -> int:
         tiles: list[tuple[int, int, np.ndarray, float]] = []
         decode_start_s = float(segment.time[wanted[0]])
         decode_end_s = float(segment.time[wanted[-1]])
-        reader = FFmpegFrameReader(
+        reader = open_reader(
             args.video,
             fps=fps,
             width=args.width,
@@ -318,8 +318,8 @@ def main() -> int:
                 crop = crop_torso(frame, tuple(boxes[row]))
                 if crop is None:
                     continue
-                grey = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                blur = float(cv2.Laplacian(grey, cv2.CV_64F).var())
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                blur = float(cv2.Laplacian(gray, cv2.CV_64F).var())
                 height = float(heights[row])
                 track = int(assignment.track_id[row])
                 if reader_ocr is not None:

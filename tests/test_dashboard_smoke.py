@@ -1,6 +1,6 @@
 """Smoke test: the dashboard must render end to end without raising.
 
-The page does real work as it renders - it probes the video, reads the segment status and loads saved artefacts - so
+The page does real work as it renders - it probes the video, reads the segment status and loads saved artifacts - so
 this catches the class of error that only appears when the script actually runs.
 """
 
@@ -16,7 +16,7 @@ APP = Path(__file__).resolve().parents[1] / "src" / "soccer_analytics" / "dashbo
 
 
 def _no_footage(app) -> bool:
-    """Whether the page gave up because this machine has no video to analyse.
+    """Whether the page gave up because this machine has no video to analyze.
 
     Checked by message rather than by `app.error` being non-empty: the page also raises *content* errors, such as a
     pitch calibration that came out unusable, and those are the page working, not the page failing.
@@ -43,7 +43,7 @@ def test_dashboard_renders_without_error() -> None:
 def test_dashboard_offers_the_next_step_either_way() -> None:
     """The page must either offer Step 3 or say what Step 3 is waiting for - never just be silent.
 
-    Deliberately not asserting which: the answer depends on what has already been analysed on this machine, and a
+    Deliberately not asserting which: the answer depends on what has already been analyzed on this machine, and a
     test that only passes on a clean workspace is a test that fails the moment someone uses the tool.
     """
     app = streamlit_testing.AppTest.from_file(str(APP), default_timeout=120)
@@ -56,7 +56,7 @@ def test_dashboard_offers_the_next_step_either_way() -> None:
     messages += " ".join(str(block.value) for block in app.warning)
     buttons = [button.label for button in app.button]
     actionable = "Build report" in buttons
-    explained = any(phrase in messages for phrase in ("Run Step 1 first", "Steps 1 and 2", "Not analysed yet"))
+    explained = any(phrase in messages for phrase in ("Run Step 1 first", "Steps 1 and 2", "Not analyzed yet"))
     assert actionable or explained, f"Step 3 said neither. buttons={buttons} messages={messages!r}"
 
 
@@ -71,12 +71,12 @@ def test_the_option_sidebar_is_gone_and_the_one_press_build_is_offered() -> None
         pytest.skip("no footage available in this environment")
     buttons = [button.label for button in app.button]
     if "Build report" not in buttons:
-        pytest.skip("this machine has no analysed, calibrated match to build a report for")
+        pytest.skip("this machine has no analyzed, calibrated match to build a report for")
     assert "Build report + run all detections" in buttons
 
 
 def test_the_unique_players_panel_renders_when_a_report_exists() -> None:
-    """The centred-clip panel must render against real artefacts - or say why it cannot.
+    """The centered-clip panel must render against real artifacts - or say why it cannot.
 
     Data-dependent on purpose: on a machine with a match whose report and replay are built, the panel appears with
     its player list; on a clean machine there is nothing to show and the test skips. What it guards is the wiring
@@ -89,7 +89,7 @@ def test_the_unique_players_panel_renders_when_a_report_exists() -> None:
         pytest.skip("no footage available in this environment")
     video_box = next((s for s in app.selectbox if s.label == "Video (newest first)"), None)
     if video_box is None:
-        pytest.skip("the page did not offer a video to analyse")
+        pytest.skip("the page did not offer a video to analyze")
     # The segment for the combined game is the one the whole pipeline runs on; a single camera clip has none.
     game = next((option for option in video_box.options if "game_" in str(option)), None)
     if game is None:
@@ -152,7 +152,7 @@ def test_the_media_url_check_catches_the_bug_it_exists_for() -> None:
 def test_streamlits_video_player_is_never_given_a_media_url() -> None:
     """``st.video`` takes a path (or a real URL): a ``/media/<hash>`` string is read as a *local file path*.
 
-    Learned live, not in theory: the centred-clip panel registered a clip through the media endpoint and then
+    Learned live, not in theory: the centered-clip panel registered a clip through the media endpoint and then
     handed that URL to ``st.video``, which tried to open the URL as a path and failed with
     ``MediaFileStorageError: Error opening '/media/<hash>.mp4'`` - so a clip that cut perfectly was reported as a
     page-breaking error on every rerun. The endpoint URL is only for callers that fetch it themselves (the replay
@@ -161,8 +161,9 @@ def test_streamlits_video_player_is_never_given_a_media_url() -> None:
     import ast
 
     tree = ast.parse(APP.read_text())
+    # There may be no registered media URLs at all (the marking proxy's was removed with the never-merge
+    # workflow); the detector itself is pinned by the test above, so an empty set is fine here.
     url_names = _media_url_variables(tree)
-    assert url_names, "no media URLs are registered at all - has the helper been renamed?"
     offenders = [
         node.lineno
         for node in ast.walk(tree)

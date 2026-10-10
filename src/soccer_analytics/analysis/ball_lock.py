@@ -1,7 +1,7 @@
 """The gimbal's own ball lock: a second ball measurement, and possession that needs no homography.
 
 The camera tracks the ball to aim itself, and its log records that tracking loop: whether it is holding the ball
-(``Lock:a/b``), where the ball sits in the picture (``Ballx``, and the box's offset from the frame centre), how big
+(``Lock:a/b``), where the ball sits in the picture (``Ballx``, and the box's offset from the frame center), how big
 it looks (``BallSz``) and how fast it is moving in the image (``xv``/``yv``). That is a *hardware* ball measurement
 beside the expensive ``analysis.ball`` scan, and it is available for the whole game at no extra cost.
 
@@ -15,9 +15,9 @@ Two things it gives that the pitch-space pipeline cannot:
   works even where the homography is poor or absent, which is exactly the case the pitch-space possession proxy
   struggles with.
 
-The image coordinates are normalised by the log's own frame width (2560 px on this camera, where ``Crowdx1280`` is
-the centre), so they are resolution-independent and line up with the detection boxes, which the pipeline also
-normalises by frame width.
+The image coordinates are normalized by the log's own frame width (2560 px on this camera, where ``Crowdx1280`` is
+the center), so they are resolution-independent and line up with the detection boxes, which the pipeline also
+normalizes by frame width.
 """
 
 from __future__ import annotations
@@ -26,16 +26,16 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# The log's frame is 2560 px wide (its centre is Crowdx1280) and 1440 tall; the ball's image x is absolute in that
-# frame and the box offset is from its centre. Normalising by the width matches the detection-box convention.
+# The log's frame is 2560 px wide (its center is Crowdx1280) and 1440 tall; the ball's image x is absolute in that
+# frame and the box offset is from its center. Normalizing by the width matches the detection-box convention.
 LOG_FRAME_WIDTH = 2560.0
-LOG_FRAME_CENTRE_Y = 720.0
+LOG_FRAME_CENTER_Y = 720.0
 
 # A lock this many analysis frames long is a real spell of play, not a one-frame flicker of the detector.
 MIN_PLAY_FRAMES = 5
-# The ball is "near" a player within this image distance (normalised by frame width) for the possession proxy.
+# The ball is "near" a player within this image distance (normalized by frame width) for the possession proxy.
 # Measured against the real game: a player on the ball is within ~0.05 of the ball's image position; a player a few
-# metres away is 0.1-0.2, so the gate sits between them.
+# meters away is 0.1-0.2, so the gate sits between them.
 POSSESSION_IMAGE_RADIUS = 0.08
 
 
@@ -43,16 +43,16 @@ POSSESSION_IMAGE_RADIUS = 0.08
 class BallLock:
     """Per-frame hardware ball state, aligned to the analysis frames of a segment.
 
-    ``u``/``v`` are the ball's image position (normalised by frame width), NaN where the hardware had no position;
+    ``u``/``v`` are the ball's image position (normalized by frame width), NaN where the hardware had no position;
     ``locked`` is the hardware's own "I am holding the ball" flag; ``size`` is the apparent ball size and ``speed``
-    the image-space speed (normalised units per frame). All arrays are length F (one per analysis frame).
+    the image-space speed (normalized units per frame). All arrays are length F (one per analysis frame).
     """
 
     locked: np.ndarray  # (F,) bool
     u: np.ndarray  # (F,) ball image x / width, NaN where unknown
     v: np.ndarray  # (F,) ball image y / width, NaN where unknown
     size: np.ndarray  # (F,) apparent ball size (BallSz), NaN where unknown
-    speed: np.ndarray  # (F,) image-space speed, normalised units per frame
+    speed: np.ndarray  # (F,) image-space speed, normalized units per frame
 
     @property
     def frames(self) -> int:
@@ -111,7 +111,7 @@ def ball_lock_from_logs(logs, *, start_s: float, fps: float, frame_count: int) -
     """Build a :class:`BallLock` straight from parsed logs, with the ball's image y and size.
 
     ``logs`` is the ``(GimbalLog, clip_start_s)`` list the alignment uses. The ball's image y is the box's offset
-    from the frame centre plus the centre, normalised by width; the speed is the magnitude of the logged image
+    from the frame center plus the center, normalized by width; the speed is the magnitude of the logged image
     velocity (``xv``/``yv``), which is already in the log's pixels per frame.
     """
     from soccer_analytics.geometry.gimbal_motion import align_log
@@ -129,7 +129,7 @@ def ball_lock_from_logs(logs, *, start_s: float, fps: float, frame_count: int) -
                 continue
             times.append(clip_start + record.time_s)
             if record.ball_ym is not None:
-                v.append((LOG_FRAME_CENTRE_Y + record.ball_ym) / LOG_FRAME_WIDTH)
+                v.append((LOG_FRAME_CENTER_Y + record.ball_ym) / LOG_FRAME_WIDTH)
             else:
                 v.append(np.nan)
             size.append(float(record.ball_sz) if record.ball_sz is not None else np.nan)
@@ -165,7 +165,7 @@ def image_space_possession(
     image position to the player's foot point) and, if within ``radius``, that player's team is credited with the
     touch. Returns per-team touch counts, the share, and how many locked frames were contested.
 
-    ``det_frame``/``det_box`` are the segment's detection arrays (box normalised by frame width, ``x1,y1,x2,y2``);
+    ``det_frame``/``det_box`` are the segment's detection arrays (box normalized by frame width, ``x1,y1,x2,y2``);
     ``det_team`` is the team label per detection (``-1`` for referee/unknown), which the caller gets from Stage B's
     track assignment. This is deliberately a *picture* measure: it answers "who is on the ball" without ever
     projecting to the ground, so it survives a bad calibration.

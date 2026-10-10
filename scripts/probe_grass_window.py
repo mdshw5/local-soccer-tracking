@@ -1,6 +1,6 @@
 """Measure the grass hue window on a video, frame by frame.
 
-The window (`tracking.team_classifier.grass_hue_window`) is what keeps the pitch out of kit colour estimates.
+The window (`tracking.team_classifier.grass_hue_window`) is what keeps the pitch out of kit color estimates.
 Its claim is measurable, so this is the tool that measures it: sample frames across a video and report, for
 each, how much of the grass the band actually covers. On the real whole game (2026-10-03) the reference's
 fixed +-10-around-the-mean band covered 51-94% of the grass pixels (dusk cost the most), while the widened

@@ -2,12 +2,12 @@
 
 The analysis pass (``stage_a``) estimates each frame's motion against the last good frame with sparse optical flow
 (Lucas-Kanade) first, and only falls back to descriptor matching (SIFT) when LK *fails*. LK is a local
-linearisation of the image, so on a fast pan it systematically *under*-estimates the rotation - it succeeds, so the
+linearization of the image, so on a fast pan it systematically *under*-estimates the rotation - it succeeds, so the
 fallback never runs, and the small bias is integrated into the chain. Over a pan the projected pitch then lags
 behind the real markings: the overlay trails the white lines.
 
 This script re-decodes the segment's video at the analysis fps and re-estimates every step, preferring descriptor
-matching whenever the motion is large enough for LK's linearisation to matter. It re-integrates the chain and
+matching whenever the motion is large enough for LK's linearization to matter. It re-integrates the chain and
 writes the refined ``step``/``focal``/``ok`` arrays back into the segment's chunks, so every downstream consumer
 (projection, calibration, replay) picks them up without re-running Stage A. Times, detections and kit descriptors
 are preserved untouched.
@@ -48,13 +48,13 @@ from soccer_analytics.geometry.camera_motion import (  # noqa: E402
     estimate_step_lk,
     estimate_step_sift,
     integrate_poses,
-    normaliser,
+    normalizer,
     overlay_mask,
     step_is_plausible,
 )
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader  # noqa: E402
+from soccer_analytics.ingest.source import open_reader  # noqa: E402
 
-# Above this per-step rotation (degrees) LK's linearisation is the dominant error, so descriptor matching is
+# Above this per-step rotation (degrees) LK's linearization is the dominant error, so descriptor matching is
 # preferred. Measured on the reference game: the median step is 0.08 deg and the 90th percentile is 1.7 deg, so
 # this only fires on the pans that actually cause the lag.
 LARGE_MOTION_DEG = 1.5
@@ -85,7 +85,7 @@ def choose_step(
     """Pick the step to trust, and say which estimator it came from.
 
     LK is accurate and cheap for small motion, so it is used as-is. When it is unusable, or the motion is large
-    enough that its linearisation under-estimates the rotation, the descriptor match is preferred - and LK is only
+    enough that its linearization under-estimates the rotation, the descriptor match is preferred - and LK is only
     fallen back to if the descriptor match is itself unusable. Returns ``(None, "lost")`` when neither is usable.
     """
     if _usable(lk) and lk_deg < large_motion_deg:
@@ -97,7 +97,7 @@ def choose_step(
     return None, "lost"
 
 
-def validate_step(normalised: np.ndarray, focal: float, aspect: float):
+def validate_step(normalized: np.ndarray, focal: float, aspect: float):
     """Decompose a candidate step, or return ``None`` when it is not a rotation+zoom a real lens could produce.
 
     This is the tracker's own gate (``CameraMotionTracker._try_step``) and it is not optional: a step that is not a
@@ -106,7 +106,7 @@ def validate_step(normalised: np.ndarray, focal: float, aspect: float):
     (the chain walked 10.8 deg off and the landmark reprojection got *worse*, 545 -> 741 px).
     """
     try:
-        rotation = decompose_step(normalised, focal, aspect)
+        rotation = decompose_step(normalized, focal, aspect)
     except Exception:
         return None
     if rotation.spread > MAX_SPREAD or not (FOCAL_RANGE[0] <= rotation.focal <= FOCAL_RANGE[1]):
@@ -131,10 +131,10 @@ def refine_steps(
     aspect = segment.aspect
     motion_height = int(round(motion_width * meta["height"] / meta["width"])) // 2 * 2
     mask = overlay_mask((motion_height, motion_width))
-    norm = normaliser(motion_width)
+    norm = normalizer(motion_width)
     norm_inv = np.linalg.inv(norm)
 
-    reader = FFmpegFrameReader(
+    reader = open_reader(
         meta["video"],
         fps=float(meta["fps"]),
         width=motion_width,
@@ -162,7 +162,7 @@ def refine_steps(
         lk_deg = _rotation_deg(_unit(norm @ lk.homography @ norm_inv), focal, aspect) if _usable(lk) else 0.0
 
         # The motion magnitude decides which estimator to trust. LK is accurate and cheap for small motion, so it
-        # is used as-is; only when it is unusable or the motion is large enough for its linearisation to
+        # is used as-is; only when it is unusable or the motion is large enough for its linearization to
         # under-estimate the rotation is the (much slower) descriptor match run.
         if _usable(lk) and lk_deg < large_motion_deg:
             chosen, source = lk, "lk"
@@ -177,8 +177,8 @@ def refine_steps(
             report["lost"] += 1
             continue
 
-        normalised = _unit(norm @ chosen.homography @ norm_inv)
-        if not step_is_plausible(normalised):
+        normalized = _unit(norm @ chosen.homography @ norm_inv)
+        if not step_is_plausible(normalized):
             steps.append(None)
             report["lost"] += 1
             continue
@@ -186,13 +186,13 @@ def refine_steps(
         # The same validation the tracker applies: the step must decompose to a rotation+zoom a real lens could
         # produce. Skipping this is what let the first full run diverge - a step that is not a valid rotation+zoom
         # was accepted, and the error accumulated over thousands of frames.
-        rotation = validate_step(normalised, focal, aspect)
+        rotation = validate_step(normalized, focal, aspect)
         if rotation is None:
             steps.append(None)
             report["lost"] += 1
             continue
 
-        steps.append(normalised)
+        steps.append(normalized)
         good_gray = gray
         focal = rotation.focal  # keep the large-motion test and the next decomposition current
 

@@ -31,7 +31,8 @@ from pathlib import Path
 
 import numpy as np
 
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader
+from soccer_analytics.ingest.ffmpeg_reader import probe_video
+from soccer_analytics.ingest.source import FileSource, as_source, open_reader, window_segments
 
 # Widths the encoded routes will serve. Above the MJPEG cap on purpose: this is the endpoint for the full
 # picture. 3840 is what the source cameras record; anything wider is a mistake, not a request.
@@ -122,6 +123,7 @@ def encoder_command(
     audio: bool = False,
     audio_start_s: float = 0.0,
     audio_duration_s: float | None = None,
+    audio_inputs: list[tuple[str, float, float]] | None = None,
 ) -> list[str]:
     """The ffmpeg invocation both encoders share: raw BGR frames in, H.264 MP4 out.
 
@@ -137,6 +139,11 @@ def encoder_command(
     output is bounded by ``-t`` (the window over the rate) rather than ``-shortest``: a soundtrack shorter than
     the video must not truncate the clip, and one longer must not extend a live stream past its window in a
     silent tail.
+
+    ``audio_inputs`` is for a never-merged game, whose window may cross a clip join: one ``(path, local_start,
+    local_duration)`` per clip the window touches, each an ordinary seek inside its own clip. One piece maps
+    like the single source; several are stitched by ffmpeg's ``concat`` filter (video is piped, so only the
+    sound is chained) and then retimed as a whole, so a join costs no second encoder and no time jump.
     """
     if encoder.endswith("nvenc"):
         quality = ["-preset", "p4", "-tune", "ll" if live else "hq", "-rc", "vbr", "-cq", "23"]
@@ -144,7 +151,11 @@ def encoder_command(
         quality = ["-preset", "veryfast" if live else "medium", "-crf", "25"]
     else:
         quality = ["-preset", "veryfast" if live else "medium", "-crf", "20"]
-    has_audio = bool(audio and source is not None)
+    pieces = list(audio_inputs or [])
+    if not pieces and audio and source is not None:
+        legacy_duration = 0.0 if audio_duration_s is None else float(audio_duration_s)
+        pieces = [(str(source), float(audio_start_s), legacy_duration)]
+    has_audio = bool(pieces)
     output_rate = max(1.0, float(fps) * float(rate))
     gop = max(1, int(round(output_rate * keyframe_s)))
     finishing = (
@@ -158,12 +169,25 @@ def encoder_command(
         "-i", "pipe:0",
     ]
     if has_audio:
-        command += ["-ss", f"{float(audio_start_s):.3f}", "-i", str(source)]
+        for path, local_start, local_duration in pieces:
+            command += ["-ss", f"{float(local_start):.3f}"]
+            # Per-input bounds exist to grab the right slice of each clip. The legacy single-source call has
+            # always left this to the output ``-t``; keep that byte-for-byte, so only real clip sets bound here.
+            if len(pieces) > 1 and local_duration:
+                command += ["-t", f"{max(0.05, float(local_duration)):.3f}"]
+            command += ["-i", str(path)]
     command += ["-map", "0:v:0"]
     if has_audio:
-        command += ["-map", "1:a:0?"]
-        if abs(float(rate) - 1.0) > 1e-6:
-            command += ["-filter:a", _atempo_chain(rate)]
+        if len(pieces) > 1:
+            chains = "".join(f"[{index}:a:0]" for index in range(1, len(pieces) + 1))
+            chain = f"{chains}concat=n={len(pieces)}:v=0:a=1"
+            if abs(float(rate) - 1.0) > 1e-6:
+                chain += f",{_atempo_chain(rate)}"
+            command += ["-filter_complex", f"{chain}[aout]", "-map", "[aout]"]
+        else:
+            command += ["-map", "1:a:0?"]
+            if abs(float(rate) - 1.0) > 1e-6:
+                command += ["-filter:a", _atempo_chain(rate)]
         command += ["-c:a", "aac", "-b:a", "128k"]
         if audio_duration_s is not None:
             command += ["-t", f"{max(0.1, float(audio_duration_s) / max(0.01, float(rate))):.3f}"]
@@ -225,6 +249,7 @@ def _start(
     audio: bool = False,
     audio_start_s: float = 0.0,
     audio_duration_s: float | None = None,
+    audio_inputs: list[tuple[str, float, float]] | None = None,
 ):
     command = encoder_command(
         width=width,
@@ -239,16 +264,38 @@ def _start(
         audio=audio,
         audio_start_s=audio_start_s,
         audio_duration_s=audio_duration_s,
+        audio_inputs=audio_inputs,
     )
     return subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def _audio_source(match, audio: bool) -> str | None:
-    """The recording to take the soundtrack from, or None - a simulated match has no file behind it."""
+def _audio_inputs(match, audio: bool, start_s: float, duration_s: float) -> list[tuple[str, float, float]]:
+    """The soundtrack pieces for the window: one entry per clip it crosses, else the single recording.
+
+    A never-merged game's ``match.video`` is its manifest, which no ffmpeg can open; the pieces let the
+    encoder take each clip's own slice (seek inside the clip - the resolver's contract) and stitch the sound
+    with ffmpeg's ``concat`` filter, so the audio is continuous across a join. A simulated match has no file
+    behind it and gets none.
+    """
     if not audio:
-        return None
-    video = Path(match.video)
-    return str(video) if video.exists() else None
+        return []
+    try:
+        resolved = as_source(match.video)
+    except OSError:
+        return []
+    if isinstance(resolved, FileSource):
+        video = Path(match.video)
+        return [(str(video), float(start_s), float(duration_s))] if video.exists() else []
+    pieces = [
+        (piece.path, piece.start_s, piece.duration_s)
+        for piece in window_segments(resolved, start_s, duration_s)
+        if Path(piece.path).exists()
+    ]
+    # The concat filter is not optional the way ``1:a:0?`` is: it must not be asked for streams that do not
+    # exist, or the whole encode dies. One camera's clips share their format, so the first piece decides.
+    if len(pieces) > 1 and not probe_video(pieces[0][0]).has_audio:
+        return []
+    return pieces
 
 
 def _first_frame(reader):
@@ -269,7 +316,7 @@ def encode_clip(
     overlays: dict,
     output: Path,
     encoder: str | None = None,
-    reader_factory=FFmpegFrameReader,
+    reader_factory=open_reader,
     rate: float = 1.0,
     audio: bool = True,
     codec: str = "h264",
@@ -304,9 +351,7 @@ def encode_clip(
         live=False,
         keyframe_s=2.0,
         rate=rate,
-        source=_audio_source(match, audio),
-        audio=audio,
-        audio_start_s=start_s,
+        audio_inputs=_audio_inputs(match, audio, start_s, duration_s),
         audio_duration_s=duration_s,
     )
     stderr = _StderrTail(process.stderr)
@@ -342,7 +387,7 @@ def iter_live_chunks(
     overlays: dict,
     control=None,
     encoder: str | None = None,
-    reader_factory=FFmpegFrameReader,
+    reader_factory=open_reader,
     pace: bool = True,
     rate: float = 1.0,
     audio: bool = True,
@@ -374,9 +419,7 @@ def iter_live_chunks(
         live=True,
         keyframe_s=1.0,
         rate=rate,
-        source=_audio_source(match, audio),
-        audio=audio,
-        audio_start_s=start_s,
+        audio_inputs=_audio_inputs(match, audio, start_s, max(0.1, end_s - start_s)),
         audio_duration_s=max(0.1, end_s - start_s),
     )
     stderr = _StderrTail(process.stderr)

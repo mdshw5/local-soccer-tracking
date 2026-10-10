@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -11,7 +12,7 @@ import pytest
 
 from soccer_analytics.analysis.stage_a import (
     SegmentConfig,
-    analyse_segment,
+    analyze_segment,
     completed_chunks,
     load_segment,
     read_status,
@@ -25,7 +26,7 @@ W, H = 640, 360
 
 
 def test_a_window_label_gets_its_own_segment_directory(tmp_path: Path) -> None:
-    """The two halves of a game are analysed separately, so they cannot share one directory."""
+    """The two halves of a game are analyzed separately, so they cannot share one directory."""
     video = tmp_path / "game.mp4"
     video.write_bytes(b"x" * 8)
 
@@ -89,7 +90,7 @@ def _scene() -> np.ndarray:
 
 
 def test_resolve_window_zero_or_none_means_to_the_end_of_the_video() -> None:
-    """The dashboard's default length is 0: pick a video, press run, analyse the whole thing."""
+    """The dashboard's default length is 0: pick a video, press run, analyze the whole thing."""
     assert resolve_window(0.0, 0.0, 1254.5) == (0.0, 1254.5)
     assert resolve_window(120.0, None, 1254.5) == (120.0, 1254.5)
     # a positive length is the ordinary window, clamped to the end of the video
@@ -123,7 +124,7 @@ def _chain_from(directory: Path):
 
 def test_full_run_writes_chunks_status_and_detections(panning_video: Path, tmp_path: Path) -> None:
     out = tmp_path / "full"
-    status = analyse_segment(panning_video, out, config=CONFIG, model=_FakeModel())
+    status = analyze_segment(panning_video, out, config=CONFIG, model=_FakeModel())
     assert status["state"] == "done"
     assert completed_chunks(out) == 4  # 60 frames / 15
     data = load_segment(out)
@@ -134,11 +135,40 @@ def test_full_run_writes_chunks_status_and_detections(panning_video: Path, tmp_p
     assert read_status(out)["state"] == "done"
 
 
-def test_zero_duration_analyses_the_whole_clip(panning_video: Path, tmp_path: Path) -> None:
+def test_detect_width_zero_is_full_resolution(panning_video: Path, tmp_path: Path) -> None:
+    """0 asks for the source's own width: what "4K detection" means for a 4K recording.
+
+    The resolved width has to reach both the detector's frames and ``meta`` - the dashboard's re-run conflict
+    check, the kit refresh and every resume read the stored number, so a sentinel left unresolved would make them
+    disagree with the frames the boxes were found in.
+    """
+
+    class _RecordingFake(_FakeModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.widths: list[int] = []
+
+        def track(self, frame, **kwargs):  # noqa: ANN001, ANN003
+            self.widths.append(frame.shape[1])
+            return super().track(frame, **kwargs)
+
+    out = tmp_path / "native"
+    model = _RecordingFake()
+    config = SegmentConfig(fps=5.0, motion_width=320, detect_width=0, chunk_frames=15, device="cpu")
+
+    status = analyze_segment(panning_video, out, config=config, model=model)
+
+    meta = json.loads((out / "meta.json").read_text())
+    assert status["state"] == "done"
+    assert meta["detect_width"] == W  # the clip's own width, not the old 1920 upsample
+    assert set(model.widths) == {W}, "the detector must see frames at the resolved width"
+
+
+def test_zero_duration_analyzes_the_whole_clip(panning_video: Path, tmp_path: Path) -> None:
     """The dashboard's default length is 0 - "to the end of the video", never "nothing"."""
     out = tmp_path / "whole"
     events: list[dict] = []
-    status = analyse_segment(
+    status = analyze_segment(
         panning_video, out, config=CONFIG, model=_FakeModel(), duration_s=0.0, on_progress=events.append
     )
     assert status["state"] == "done"
@@ -149,7 +179,7 @@ def test_zero_duration_analyses_the_whole_clip(panning_video: Path, tmp_path: Pa
 
 def test_resumed_run_reproduces_the_uninterrupted_camera_chain(panning_video: Path, tmp_path: Path) -> None:
     straight = tmp_path / "straight"
-    analyse_segment(panning_video, straight, config=CONFIG, model=_FakeModel())
+    analyze_segment(panning_video, straight, config=CONFIG, model=_FakeModel())
     _, chain_straight = _chain_from(straight)
 
     resumed = tmp_path / "resumed"
@@ -159,11 +189,11 @@ def test_resumed_run_reproduces_the_uninterrupted_camera_chain(panning_video: Pa
         seen["n"] += 1
         return seen["n"] > 2 * CONFIG.chunk_frames + 3  # interrupt just into the third chunk
 
-    status = analyse_segment(panning_video, resumed, config=CONFIG, model=_FakeModel(), should_stop=stop_after_two_chunks)
+    status = analyze_segment(panning_video, resumed, config=CONFIG, model=_FakeModel(), should_stop=stop_after_two_chunks)
     assert status["state"] == "stopped"
     assert completed_chunks(resumed) == 2
 
-    final = analyse_segment(panning_video, resumed, config=CONFIG, model=_FakeModel())
+    final = analyze_segment(panning_video, resumed, config=CONFIG, model=_FakeModel())
     assert final["state"] == "done"
     data, chain_resumed = _chain_from(resumed)
     assert len(chain_resumed) == len(chain_straight) == 60
@@ -176,7 +206,7 @@ def test_resumed_run_reproduces_the_uninterrupted_camera_chain(panning_video: Pa
 def test_a_stopped_run_can_be_inspected_and_finished_later(panning_video: Path, tmp_path: Path) -> None:
     out = tmp_path / "stopped"
     calls = {"n": 0}
-    analyse_segment(panning_video, out, config=CONFIG, model=_FakeModel(), should_stop=lambda: (calls.__setitem__("n", calls["n"] + 1) or calls["n"] > 20))
+    analyze_segment(panning_video, out, config=CONFIG, model=_FakeModel(), should_stop=lambda: (calls.__setitem__("n", calls["n"] + 1) or calls["n"] > 20))
     assert read_status(out)["state"] == "stopped"
     assert completed_chunks(out) == 1
     partial = load_segment(out)  # partial results are readable while the job is incomplete
@@ -185,20 +215,20 @@ def test_a_stopped_run_can_be_inspected_and_finished_later(panning_video: Path, 
 
 def test_torn_chunk_is_not_counted_and_is_redone(panning_video: Path, tmp_path: Path) -> None:
     out = tmp_path / "torn"
-    analyse_segment(panning_video, out, config=CONFIG, model=_FakeModel())
+    analyze_segment(panning_video, out, config=CONFIG, model=_FakeModel())
     (out / "chunk_00002.npz").write_bytes(b"not a real npz")  # simulate a crash mid-write
     assert completed_chunks(out) == 2
-    analyse_segment(panning_video, out, config=CONFIG, model=_FakeModel())
+    analyze_segment(panning_video, out, config=CONFIG, model=_FakeModel())
     assert completed_chunks(out) == 4
     assert len(load_segment(out).time) == 60
 
 
 def test_mismatched_settings_refuse_to_mix_results(panning_video: Path, tmp_path: Path) -> None:
     out = tmp_path / "mixed"
-    analyse_segment(panning_video, out, config=CONFIG, model=_FakeModel())
+    analyze_segment(panning_video, out, config=CONFIG, model=_FakeModel())
     other = SegmentConfig(fps=4.0, motion_width=320, detect_width=640, chunk_frames=15, device="cpu")
     with pytest.raises(ValueError, match="different settings"):
-        analyse_segment(panning_video, out, config=other, model=_FakeModel())
+        analyze_segment(panning_video, out, config=other, model=_FakeModel())
 
 
 def test_detector_failure_is_recorded_not_swallowed(panning_video: Path, tmp_path: Path) -> None:
@@ -208,7 +238,7 @@ def test_detector_failure_is_recorded_not_swallowed(panning_video: Path, tmp_pat
 
     out = tmp_path / "boom"
     with pytest.raises(RuntimeError, match="CUDA"):
-        analyse_segment(panning_video, out, config=CONFIG, model=Boom())
+        analyze_segment(panning_video, out, config=CONFIG, model=Boom())
     status = read_status(out)
     assert status["state"] == "error" and "CUDA out of memory" in status["error"]
 
@@ -217,7 +247,7 @@ def test_overlay_detections_are_dropped(panning_video: Path, tmp_path: Path) -> 
     # A box whose feet sit inside the bottom-right logo rectangle (fraction 0.85-0.99 x, 0.89-0.98 y of the frame).
     logo_box = ((1700.0, 900.0, 1790.0, 1030.0),)  # at 1920 wide / 1080 tall: foot at y~1029 (0.95), x~1745 (0.91)
     out = tmp_path / "logo"
-    analyse_segment(panning_video, out, config=CONFIG, model=_FakeModel(logo_box))
+    analyze_segment(panning_video, out, config=CONFIG, model=_FakeModel(logo_box))
     assert len(load_segment(out).det_frame) == 0
 
 

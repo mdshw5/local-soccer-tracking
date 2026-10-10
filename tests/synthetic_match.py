@@ -51,7 +51,7 @@ class Truth:
     q: np.ndarray  # (F, 3, 3) true camera orientation per frame
     focal: np.ndarray  # (F,)
     calibration: PitchCalibration
-    ball: np.ndarray  # (F, 2) the possession-weighted action centre the camera follows
+    ball: np.ndarray  # (F, 2) the possession-weighted action center the camera follows
 
 
 def _look_rotation(heading: float, tilt_down: float) -> np.ndarray:
@@ -106,7 +106,7 @@ def simulate_match(
 
     positions = np.zeros((frames, p, 2))
     cur = home.copy()
-    # Physically plausible motion: at 5 fps a player covers well under a metre per frame. Without this cap the
+    # Physically plausible motion: at 5 fps a player covers well under a meter per frame. Without this cap the
     # simulator teleports players ~2 m per frame (36 km/h sustained), which no real tracker could follow.
     max_step_m = 0.6
     for t in range(frames):

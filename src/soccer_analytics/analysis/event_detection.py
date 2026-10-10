@@ -13,8 +13,8 @@ everything downstream.
 What each detector keys on, and why:
 
 * **goal** - the ball reaches a goal mouth moving toward the line, and within a short window afterwards the ball is
-  static near the centre spot. The reset is what separates a goal from a shot that hit the side netting: the ball
-  is put back on the centre spot only after a goal.
+  static near the center spot. The reset is what separates a goal from a shot that hit the side netting: the ball
+  is put back on the center spot only after a goal.
 * **shot** - the ball is kicked hard toward a goal from within range and does *not* produce a goal reset. A shot on
   target that the keeper saves and a shot wide look the same to a ball track, so both are reported as a shot and
   the note says where it was aimed.
@@ -52,8 +52,8 @@ def player_tracks_from_replay(replay: dict, fps: float, start_s: float = 0.0) ->
     rebuilding the tracks from it avoids re-running the whole Stage B pipeline just to detect events. ``sigma_m`` is
     not stored (the detectors do not use it) and is filled with a nominal value.
 
-    ``start_s`` is the analysed window's own start offset in the source video - the kick-off offset chosen in Step 1.
-    Frame indices are *within the analysed window*, so a track's time is ``start_s + frame / fps``, not
+    ``start_s`` is the analyzed window's own start offset in the source video - the kick-off offset chosen in Step 1.
+    Frame indices are *within the analyzed window*, so a track's time is ``start_s + frame / fps``, not
     ``frame / fps``. Getting this wrong shifts every player-derived event by the offset: on the real game (kick-off
     at 9:00) a tackle at 11:11 was reported at 2:11, and the clip cut for it showed the wrong part of the match
     entirely.
@@ -83,12 +83,12 @@ def player_tracks_from_replay(replay: dict, fps: float, start_s: float = 0.0) ->
 #
 # The measurement is deliberately *not* a per-frame difference. Measured on the real whole-game scan, a per-frame
 # difference of the projected positions has a p90 of 57 m/s and a maximum of 96,000 m/s: the projection amplifies a
-# pixel of jitter into metres when the ball is far away or near the horizon, and a single bad frame then reads as a
+# pixel of jitter into meters when the ball is far away or near the horizon, and a single bad frame then reads as a
 # 200 m/s kick. Three things fix it, and each was measured rather than guessed:
 #
-# * positions off the pitch are dropped - the projection of a ball near the horizon lands kilometres away, and 18%
+# * positions off the pitch are dropped - the projection of a ball near the horizon lands kilometers away, and 18%
 #   of the real scan's finite positions are outside the pitch by more than 3 m;
-# * a position far from its neighbours' median is dropped as a spike (589 more frames on the real scan);
+# * a position far from its neighbors' median is dropped as a spike (589 more frames on the real scan);
 # * the speed is the *net displacement over a short window*, not a per-frame step, and it is paired with a
 #   straightness ratio (net displacement / path length). Jitter is fast but not straight; a kicked ball is both.
 #
@@ -99,7 +99,7 @@ STATIC_SPEED_MS = 4.0
 KICK_SPEED_MS = 12.0  # a hard kick: a pass is slower, a shot faster
 SHOT_SPEED_MS = 18.0
 SHOT_TRAVEL_M = 12.0  # a shot travels: a hard kick that goes nowhere is a clearance off a shin, not a shot
-CLEARANCE_SPEED_MS = 20.0  # a clearance is struck harder than a pass out of defence
+CLEARANCE_SPEED_MS = 20.0  # a clearance is struck harder than a pass out of defense
 CLEARANCE_TRAVEL_M = 20.0  # ... and it goes a long way: a short kick out of the third is a pass
 CLEARANCE_HORIZON_S = 3.0  # the window the travel is measured over
 MAX_BALL_SPEED_MS = 45.0  # faster than any struck ball: a measurement error, not motion
@@ -108,7 +108,7 @@ MAX_STEP_S = 1.0  # a gap longer than this is not a velocity: the ball was not s
 SPEED_WINDOW_S = 0.4  # the look-back window the net displacement is measured over (a couple of frames either rate)
 MIN_STRAIGHTNESS = 0.7  # net displacement / path length below which the motion is jitter, not travel
 SPIKE_FACTOR = 4.0  # how far from the local median a position may sit before it is a spike
-PITCH_MARGIN_M = 3.0  # a ball a little outside the lines is real; kilometres away is a projection failure
+PITCH_MARGIN_M = 3.0  # a ball a little outside the lines is real; kilometers away is a projection failure
 
 # --- geometry ------------------------------------------------------------------------------------------------
 GOAL_HALF_WIDTH_M = 3.66  # half a goal mouth
@@ -116,10 +116,10 @@ GOAL_MOUTH_MARGIN_M = 1.5  # a ball a little wide of the post still reads as "at
 GOAL_DEPTH_M = 2.5  # how close to the goal line the ball has to be to count as reaching it
 SHOT_RANGE_M = 35.0  # beyond this a fast ball is a long clearance, not a shot
 CORNER_RADIUS_M = 7.0  # a ball this close to a corner flag is at the corner
-PENALTY_SPOT_DIST_M = 11.0  # the penalty spot is 11 m from the goal line, on the centre line
+PENALTY_SPOT_DIST_M = 11.0  # the penalty spot is 11 m from the goal line, on the center line
 PENALTY_SPOT_RADIUS_M = 3.5
-CENTRE_RADIUS_M = 12.0  # the ball is "back at the centre" within this of the centre spot
-RESET_WINDOW_S = 60.0  # a goal's centre-spot reset has to follow within this
+CENTER_RADIUS_M = 12.0  # the ball is "back at the center" within this of the center spot
+RESET_WINDOW_S = 60.0  # a goal's center-spot reset has to follow within this
 RESET_MIN_S = 2.0  # ... and the ball has to *stay* there: a restart, not a ball rolling through the middle
 DEFENSIVE_THIRD_FRACTION = 0.35  # the third of the pitch nearest a team's own goal
 ATTRIBUTION_RADIUS_M = 9.0  # a player this close to the ball is the one who played it
@@ -139,10 +139,10 @@ class BallMotion:
     ``speed``/``vx``/``vy`` are NaN wherever the ball was not seen on two consecutive frames close enough in time
     for a velocity to mean anything - a gap is not a measurement of motion, and inventing one is exactly the
     mistake this codebase keeps guarding against. ``straight`` is the ratio of net displacement to path length over
-    the speed window: 1 is a ball travelling in a straight line, and a low value is jitter that happens to be fast.
+    the speed window: 1 is a ball traveling in a straight line, and a low value is jitter that happens to be fast.
     """
 
-    xy: np.ndarray  # (F, 2) pitch metres, NaN where unknown
+    xy: np.ndarray  # (F, 2) pitch meters, NaN where unknown
     measured: np.ndarray  # (F,) 1 where a detector saw the ball, 0 where the position is a forecast
     times: np.ndarray  # (F,) source seconds
     speed: np.ndarray  # (F,) m/s, NaN where unknown
@@ -156,10 +156,10 @@ class BallMotion:
 
 
 def _reject_spikes(xy: np.ndarray, width: int = 5, factor: float = SPIKE_FACTOR) -> np.ndarray:
-    """Drop positions that sit far from their neighbours' median - a projection failure, not a ball.
+    """Drop positions that sit far from their neighbors' median - a projection failure, not a ball.
 
     The threshold is relative to the track's own typical step, so it adapts to how noisy this scan is rather than
-    assuming a scale. A ball genuinely moving fast is *consistent* with its neighbours (it is on a trajectory), so
+    assuming a scale. A ball genuinely moving fast is *consistent* with its neighbors (it is on a trajectory), so
     it survives; a single frame that lands somewhere else does not.
     """
     out = xy.copy()
@@ -196,9 +196,9 @@ def ball_motion(
 
     The speed is the net displacement over a *look-back* window divided by the window's length, paired with the
     straightness of that displacement. A per-frame difference is not used: on the real scan it reads 57 m/s at p90
-    and 96,000 m/s at worst, because the projection turns a pixel of jitter into metres when the ball is far away.
+    and 96,000 m/s at worst, because the projection turns a pixel of jitter into meters when the ball is far away.
     Positions more than :data:`PITCH_MARGIN_M` outside the pitch are dropped first (``pitch`` is ``(length, width)``
-    in metres; without it nothing is dropped), then positions far from their neighbours' median are dropped as
+    in meters; without it nothing is dropped), then positions far from their neighbors' median are dropped as
     spikes.
 
     The window looks *backwards* only, so a kick is not smeared across the frames before it: the frame the ball is
@@ -394,7 +394,7 @@ def _number_for(numbers: dict[int, dict] | None, track_id: int | None) -> int | 
 
 # --- event detectors -----------------------------------------------------------------------------------------
 def _is_kick(motion: BallMotion, frame: int, threshold: float) -> bool:
-    """Whether the ball at ``frame`` is travelling fast *and* straight - a kick, not projection jitter.
+    """Whether the ball at ``frame`` is traveling fast *and* straight - a kick, not projection jitter.
 
     The straightness gate is what makes this usable on real footage: a jittering position is fast but wanders, so
     its net displacement over the speed window is a fraction of the path it took, while a struck ball goes where it
@@ -436,16 +436,16 @@ def _goal_mouth_hit(motion: BallMotion, pitch_length_m: float, pitch_width_m: fl
 
     A *forecast* position is allowed here, and that is deliberate: the scan loses the ball as it crosses the line
     (the camera is still catching up, and the ball is against the net), so demanding a detection at the line would
-    miss every goal. What is not allowed to be a forecast is the centre-spot reset that confirms it - see
-    :func:`_centre_reset_after`. The pair is what makes this honest: a forecast can suggest a goal, only a
+    miss every goal. What is not allowed to be a forecast is the center-spot reset that confirms it - see
+    :func:`_center_reset_after`. The pair is what makes this honest: a forecast can suggest a goal, only a
     measurement can confirm one.
     """
     hits: list[tuple[int, int]] = []
-    centre_y = pitch_width_m / 2.0
+    center_y = pitch_width_m / 2.0
     for i in range(motion.frames):
         if not np.isfinite(motion.xy[i, 0]) or not np.isfinite(motion.vx[i]):
             continue
-        if abs(motion.xy[i, 1] - centre_y) > GOAL_HALF_WIDTH_M + GOAL_MOUTH_MARGIN_M:
+        if abs(motion.xy[i, 1] - center_y) > GOAL_HALF_WIDTH_M + GOAL_MOUTH_MARGIN_M:
             continue
         x = motion.xy[i, 0]
         if x <= GOAL_DEPTH_M and motion.vx[i] < -KICK_SPEED_MS:
@@ -455,39 +455,39 @@ def _goal_mouth_hit(motion: BallMotion, pitch_length_m: float, pitch_width_m: fl
     return hits
 
 
-def _centre_reset_after(motion: BallMotion, pitch_length_m: float, pitch_width_m: float, after_frame: int) -> int | None:
-    """The first frame after ``after_frame`` where the ball is *seen* static near the centre spot, or ``None``.
+def _center_reset_after(motion: BallMotion, pitch_length_m: float, pitch_width_m: float, after_frame: int) -> int | None:
+    """The first frame after ``after_frame`` where the ball is *seen* static near the center spot, or ``None``.
 
-    This is the goal's signature: the ball is put back on the centre spot only after a goal. The window is bounded
+    This is the goal's signature: the ball is put back on the center spot only after a goal. The window is bounded
     by :data:`RESET_WINDOW_S` so a later stoppage is not mistaken for this goal's reset.
 
     The position has to be a *measurement* (``measured`` is 1), not the tracker's forecast across a missed frame.
     That distinction is the whole point of the ball scan's own honesty rule, and it matters here: after a goal the
-    scan loses the ball during the celebration and its forecast can land near the centre spot while the ball is
+    scan loses the ball during the celebration and its forecast can land near the center spot while the ball is
     actually still in the net. A reset nobody saw is not a reset.
 
     The ball also has to *stay* there for :data:`RESET_MIN_S`: a ball rolling through the middle of the pitch on its
     way somewhere else is not a restart. Measured on the real game, the celebration costs the scan the ball for a
     few seconds and the restart is only picked up ~50 s after the goal, which is why the window is a minute wide.
     """
-    centre = np.array([pitch_length_m / 2.0, pitch_width_m / 2.0])
+    center = np.array([pitch_length_m / 2.0, pitch_width_m / 2.0])
     deadline = motion.times[after_frame] + RESET_WINDOW_S
     for i in range(after_frame, motion.frames):
         if motion.times[i] > deadline:
             break
         if not motion.measured[i] or not np.isfinite(motion.xy[i, 0]):
             continue
-        if np.linalg.norm(motion.xy[i] - centre) > CENTRE_RADIUS_M:
+        if np.linalg.norm(motion.xy[i] - center) > CENTER_RADIUS_M:
             continue
         if not (np.isfinite(motion.speed[i]) and motion.speed[i] < STATIC_SPEED_MS):
             continue
-        # It has to stay still there: walk forward while the ball remains measured, near the centre and at rest.
+        # It has to stay still there: walk forward while the ball remains measured, near the center and at rest.
         end = i
         while end + 1 < motion.frames and motion.times[end + 1] - motion.times[i] <= RESET_MIN_S + 1.0:
             end += 1
             if not motion.measured[end] or not np.isfinite(motion.xy[end, 0]):
                 break
-            if np.linalg.norm(motion.xy[end] - centre) > CENTRE_RADIUS_M:
+            if np.linalg.norm(motion.xy[end] - center) > CENTER_RADIUS_M:
                 break
             if not (np.isfinite(motion.speed[end]) and motion.speed[end] < STATIC_SPEED_MS):
                 break
@@ -527,7 +527,7 @@ def detect_events(
 
     ``ball_xy``/``ball_measured`` are the ``(F, 2)`` and ``(F,)`` arrays ``projection.project_ball_track`` returns;
     ``times`` is the source seconds of each frame. ``players`` are Stage B's tracks, ``pitch`` is ``(length, width)``
-    in metres, ``whistles`` are the audio scan's candidate times (used only to tell a penalty from a free kick),
+    in meters, ``whistles`` are the audio scan's candidate times (used only to tell a penalty from a free kick),
     ``numbers`` maps a track id to its shirt number/name, and ``half_bounds`` is the game clock's
     ``(kick-off, half-time, full-time)``.
 
@@ -560,10 +560,10 @@ def _goals(
     numbers: dict[int, dict] | None,
     video: str,
 ) -> list[Event]:
-    """A goal: the ball reaches a goal mouth moving in, and the ball is reset to the centre spot soon after."""
+    """A goal: the ball reaches a goal mouth moving in, and the ball is reset to the center spot soon after."""
     out: list[Event] = []
     for frame, side in _goal_mouth_hit(motion, length_m, width_m):
-        reset = _centre_reset_after(motion, length_m, width_m, frame)
+        reset = _center_reset_after(motion, length_m, width_m, frame)
         if reset is None:
             continue
         # The scorer is the player nearest the ball a moment *before* it crossed the line (0.4 s back, scaled to
@@ -581,7 +581,7 @@ def _goals(
                 team=team,
                 note=(
                     f"ball crossed the {'left' if side == 0 else 'right'} goal line at "
-                    f"{motion.speed[frame]:.0f} m/s and was reset to the centre spot "
+                    f"{motion.speed[frame]:.0f} m/s and was reset to the center spot "
                     f"{motion.times[reset] - motion.times[frame]:.0f}s later"
                 ),
                 source="ball",
@@ -611,7 +611,7 @@ def _shots(
     """
     goal_frames = {round(e.time_s, 3) for e in already if e.type in ("goal", "penalty")}
     out: list[Event] = []
-    centre_y = width_m / 2.0
+    center_y = width_m / 2.0
     for i in range(motion.frames):
         if not _is_kick(motion, i, SHOT_SPEED_MS):
             continue
@@ -632,7 +632,7 @@ def _shots(
         if t_to_line <= 0:
             continue
         aim_y = y + motion.vy[i] * t_to_line
-        if abs(aim_y - centre_y) > GOAL_HALF_WIDTH_M + GOAL_MOUTH_MARGIN_M:
+        if abs(aim_y - center_y) > GOAL_HALF_WIDTH_M + GOAL_MOUTH_MARGIN_M:
             continue
         if any(abs(motion.times[i] - t) < MIN_EVENT_GAP_S for t in goal_frames):
             continue
@@ -732,7 +732,7 @@ def _penalties(
     """A penalty: a whistle, then the ball still at the penalty spot, then a hard kick.
 
     The whistle is what makes it a penalty rather than a free kick from a similar spot; without one the same
-    geometry is left to the shot detector. The spot is 11 m from each goal line on the centre line.
+    geometry is left to the shot detector. The spot is 11 m from each goal line on the center line.
     """
     spots = np.array([[PENALTY_SPOT_DIST_M, width_m / 2.0], [length_m - PENALTY_SPOT_DIST_M, width_m / 2.0]])
     out: list[Event] = []
@@ -777,7 +777,7 @@ def _penalties(
 def _travel(motion: BallMotion, frame: int, horizon_s: float = CLEARANCE_HORIZON_S) -> float:
     """How far the ball moves from ``frame`` over the next ``horizon_s``, or NaN when either end is unknown.
 
-    This is what separates a clearance from a pass out of defence: both are kicks away from the own goal, but a
+    This is what separates a clearance from a pass out of defense: both are kicks away from the own goal, but a
     clearance is struck to go a long way. Measured on the real scan, kicks travel a median of 14 m over three
     seconds and a clearance sits in the top quarter of that.
     """
@@ -864,7 +864,7 @@ def _clearances(
                 note=(
                     f"ball kicked at {motion.speed[i]:.0f} m/s away from the "
                     f"{orientation.defending_goal[team]} goal from {abs(x - own_goal_x):.0f} m out, "
-                    f"travelling {travel:.0f} m"
+                    f"traveling {travel:.0f} m"
                 ),
                 source="ball",
                 confidence=0.5,
@@ -886,7 +886,7 @@ def _tackles(
     """A tackle: a player who was moving comes to a near stop right beside the ball as the ball's motion changes.
 
     This is a *motion* proxy, not pose. The footage has no skeleton, so "went to ground" cannot be seen directly;
-    what can be seen is a player arriving at speed, stopping within a couple of metres of the ball, and the ball's
+    what can be seen is a player arriving at speed, stopping within a couple of meters of the ball, and the ball's
     own velocity changing at that moment. The note says so, so the event is read as a challenge to review rather
     than a confirmed tackle.
     """
@@ -952,5 +952,5 @@ def _first_fast_after(motion: BallMotion, frame: int, threshold: float, *, windo
 
 
 def events_to_json(events: list[Event]) -> list[dict]:
-    """Serialise detected events for the replay payload (the timeline draws them)."""
+    """Serialize detected events for the replay payload (the timeline draws them)."""
     return [event.to_json() for event in events]

@@ -1,7 +1,7 @@
 """Camera-motion recovery against a physically exact synthetic camera.
 
 The scene is a distant textured plane on a wide image; frames are rendered by warping it through
-``K(f) R K(f0)^-1`` which is precisely what a pinhole camera rotating (and zooming) about its optical centre sees.
+``K(f) R K(f0)^-1`` which is precisely what a pinhole camera rotating (and zooming) about its optical center sees.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from soccer_analytics.geometry.camera_motion import (
     decompose_step,
     integrate_steps,
     intrinsics,
-    normaliser,
+    normalizer,
     overlay_mask,
     step_is_plausible,
     to_reference,
@@ -39,7 +39,7 @@ def _scene(seed: int = 3) -> np.ndarray:
 
 
 SCENE = _scene()
-# Scene pixel (u, v) <-> unit-plane ray: the scene is centred and viewed at focal length S_F (in scene widths).
+# Scene pixel (u, v) <-> unit-plane ray: the scene is centered and viewed at focal length S_F (in scene widths).
 _SW, _SH = SCENE.shape[1], SCENE.shape[0]
 
 
@@ -72,7 +72,7 @@ def _true_to_ref(pan: float, tilt: float, roll: float, focal: float, pose0: tupl
 
 
 def _error(a: np.ndarray, b: np.ndarray) -> float:
-    """Mean disagreement, in frame widths, over a grid of normalised image points."""
+    """Mean disagreement, in frame widths, over a grid of normalized image points."""
     grid = np.array([[u, v] for u in np.linspace(0.05, 0.95, 5) for v in np.linspace(0.05, 0.5, 4)])
     return float(np.linalg.norm(apply_homography(a, grid) - apply_homography(b, grid), axis=1).mean())
 
@@ -206,4 +206,4 @@ def test_rotation_chain_to_reference_is_identity_at_start() -> None:
     chain = RotationChain(F0, ASPECT)
     assert np.allclose(chain.to_ref, np.eye(3))
     assert np.allclose(to_reference(np.eye(3), F0, F0, ASPECT), np.eye(3))
-    assert np.allclose(normaliser(W) @ np.linalg.inv(normaliser(W)), np.eye(3))
+    assert np.allclose(normalizer(W) @ np.linalg.inv(normalizer(W)), np.eye(3))

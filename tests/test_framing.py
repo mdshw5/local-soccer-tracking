@@ -1,4 +1,4 @@
-"""Framing a centred clip: the crop must follow the player, stay inside the frame, and refuse what it cannot show.
+"""Framing a centered clip: the crop must follow the player, stay inside the frame, and refuse what it cannot show.
 
 The pure numbers are tested directly (sizing, smoothing, the window trimming that keeps a clip away from a gap),
 and the one claim that only a real encode can settle - that the moving crop actually keeps the player in the
@@ -28,16 +28,16 @@ from soccer_analytics.ingest.video_reader import VideoWriter
 
 
 def _boxes(spans: list[tuple[float, float]]) -> np.ndarray:
-    """A track of boxes: one ``(centre_x_fraction, height_fraction)`` per observation.
+    """A track of boxes: one ``(center_x_fraction, height_fraction)`` per observation.
 
     Both box axes share the frame-width scale (that is how Stage A stores them), so the box is
-    ``height/2.5`` wide - a person's proportions - and sits with its centre a little above mid-frame.
+    ``height/2.5`` wide - a person's proportions - and sits with its center a little above mid-frame.
     """
     out = []
-    for centre, height in spans:
+    for center, height in spans:
         half_width = height / 2.0 / 2.5
         top = 0.30
-        out.append([centre - half_width, top, centre + half_width, top + height])
+        out.append([center - half_width, top, center + half_width, top + height])
     return np.asarray(out, dtype=np.float64)
 
 
@@ -70,12 +70,12 @@ def test_plan_follows_the_player_and_keeps_the_crop_inside_the_frame() -> None:
     """A player crossing the frame: the crop chases them, but never leaves the source rectangle.
 
     What matters is containment - the player's box has to stay inside the crop at every command - with the extra
-    claim that away from the frame's edges the crop is actually *centred* on them rather than merely containing
-    them. Near an edge the crop clamps (it cannot leave the source), which is why the centring check skips it.
+    claim that away from the frame's edges the crop is actually *centered* on them rather than merely containing
+    them. Near an edge the crop clamps (it cannot leave the source), which is why the centering check skips it.
     """
     times = np.arange(0.0, 6.0, 0.2)
-    centres = np.linspace(0.1, 0.9, len(times))
-    boxes = _boxes([(float(c), 0.04) for c in centres])
+    centers = np.linspace(0.1, 0.9, len(times))
+    boxes = _boxes([(float(c), 0.04) for c in centers])
     plan = plan_framing(
         times,
         boxes,
@@ -96,9 +96,9 @@ def test_plan_follows_the_player_and_keeps_the_crop_inside_the_frame() -> None:
 
     clamped = {0, 1920 - plan.crop_w}
     for command in plan.commands:
-        player = float(np.interp(command.time_s, times, centres)) * 1920
+        player = float(np.interp(command.time_s, times, centers)) * 1920
         assert command.x <= player <= command.x + plan.crop_w, "the player left the crop"
-        if command.x not in clamped:  # away from the frame's edges the crop is centred on the player
+        if command.x not in clamped:  # away from the frame's edges the crop is centered on the player
             assert abs((command.x + plan.crop_w / 2) - player) < 0.20 * plan.crop_w
 
 
@@ -106,17 +106,17 @@ def test_smoothing_removes_box_jitter_from_the_crop_path() -> None:
     """Box jitter frame to frame must not become crop jitter: the smoothed path is much steadier than the raw."""
     rng = np.random.default_rng(0)
     times = np.arange(0.0, 6.0, 0.2)
-    centres = 0.5 + rng.normal(0.0, 0.02, len(times)).cumsum() * 0.02  # slow drift, plus noise below
-    centres = centres + rng.normal(0.0, 0.01, len(times))
-    boxes = _boxes([(float(c), 0.04) for c in centres])
+    centers = 0.5 + rng.normal(0.0, 0.02, len(times)).cumsum() * 0.02  # slow drift, plus noise below
+    centers = centers + rng.normal(0.0, 0.01, len(times))
+    boxes = _boxes([(float(c), 0.04) for c in centers])
     plan = plan_framing(
         times, boxes, start_s=0.0, duration_s=6.0, source_width=1920, source_height=1080,
         player_fraction=0.25, min_crop_height_px=200.0,
     )
     assert plan is not None
     path = np.array([command.x for command in plan.commands], dtype=np.float64)
-    raw = np.interp([command.time_s for command in plan.commands], times, centres * 1920)
-    # Second difference is acceleration: following the raw centres would visibly shake.
+    raw = np.interp([command.time_s for command in plan.commands], times, centers * 1920)
+    # Second difference is acceleration: following the raw centers would visibly shake.
     assert np.abs(np.diff(path, 2)).max() < np.abs(np.diff(raw, 2)).max()
 
 
@@ -130,8 +130,8 @@ def test_the_pan_updates_every_frame_rather_than_a_few_times_a_second() -> None:
     one position and would read as a gap here).
     """
     times = np.arange(0.0, 6.0, 0.2)
-    centres = np.linspace(0.30, 0.70, len(times))
-    boxes = _boxes([(float(c), 0.04) for c in centres])
+    centers = np.linspace(0.30, 0.70, len(times))
+    boxes = _boxes([(float(c), 0.04) for c in centers])
     plan = plan_framing(
         times, boxes, start_s=0.0, duration_s=6.0, source_width=1920, source_height=1080,
         player_fraction=0.25, min_crop_height_px=200.0,
@@ -222,7 +222,7 @@ def test_duplicate_positions_are_collapsed_but_the_ends_are_kept() -> None:
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg is needed to cut the clip")
 def test_a_real_cut_keeps_the_moving_player_in_the_middle_of_the_frame(tmp_path) -> None:
-    """The end-to-end claim: a real ffmpeg cut of a moving target stays centred on it.
+    """The end-to-end claim: a real ffmpeg cut of a moving target stays centered on it.
 
     The source is a white square crossing a dark frame; the "track" is its own box. The cut is then read back and
     the square is found in every sampled frame, near the middle - which is what "cut around this player" has to
@@ -251,7 +251,7 @@ def test_a_real_cut_keeps_the_moving_player_in_the_middle_of_the_frame(tmp_path)
         player_fraction=0.25, min_crop_height_px=140.0, smooth_s=0.0,
     )
     assert plan is not None and plan.crop_h <= height and plan.crop_w <= width
-    out = tmp_path / "centred.mp4"
+    out = tmp_path / "centered.mp4"
     schedule = tmp_path / "schedule.txt"  # the production path: the schedule reaches ffmpeg as a file
     schedule.write_text(command_schedule(plan))
     command = [
@@ -265,7 +265,7 @@ def test_a_real_cut_keeps_the_moving_player_in_the_middle_of_the_frame(tmp_path)
     assert out.exists() and out.stat().st_size > 1000
 
     capture = cv2.VideoCapture(str(out))
-    found, centres = 0, []
+    found, centers = 0, []
     while True:
         ok, frame = capture.read()
         if not ok:
@@ -274,15 +274,15 @@ def test_a_real_cut_keeps_the_moving_player_in_the_middle_of_the_frame(tmp_path)
         if mask.sum() > 50:
             found += 1
             xs = np.where(mask.any(axis=0))[0]
-            centres.append(float(xs.mean()) / frame.shape[1])
+            centers.append(float(xs.mean()) / frame.shape[1])
     capture.release()
     assert found >= int(fps * duration_s) * 0.6, f"the player is missing from {found} output frames"
-    worst = max(abs(centre - 0.5) for centre in centres)
-    assert worst < 0.30, f"the crop drifts away from the player (worst centre offset {worst:.2f})"
+    worst = max(abs(center - 0.5) for center in centers)
+    assert worst < 0.30, f"the crop drifts away from the player (worst center offset {worst:.2f})"
 
 
 def test_the_offered_clip_length_is_always_a_float() -> None:
-    """An int default against float bounds kills the page - measured live, not hypothesised.
+    """An int default against float bounds kills the page - measured live, not hypothesized.
 
     ``round(17.6)`` is an int in Python; a slider created with ``value=18`` while its bounds are 5.0..60.0 is
     rejected by Streamlit with ``StreamlitInvalidParameterTypeError``, so every appearance shorter than the

@@ -200,7 +200,15 @@ class FFmpegFrameReader:
 
 
 def grab_frame(path: str | Path, time_s: float, *, width: int = 1600) -> np.ndarray | None:
-    """Decodes a single frame near `time_s` (for browsing/calibration, not for analysis)."""
+    """Decodes a single frame near ``time_s`` (for browsing/calibration, not for analysis).
+
+    A ``game.json`` manifest resolves through the clip-aware source, so a frame anywhere in a never-merged game
+    is one containing-clip seek - the same cost as it was against the old combined file.
+    """
+    if Path(path).name == "game.json":
+        from soccer_analytics.ingest.source import grab_source_frame  # noqa: PLC0415 - breaks an import cycle
+
+        return grab_source_frame(path, time_s, width=width)
     reader = FFmpegFrameReader(path, fps=2.0, width=width, start_s=max(0.0, time_s), duration_s=1.2)
     for _t, frame in reader.frames():
         return frame
@@ -218,12 +226,21 @@ def extract_audio(
 ) -> Path:
     """Writes a mono 16-bit wav of the source's audio track.
 
+    A ``game.json`` manifest extracts its window from the clips and stitches them into the one wav the scans
+    read (see :func:`soccer_analytics.ingest.source.extract_source_audio`); a plain file is decoded directly.
+
     ``on_progress(fraction)`` follows the decode through :func:`run_ffmpeg_with_progress`, so a background task can
     show how far through a long recording it is - a full game takes long enough that a spinner tells the user
     nothing. The fraction is against ``duration_s`` when given, and against the rest of the file when it is not.
     The wav is written straight to ``wav_path``; callers that must not mistake a half-written file for a finished
     one use their own temporary name around this call.
     """
+    if Path(path).name == "game.json":
+        from soccer_analytics.ingest.source import extract_source_audio  # noqa: PLC0415 - breaks an import cycle
+
+        return extract_source_audio(
+            path, wav_path, start_s=start_s, duration_s=duration_s, on_progress=on_progress
+        )
     wav_path = Path(wav_path)
     wav_path.parent.mkdir(parents=True, exist_ok=True)
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]

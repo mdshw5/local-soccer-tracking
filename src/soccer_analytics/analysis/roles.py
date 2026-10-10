@@ -2,10 +2,10 @@
 
 Measured on the real game (2026-10-04), because none of this is inferable from a single frame:
 
-* the referee is an unlabelled track that ranges widely across the pitch - the real one appeared as three
+* the referee is an unlabeled track that ranges widely across the pitch - the real one appeared as three
   fragments (t9023/t7981/t11362) with spans of 14-30 m between their 5th and 95th x percentile. Its kit reads
-  green, orange or dark red depending on which crop the median landed on, so colour can gate the search (a
-  colour-evidence check rules out stationary tracker junk like t11055, 746 observations of no kit) but cannot
+  green, orange or dark red depending on which crop the median landed on, so color can gate the search (a
+  color-evidence check rules out stationary tracker junk like t11055, 746 observations of no kit) but cannot
   identify it;
 * a goalkeeper is the deepest player at one goal end: at least ``GK_DEEP_FRACTION`` of a track's observations
   within ``GK_ZONE_M`` of the goal line. Fragmentation means each keeper arrives as several tracks too (the
@@ -15,7 +15,7 @@ Measured on the real game (2026-10-04), because none of this is inferable from a
   are attached to track ids and must be recomputed when a rebuild moves them.
 
 Roles are deliberately few and honest: at most one referee and at most one goalkeeper per goal end. Everything
-else stays unlabelled.
+else stays unlabeled.
 """
 
 from __future__ import annotations
@@ -55,8 +55,8 @@ def classify_roles(
 
     ``players`` are the report's players (already bystander-filtered); ``kit_evidence(track_id)`` returns
     non-``None`` when the track has trustworthy kit crops, used to gate the referee search - pass ``None`` to skip
-    that gate (tests). Every track deep enough in a goal pocket is labelled goalkeeper; the longest
-    kit-evidenced unlabelled wide-ranging track is the referee.
+    that gate (tests). Every track deep enough in a goal pocket is labeled goalkeeper; the longest
+    kit-evidenced unlabeled wide-ranging track is the referee.
     """
     roles: dict[int, dict] = {}
     best_ref: tuple[int, int] | None = None  # (observations, track_id)

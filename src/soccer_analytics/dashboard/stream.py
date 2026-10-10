@@ -1,4 +1,4 @@
-"""The annotated match stream: every frame of the analysed window, drawn with what the pipeline knows.
+"""The annotated match stream: every frame of the analyzed window, drawn with what the pipeline knows.
 
 This is the moving-picture sibling of the pitch replay. Where that view draws measured pitch positions on a
 diagram, this one serves the footage itself as MJPEG - each frame carries:
@@ -6,7 +6,7 @@ diagram, this one serves the footage itself as MJPEG - each frame carries:
 * the **pitch model**, projected back into the picture through the calibration's corrected camera chain (the
   touchlines, the halfway line, both boxes, the circles and the spots) - the same overlay the calibration view
   uses to show a fit against the real markings, per frame;
-* the **detection boxes** of every field player the tracker follows, in that player's measured team colour;
+* the **detection boxes** of every field player the tracker follows, in that player's measured team color;
 * the **ball**, from the segment's ball scan, drawn as a detection when a detector saw it and as a hollow
   forecast ring when the scan coasted across a miss - the scan's own honesty rule, kept through to the player;
 * a **label chip** on each player - the shirt number the roster or the OCR scan assigned, or the track id when
@@ -41,11 +41,10 @@ import numpy as np
 
 from soccer_analytics.analysis import game as game_lib
 from soccer_analytics.analysis.identity import numbers_are_stale
-from soccer_analytics.analysis.library import MatchLibrary
+from soccer_analytics.analysis.library import MatchLibrary, resolve_path
 from soccer_analytics.analysis.projection import segment_poses
 from soccer_analytics.analysis.stage_a import load_segment
 from soccer_analytics.dashboard.pitch_clicks import pitch_marking_polylines
-from soccer_analytics.dashboard.timeline import proxy_skip_frame
 from soccer_analytics.dashboard.video import (
     ClipCache,
     CODECS,
@@ -59,7 +58,8 @@ from soccer_analytics.dashboard.video import (
     iter_live_chunks,
 )
 from soccer_analytics.geometry.pitch_calibration import pitch_to_pixels
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader, grab_frame
+from soccer_analytics.ingest.ffmpeg_reader import grab_frame
+from soccer_analytics.ingest.source import open_reader, source_from_record
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MATCHES_ROOT = REPO_ROOT / "data" / "matches"
@@ -70,6 +70,7 @@ BALL_TRACK_FILE = "ball_track.json"
 DEFAULT_WIDTH = 1600
 MIN_WIDTH = 320
 MAX_WIDTH = 2560
+MARK_FPS = 8.0  # the Step 1 marking stream: watchable enough to spot kick-off, cheap enough to decode live
 DEFAULT_RATE = 1.0
 MAX_RATE = 8.0
 MIN_RATE = 0.25
@@ -95,7 +96,7 @@ def parse_overlays(value: str | None) -> dict[str, bool]:
     """Which overlay layers a request asked for; the parameter's absence asks for all of them.
 
     An *empty* value cannot be used to ask for none: ``parse_qs`` drops blank query values, so ``overlays=``
-    arrives as "the parameter is absent", which must keep meaning "everything on" - the pre-toggle behaviour
+    arrives as "the parameter is absent", which must keep meaning "everything on" - the pre-toggle behavior
     every existing link and the index page's stills rely on. "none" is the explicit spelling for a clean frame.
     """
     if value is None:
@@ -148,7 +149,7 @@ def is_reachable(port: int, timeout_s: float = 0.2) -> bool:
 
 
 class StreamError(RuntimeError):
-    """The match cannot be streamed as asked (missing or outdated artefacts, bad start time)."""
+    """The match cannot be streamed as asked (missing or outdated artifacts, bad start time)."""
 
 
 class StreamControl:
@@ -177,19 +178,19 @@ class StreamControl:
 
 @dataclass(frozen=True)
 class TeamStyle:
-    """One team's display colour and name, resolved once so every frame paints them the same."""
+    """One team's display color and name, resolved once so every frame paints them the same."""
 
     name: str
     bgr: tuple[int, int, int]
 
 
-# Fallbacks when the kit clustering could not separate a team's colour (the same situation the pitch view falls
+# Fallbacks when the kit clustering could not separate a team's color (the same situation the pitch view falls
 # back on its own palette for). BGR, because that is what OpenCV draws with.
 FALLBACK_BGR = ((60, 60, 230), (230, 130, 60))
 OTHER_BGR = (150, 150, 150)
 FORECAST_BGR = (0, 200, 255)  # amber: "this position is the scan's forecast across a miss"
-# Roles are colour-coded rather than spelled into the chips (the user's call), matching the pane's ring
-# colours so the two views name the same person the same way. BGR order, unlike the pane's hex.
+# Roles are color-coded rather than spelled into the chips (the user's call), matching the pane's ring
+# colors so the two views name the same person the same way. BGR order, unlike the pane's hex.
 ROLE_BGR = {"referee": (247, 85, 168), "goalkeeper": (11, 158, 245)}  # #a855f7, #f59e0b
 PITCH_BGR = (0, 200, 255)
 INK = (30, 30, 30)
@@ -201,9 +202,9 @@ def _bgr(rgb) -> tuple[int, int, int]:
     return (b, g, r)
 
 
-def _text_bgr(colour: tuple[int, int, int]) -> tuple[int, int, int]:
-    """Black or white, whichever stays readable on this chip colour."""
-    luminance = 0.114 * colour[0] + 0.587 * colour[1] + 0.299 * colour[2]
+def _text_bgr(color: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Black or white, whichever stays readable on this chip color."""
+    luminance = 0.114 * color[0] + 0.587 * color[1] + 0.299 * color[2]
     return INK if luminance > 150 else PAPER
 
 
@@ -291,10 +292,10 @@ def numbers_note(match_dir: Path, jerseys: dict, numbers: dict[int, dict], playe
     return f"shirt numbers look stale: {stale}" if stale else None
 
 
-def _outline_text(frame: np.ndarray, text: str, org, colour: tuple[int, int, int], font: float) -> None:
+def _outline_text(frame: np.ndarray, text: str, org, color: tuple[int, int, int], font: float) -> None:
     """A text line with a dark outline, so it reads over whatever the camera saw."""
     cv2.putText(frame, text, org, FONT, font, INK, 3, cv2.LINE_AA)
-    cv2.putText(frame, text, org, FONT, font, colour, 1, cv2.LINE_AA)
+    cv2.putText(frame, text, org, FONT, font, color, 1, cv2.LINE_AA)
 
 
 def _quaternion_from_matrix(matrix: np.ndarray) -> np.ndarray:
@@ -334,7 +335,7 @@ def slerp_rotation(first: np.ndarray, second: np.ndarray, alpha: float) -> np.nd
     if float(a @ b) < 0.0:
         b = -b  # q and -q are the same rotation; the sign must be fixed or the arc is the far side
     dot = float(np.clip(a @ b, -1.0, 1.0))
-    if dot > 0.9995:  # so close that sin() carries no useful fraction: normalised linear is exact enough
+    if dot > 0.9995:  # so close that sin() carries no useful fraction: normalized linear is exact enough
         return _matrix_from_quaternion(a + alpha * (b - a))
     theta = float(np.arccos(dot))
     return _matrix_from_quaternion((np.sin((1 - alpha) * theta) * a + np.sin(alpha * theta) * b) / np.sin(theta))
@@ -397,7 +398,7 @@ class AnnotatedMatch:
         self._players = players
         self.boxed_tracks: set[int] = set()
         # The payload's role labels (referee/goalkeeper), if the build had them; boxes for these tracks draw in
-        # their role colour instead of the team colour, so a viewer can tell the officials from the sides.
+        # their role color instead of the team color, so a viewer can tell the officials from the sides.
         self.roles: dict[int, str] = {
             int(player["track_id"]): str(player["role"]) for player in players if player.get("role")
         }
@@ -444,7 +445,7 @@ class AnnotatedMatch:
 
         The per-player image boxes do not travel inside the replay payload (they would be tens of megabytes of
         JSON the browser never draws); they live beside it in ``boxes.npz``, and a replay without them is refused
-        with the one command that rebuilds both - a stream of boxes labelled "missing" would be worse than one
+        with the one command that rebuilds both - a stream of boxes labeled "missing" would be worse than one
         that says why it cannot start. A payload that still carries its boxes inline (a build from before the
         sidecar) is tolerated so the stream works across the transition. The jersey numbers come from the roster
         and the OCR scan and are matched to tracks by the same ``merge_numbers`` the dashboard uses, so both
@@ -497,20 +498,36 @@ class AnnotatedMatch:
             pass
 
         team_names = list(replay.get("team_names") or record.team_names)
-        team_colours = list(replay.get("team_colours") or [])
+        team_colors = list(replay.get("team_colors") or [])
         teams: list[TeamStyle] = []
         for team in (0, 1):
-            colour = team_colours[team] if team < len(team_colours) else None
-            if colour is None:
+            color = team_colors[team] if team < len(team_colors) else None
+            if color is None:
                 bgr = FALLBACK_BGR[team]
             else:
-                bgr = _bgr(colour)
+                bgr = _bgr(color)
             name = str(team_names[team]) if team < len(team_names) else f"Team {team + 1}"
             teams.append(TeamStyle(name=name, bgr=bgr))
 
+        # The segment remembers the filming machine's own path for the video it was built from, and a legacy
+        # absolute path outlives the disk it was written on when the archive moves beside its footage. Re-point
+        # it the way the record's sources are: look the stored name up beside the analysis and beside the
+        # footage, and only then accept the record's own resolved source as the fallback.
+        video = str(segment.meta["video"])
+        if not Path(video).exists():
+            for base in (match_dir, match_dir.parent.parent):
+                candidate = Path(resolve_path(video, base))
+                if candidate.exists():
+                    video = str(candidate)
+                    break
+            else:
+                reachable = next((source for source in record.sources if Path(source).exists()), None)
+                if reachable is not None:
+                    video = str(reachable)
+
         return cls(
             match_id=match_id,
-            video=segment.meta["video"],
+            video=video,
             fps=float(replay.get("fps") or segment.meta["fps"]),
             start_s=float(segment.meta["start_s"]),
             frame_count=int(replay.get("frame_count") or len(segment.time)),
@@ -540,29 +557,29 @@ class AnnotatedMatch:
         return self.start_s + index / self.fps
 
     def index_for(self, start_s: float) -> int:
-        """The first analysis frame at or after a source-clock time, clamped to the analysed window."""
+        """The first analysis frame at or after a source-clock time, clamped to the analyzed window."""
         index = int(round((float(start_s) - self.start_s) * self.fps))
         if index >= self.frame_count:
             raise StreamError(
-                f"start time {start_s:.1f}s is past the end of the analysed window "
+                f"start time {start_s:.1f}s is past the end of the analyzed window "
                 f"(ends at {self.source_time(self.frame_count - 1):.0f}s)"
             )
         return max(0, index)
 
-    def _neighbours(self, position: float) -> tuple[int, int, float]:
+    def _neighbors(self, position: float) -> tuple[int, int, float]:
         """The two analysis samples around a fractional position and where between them it sits."""
         p = float(np.clip(position, 0.0, max(0.0, self.frame_count - 1)))
         earlier = int(p)
         return earlier, min(earlier + 1, self.frame_count - 1), p - earlier
 
     def players_at(self, position: float) -> list[tuple]:
-        """The boxes at a fractional analysis position, interpolated between the neighbouring samples.
+        """The boxes at a fractional analysis position, interpolated between the neighboring samples.
 
         A track seen in both samples moves linearly between them; a track seen only in the earlier one holds its
         last box (a player briefly unobserved is not teleported); a track seen only in the later one is not drawn
         yet - the same appearance it has at the analysis rate, when the sample it appears on is reached.
         """
-        earlier, later, alpha = self._neighbours(position)
+        earlier, later, alpha = self._neighbors(position)
         before = {item[4]: item for item in self.players_by_frame[earlier]}
         if later == earlier or alpha <= 0.0:
             return list(before.values())
@@ -591,7 +608,7 @@ class AnnotatedMatch:
         sample that first saw it - the same appearance it has at the analysis rate. The *measured* flag belongs
         to the nearest sample: between a sighting and a forecast, the nearer sample's claim is the honest one.
         """
-        earlier, later, alpha = self._neighbours(position)
+        earlier, later, alpha = self._neighbors(position)
         u0, v0, m0 = self.ball[earlier]
         u1, v1, m1 = self.ball[later]
         filled = np.isfinite(u0) and np.isfinite(v0)
@@ -604,7 +621,7 @@ class AnnotatedMatch:
 
     def pose_at(self, position: float) -> tuple[np.ndarray, float]:
         """The camera pose at a fractional analysis position: the chain slerps, the focal interpolates."""
-        earlier, later, alpha = self._neighbours(position)
+        earlier, later, alpha = self._neighbors(position)
         if later == earlier or alpha <= 0.0:
             return self.q[earlier], float(self.focal[earlier])
         return (
@@ -661,12 +678,12 @@ class AnnotatedMatch:
 
         The analysis samples the match at ``fps`` (5 a second on the real matches); a frame between two samples
         has no boxes of its own. Everything that moves - the boxes, the ball, the camera pose - interpolates
-        between the neighbouring samples (see :meth:`players_at`), which is what makes a 60 fps render a real
+        between the neighboring samples (see :meth:`players_at`), which is what makes a 60 fps render a real
         60 fps rather than each sample held for twelve frames. The text layers stay on the nearer sample: they
         name where the analysis is, and that stays true between its frames.
         """
         position = (float(at_s) - self.start_s) * self.fps
-        earlier, _later, _alpha = self._neighbours(position)
+        earlier, _later, _alpha = self._neighbors(position)
         if pitch:
             q, focal = self.pose_at(position)
             self._draw_pitch(frame, earlier, q=q, focal=focal)
@@ -740,15 +757,15 @@ class AnnotatedMatch:
             right, bottom = int(x2 * width), int(y2 * width)
             role = self.roles.get(track_id)
             if role in ROLE_BGR:
-                colour = ROLE_BGR[role]
+                color = ROLE_BGR[role]
             elif 0 <= team < len(self.teams):
-                colour = self.teams[team].bgr
+                color = self.teams[team].bgr
             else:
-                colour = OTHER_BGR
+                color = OTHER_BGR
             if boxes:
                 thickness = max(2, int(round(3 * scale)))
                 cv2.rectangle(frame, (left, top), (right, bottom), INK, thickness + 2)
-                cv2.rectangle(frame, (left, top), (right, bottom), colour, thickness)
+                cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
             box_height = abs(bottom - top)
             if not numbers or box_height < 22 * scale:
                 continue  # too small on screen for a readable chip; the box alone carries the detection
@@ -767,34 +784,34 @@ class AnnotatedMatch:
             if y < 2:  # no room above the box: tuck the chip just inside the top of the frame
                 y = 2
             if show_detail:
-                _chip(frame, x, y, detail, colour, small)
-            _chip(frame, x, y + detail_height, main, colour, font)
+                _chip(frame, x, y, detail, color, small)
+            _chip(frame, x, y + detail_height, main, color, font)
 
     def _draw_ball(self, frame: np.ndarray, index: int, *, stamp=None) -> None:
         u, v, measured = self.ball[index] if stamp is None else stamp
         if not (np.isfinite(u) and np.isfinite(v)):
             return
         height, width = frame.shape[:2]
-        centre = (int(round(u * width)), int(round(v * width)))
-        if not (-0.05 * width <= centre[0] <= 1.05 * width and -0.05 * width <= centre[1] <= 1.05 * width):
+        center = (int(round(u * width)), int(round(v * width)))
+        if not (-0.05 * width <= center[0] <= 1.05 * width and -0.05 * width <= center[1] <= 1.05 * width):
             return
         radius = max(5, int(round(height / 150.0)))
         if measured == 1.0:
-            # A detection: a small box around the centre (the "detection box" a viewer expects) plus the ball
+            # A detection: a small box around the center (the "detection box" a viewer expects) plus the ball
             # itself as a filled dot inside it.
             half = radius + max(3, radius // 2)
-            cv2.rectangle(frame, (centre[0] - half, centre[1] - half), (centre[0] + half, centre[1] + half),
+            cv2.rectangle(frame, (center[0] - half, center[1] - half), (center[0] + half, center[1] + half),
                           (255, 255, 255), max(1, radius // 4))
-            cv2.circle(frame, centre, radius, (255, 255, 255), -1)
-            cv2.circle(frame, centre, radius, (40, 40, 220), max(2, radius // 3))
+            cv2.circle(frame, center, radius, (255, 255, 255), -1)
+            cv2.circle(frame, center, radius, (40, 40, 220), max(2, radius // 3))
         else:
             # The scan coasted across a miss: a forecast, drawn as a hollow ring so it reads as one.
-            cv2.circle(frame, centre, radius, FORECAST_BGR, max(2, radius // 3))
+            cv2.circle(frame, center, radius, FORECAST_BGR, max(2, radius // 3))
 
     def _draw_hud(self, frame: np.ndarray, index: int, *, note: str = "", session_line: bool = False) -> None:
-        """The watching corners: who is playing, which colour they are, and where in the match this is.
+        """The watching corners: who is playing, which color they are, and where in the match this is.
 
-        The clock is the animation's clock: elapsed on the analysed window's own clock, whose zero is where the
+        The clock is the animation's clock: elapsed on the analyzed window's own clock, whose zero is where the
         analysis starts (kick-off on a kick-off-to-full-time build), drawn ``M:SS`` like the pane's. The
         recording's clock is deliberately not drawn - it starts before kick-off, and a stamp in recording
         seconds reads minutes away from the animation the viewer compares it with.
@@ -811,7 +828,7 @@ class AnnotatedMatch:
             cv2.rectangle(frame, (pad, y - int(13 * scale)), (pad + int(18 * scale), y + int(2 * scale)), style.bgr, -1)
             _outline_text(frame, style.name, (pad + int(26 * scale), y), PAPER, font)
             y += int(21 * scale)
-        # A role colour nobody can name is decoration: the key is drawn only when such a box is on screen.
+        # A role color nobody can name is decoration: the key is drawn only when such a box is on screen.
         for role in ("goalkeeper", "referee"):
             if role not in self.roles.values():
                 continue
@@ -871,14 +888,14 @@ def _clamp_chip_x(frame: np.ndarray, left: int, chip_width: int) -> int:
     return int(np.clip(left, 2, max(2, frame.shape[1] - chip_width - 2)))
 
 
-def _chip(frame: np.ndarray, x: int, y: int, text: str, colour: tuple[int, int, int], font: float) -> None:
+def _chip(frame: np.ndarray, x: int, y: int, text: str, color: tuple[int, int, int], font: float) -> None:
     """A filled label chip whose top-left corner is ``(x, y)``, sized to its text."""
     if not text:
         return
     chip_w, chip_h = _chip_size(text, font)
-    cv2.rectangle(frame, (x, y), (x + chip_w, y + chip_h), colour, -1)
+    cv2.rectangle(frame, (x, y), (x + chip_w, y + chip_h), color, -1)
     cv2.rectangle(frame, (x, y), (x + chip_w, y + chip_h), INK, 1)
-    cv2.putText(frame, text, (x + CHIP_PAD, y + chip_h - CHIP_PAD), FONT, font, _text_bgr(colour), 1, cv2.LINE_AA)
+    cv2.putText(frame, text, (x + CHIP_PAD, y + chip_h - CHIP_PAD), FONT, font, _text_bgr(color), 1, cv2.LINE_AA)
 
 
 def encode_jpeg(frame: np.ndarray) -> bytes:
@@ -896,7 +913,7 @@ def iter_annotated_frames(
     width: int = DEFAULT_WIDTH,
     overlays: dict[str, bool] | None = None,
     control: StreamControl | None = None,
-    reader_factory=FFmpegFrameReader,
+    reader_factory=open_reader,
     pace: bool = True,
 ):
     """Decode the match from ``start_s`` and yield ``(index, jpeg)`` for every analysis-aligned frame.
@@ -941,7 +958,7 @@ def streamable_matches(root: str | Path | None = None) -> list[dict]:
     """One row per match that could be streamed, for the index page and ``/matches``.
 
     Only metadata is read (never the tens-of-megabyte replay), so the index stays cheap: what it needs is which
-    matches exist, what the teams are called and wear, and where the analysed window starts and ends.
+    matches exist, what the teams are called and wear, and where the analyzed window starts and ends.
     """
     library = MatchLibrary(root)
     rows: list[dict] = []
@@ -957,13 +974,13 @@ def streamable_matches(root: str | Path | None = None) -> list[dict]:
             rows.append({"match_id": match_id, "streamable": False, "reason": "segment not found"})
             continue
         meta = json.loads(meta_path.read_text())
-        colours: list[list[int] | None] = [None, None]
+        colors: list[list[int] | None] = [None, None]
         try:
             report = json.loads((directory / "report.json").read_text())
             for team in report.get("teams") or []:
                 team_index = int(team.get("team", -1))
                 if 0 <= team_index < 2:
-                    colours[team_index] = team.get("kit_rgb")
+                    colors[team_index] = team.get("kit_rgb")
         except (OSError, json.JSONDecodeError):
             pass
         rows.append(
@@ -971,7 +988,7 @@ def streamable_matches(root: str | Path | None = None) -> list[dict]:
                 "match_id": match_id,
                 "streamable": True,
                 "team_names": list(record.team_names),
-                "team_colours": colours,
+                "team_colors": colors,
                 "start_s": meta.get("start_s"),
                 "end_s": meta.get("end_s"),
                 "frame_count": meta.get("total_frames"),
@@ -979,24 +996,6 @@ def streamable_matches(root: str | Path | None = None) -> list[dict]:
             }
         )
     return rows
-
-
-class GameVideo:
-    """The un-annotated stand-in :func:`encode_clip` needs to encode a whole game video.
-
-    The clip encoder asks its ``match`` for the source path and a ``render_at`` hook; a game's combined video
-    has no overlays to draw - the marks are read *from* this video, before anything is calibrated - so the hook
-    does nothing and the encode is a straight H.264 transcode. That is what replaces the old prebuilt marking
-    proxy (``data/games/<id>/scrubber/proxy.mp4``, built by ``run_build_game.py``): the same file, produced by
-    the same encoder as every other encoded video, when it is first asked for.
-    """
-
-    def __init__(self, video: str | Path, duration_s: float):
-        self.video = str(video)
-        self.duration_s = float(duration_s)
-
-    def render_at(self, frame, timestamp, **_overlays) -> None:  # noqa: ANN001 - the encoder's hook signature
-        return None
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -1019,7 +1018,7 @@ class MatchStreamServer(ThreadingHTTPServer):
         root: str | Path | None = None,
         width: int = DEFAULT_WIDTH,
         max_streams: int = MAX_CONCURRENT_STREAMS,
-        reader_factory=FFmpegFrameReader,
+        reader_factory=open_reader,
         pace: bool = True,
         encoder: str | None = None,
         clip_cache: ClipCache | None = None,
@@ -1039,12 +1038,11 @@ class MatchStreamServer(ThreadingHTTPServer):
         self.clip_cache = clip_cache if clip_cache is not None else ClipCache()
         self.clip_encoder = clip_encoder
         self.live_chunks = live_chunks
-        # Game marking videos (Step 1): the /game/ route builds them on demand, beside the combined video.
-        # An explicit ``games_root`` keeps the old single-root behaviour; otherwise the manifest is found
-        # where this version writes it (an analysis directory beside the footage) or in the legacy root.
+        # Game marking (Step 1): the /game/ route streams frames straight from the clips - no combined file, no
+        # encode, no proxy build. An explicit ``games_root`` keeps the old single-root behavior; otherwise the
+        # manifest is found where this version writes it (an analysis directory beside the footage) or in the
+        # legacy root.
         self.games_root = Path(games_root) if games_root is not None else None
-        self._game_locks: dict[str, threading.Lock] = {}
-        self._game_locks_guard = threading.Lock()
         self.stream_slots = threading.BoundedSemaphore(max_streams)
         self._sessions: dict[str, AnnotatedMatch] = {}
         self._sessions_lock = threading.Lock()
@@ -1071,11 +1069,6 @@ class MatchStreamServer(ThreadingHTTPServer):
         with self._controls_lock:
             self._controls.pop(token, None)
 
-    def game_lock(self, game_id: str) -> threading.Lock:
-        """One lock per game, so two simultaneous first requests do not both encode the whole video."""
-        with self._game_locks_guard:
-            return self._game_locks.setdefault(game_id, threading.Lock())
-
     def game_directory(self, game_id: str) -> Path:
         """Where a game's manifest and proxy live: an explicit legacy root when the server was told one, else
         the manifest found beside the footage (and in the old ``data/games`` archive)."""
@@ -1085,23 +1078,6 @@ class MatchStreamServer(ThreadingHTTPServer):
         if directory is None:
             raise StreamError(f"no game {game_id} beside any footage root")
         return directory
-
-    def game_source(self, game_id: str) -> tuple[Path, float]:
-        """The combined video and its length for a game id; raises :class:`StreamError` when it is not there.
-
-        The id arrives in a URL, so it is validated (a bare name, nothing joined to it) before it ever reaches
-        the filesystem - the directory lookup joins it to a root, and a name is all it may be.
-        """
-        if not game_id or game_id.startswith(".") or game_id != Path(game_id).name or "/" in game_id or "\\" in game_id:
-            raise StreamError(f"bad game id: {game_id!r}")
-        directory = self.game_directory(game_id)
-        if not (directory / game_lib.MANIFEST_FILE).exists():
-            raise StreamError(f"no game {game_id} in {self.games_root or 'the footage roots'}")
-        record = game_lib.GameRecord.load(directory)
-        video = Path(record.output)
-        if not video.exists():
-            raise StreamError(f"the combined video for {game_id} is missing: {video}")
-        return video, float(record.duration_s)
 
     def session(self, match_id: str) -> AnnotatedMatch:
         """The cached overlay for a match, loading it on first demand (a few seconds of segment and chain work).
@@ -1123,7 +1099,7 @@ class MatchStreamServer(ThreadingHTTPServer):
 
 class MatchStreamHandler(BaseHTTPRequestHandler):
     """Routes: ``/`` index, ``/matches`` JSON, ``/stream/<id>.mjpg``, ``/frame/<id>.jpg``,
-    ``/live/<id>.mp4``, ``/video/<id>.mp4`` and ``/game/<id>.mp4``."""
+    ``/live/<id>.mp4``, ``/video/<id>.mp4`` and ``/game/<id>.mjpg``."""
 
     server: MatchStreamServer
 
@@ -1184,7 +1160,7 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             elif parsed.path.startswith("/video/"):
                 self._video(parsed)
             elif parsed.path.startswith("/game/"):
-                self._game_video(parsed)
+                self._game_mjpeg(parsed)
             elif parsed.path.startswith("/frame/"):
                 self._frame(parsed)
             else:
@@ -1233,8 +1209,8 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             teams = row.get("team_names") or []
             swatches = []
             for index, team_name in enumerate(teams[:2]):
-                colour = (row.get("team_colours") or [None, None])[index]
-                style = f"background:rgb({colour[0]},{colour[1]},{colour[2]})" if colour else "background:#888"
+                color = (row.get("team_colors") or [None, None])[index]
+                style = f"background:rgb({color[0]},{color[1]},{color[2]})" if color else "background:#888"
                 swatches.append(f"<span class='sw' style='{style}'></span>{html.escape(str(team_name))}")
             start = row.get("start_s") or 0.0
             end = row.get("end_s") or 0.0
@@ -1249,7 +1225,7 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
                 "<div class='card'>"
                 f"<h2>{name}</h2>"
                 f"<p>{' &middot; '.join(swatches)}</p>"
-                f"<p class='dim'>window {start:.0f}s - {end:.0f}s, {frames} analysed frames at {fps:g} fps</p>"
+                f"<p class='dim'>window {start:.0f}s - {end:.0f}s, {frames} analyzed frames at {fps:g} fps</p>"
                 f"<p><a href='{base}&rate=1'><img src='/frame/{name}.jpg?t={preview_t:.1f}' alt='annotated frame'></a></p>"
                 f"<p>{links} &middot; <a href='/frame/{name}.jpg?t={start:.1f}'>single frame</a> &middot; "
                 f"<a href='/play/{name}?format=live&start={start:.1f}'>mp4 live</a> &middot; "
@@ -1268,15 +1244,15 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             "a{color:#6cf}"
             "</style></head><body>"
             "<h1>Annotated match stream</h1>"
-            "<p class='dim'>The analysed window drawn through the calibration: pitch model, detections, shirt "
-            "numbers and team colours. Endpoints: <code>/stream/&lt;match&gt;.mjpg</code> "
+            "<p class='dim'>The analyzed window drawn through the calibration: pitch model, detections, shirt "
+            "numbers and team colors. Endpoints: <code>/stream/&lt;match&gt;.mjpg</code> "
             "(MJPEG, params <code>start=&lt;source seconds&gt;, rate=&lt;speed&gt;, width=&lt;px&gt;, overlays=</code>), "
             "<code>/live/&lt;match&gt;.mp4</code> (the same overlay encoded H.264 and streamed as a fragmented MP4), "
             "<code>/video/&lt;match&gt;.mp4</code> (a bounded, seekable clip: <code>duration=, fps=, width=, "
             "start=, overlays=, rate=, audio=, codec=h264|hevc</code>; defaults to the source's own frame rate "
             "and resolution), "
-            "<code>/game/&lt;game&gt;.mp4</code> (the whole combined game, un-annotated, for Step 1 marking: "
-            "<code>width=, fps=</code>; prepared on first request and cached beside the game), "
+            "<code>/game/&lt;game&gt;.mjpg</code> (the game's clips read directly, un-annotated, for Step 1 marking: "
+            "<code>t=&lt;game seconds&gt;, width=, fps=</code>; no encode, no cache), "
             "<code>/frame/&lt;match&gt;.jpg?t=</code>, <code>/matches</code>.</p>"
             + "".join(cards)
             + "</body></html>"
@@ -1494,58 +1470,79 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
                 self.server.stream_slots.release()
         self._send_file(path, "video/mp4")
 
-    def _game_video(self, parsed) -> None:
-        """The Step 1 marking video: a seekable encode of the whole game, prepared on demand and cached.
+    def _game_mjpeg(self, parsed) -> None:
+        """The Step 1 marking stream: raw frames straight from the clips - no combined file, no encode, no cache.
 
-        This is the replacement for the prebuilt marking proxy: the same file at the same path, but produced by
-        the same encoder as every other encoded video, when it is first asked for. There is nothing to draw -
-        the marks are read *from* this video - so the encode is a straight transcode, and a long game decodes
-        keyframes only (one picture per second; see ``timeline.proxy_skip_frame``), which is what makes a first
-        request a couple of minutes rather than the length of the footage. A game that already has a proxy (built
-        by an older ``run_build_game``) is served straight from it, byte for byte.
+        This replaced the on-demand encode of a whole game (640 px, 4 fps, cached at the old proxy path, and
+        impossible without the merged file). Frames come from the clip set through `ingest.source`, so a seek
+        costs the same as seeking the old combined video (~1 s on the reference 4K footage, with pixel-identical
+        frames) and marking works the moment the clips are named - before Stage A has run at all. Frames are
+        paced to ``fps``; the viewer reconnects with a new ``t`` to scrub.
         """
-        game_id = self._match_id(parsed, ".mp4")
+        game_id = self._match_id(parsed, ".mjpg")
         query = self._query(parsed)
-        if not game_id or game_id.startswith(".") or game_id != Path(game_id).name or "/" in game_id or "\\" in game_id:
+        # `_match_id` keeps only the last path segment, so the raw path is what proves the id was one segment:
+        # "nested/name" must be refused before any directory is joined, not silently read as "name".
+        if parsed.path != f"/game/{game_id}.mjpg" or not game_id or game_id.startswith(".") or "\\" in game_id:
             self._send_text(404, "bad game id\n")
             return
-        target = game_lib.proxy_path(self.server.game_directory(game_id))
-        if target.exists():
-            self._send_file(target, "video/mp4")
-            return
-        video, duration = self.server.game_source(game_id)  # StreamError -> do_GET's handler
+        directory = self.server.game_directory(game_id)  # StreamError -> do_GET's handler
+        if not (directory / game_lib.MANIFEST_FILE).exists():
+            raise StreamError(f"no game {game_id}")
+        record = game_lib.GameRecord.load(directory)
+        if not record.clips:
+            raise StreamError(f"game {game_id} has no clips to read")
+        missing = next((clip for clip in record.clips if not Path(clip.path).exists()), None)
+        if missing is not None:
+            raise StreamError(f"game {game_id} is missing a clip: {Path(missing.path).name}")
+        source = source_from_record(record)
         width = int(round(self._float(query, "width", game_lib.PROXY_WIDTH, MIN_WIDTH, MAX_VIDEO_WIDTH))) // 2 * 2
-        fps = self._float(query, "fps", game_lib.PROXY_FPS, 1.0, 120.0)
-        lock = self.server.game_lock(game_id)
-        with lock:
-            if target.exists():  # another request finished the encode while we waited for the lock
-                self._send_file(target, "video/mp4")
-                return
-            if not self.server.stream_slots.acquire(timeout=STREAM_SLOT_WAIT_S):
-                self._send_text(503, "too many concurrent encodes; retry shortly\n")
-                return
-            tmp = target.with_name(target.name + ".tmp")
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                self.server.clip_encoder(
-                    GameVideo(video, duration),
-                    start_s=0.0,
-                    duration_s=duration,
-                    fps=fps,
-                    width=width,
-                    overlays={},
-                    output=tmp,
-                    encoder=self.server.video_encoder,
-                    audio=False,
-                    skip_frame=proxy_skip_frame(duration),
-                )
-                os.replace(tmp, target)
-            except VideoError as error:
-                raise StreamError(f"the marking video could not be built: {error}") from error
-            finally:
-                tmp.unlink(missing_ok=True)  # after a successful os.replace this is a no-op
-                self.server.stream_slots.release()
-        self._send_file(target, "video/mp4")
+        fps = self._float(query, "fps", MARK_FPS, 1.0, 30.0)
+        start_s = self._float(query, "t", 0.0, 0.0, float(record.duration_s))
+        # ``frames=1`` serves a single still (a scrub preview) and closes: browsers keep the last MJPEG frame.
+        frames = int(round(self._float(query, "frames", 0.0, 0.0, 100000.0)))
+        if not self.server.stream_slots.acquire(timeout=STREAM_SLOT_WAIT_S):
+            self._send_text(503, "too many concurrent streams; retry shortly\n")
+            return
+        token = query.get("token", "")[:64]
+        control = self.server.register_control(token) if token else None
+        try:
+            # Same write-timeout watchdog as the annotated stream: a browser that removes the <img> can leave
+            # the fetch half-open, and the handler must die rather than block forever on a full socket buffer.
+            self.connection.settimeout(STREAM_WRITE_TIMEOUT_S)
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            reader = open_reader(
+                source, fps=fps, width=width, start_s=start_s, duration_s=float(record.duration_s) - start_s
+            )
+            period = 1.0 / max(0.1, fps)
+            next_push = time.monotonic()
+            sent = 0
+            for _game_time, frame in reader.frames():
+                if control is not None and control.stopped:
+                    return
+                jpeg = encode_jpeg(frame)
+                self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
+                self.wfile.write(f"Content-Length: {len(jpeg)}\r\n\r\n".encode())
+                self.wfile.write(jpeg)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+                sent += 1
+                if frames and sent >= frames:
+                    return
+                if self.server.pace:
+                    next_push += period
+                    delay = next_push - time.monotonic()
+                    if delay > 0:
+                        time.sleep(delay)
+                    else:
+                        next_push = time.monotonic()
+        finally:
+            if token:
+                self.server.drop_control(token)
+            self.server.stream_slots.release()
 
     def _live(self, parsed) -> None:
         """The endless variant of the encoded stream: a fragmented MP4 produced as the frames are rendered.
@@ -1614,7 +1611,7 @@ class MatchStreamHandler(BaseHTTPRequestHandler):
             self.server.stream_slots.release()
 
     def _send_file(self, path: Path, content_type: str) -> None:
-        """A file, honouring ``Range`` - which is what makes a clip scrubbable: the browser asks for the parts
+        """A file, honoring ``Range`` - which is what makes a clip scrubbable: the browser asks for the parts
         it needs while the viewer seeks. A range the file cannot satisfy gets 416, per the spec, so a player
         falls back to a fresh request instead of guessing."""
         size = path.stat().st_size

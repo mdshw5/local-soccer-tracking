@@ -49,14 +49,14 @@ def main() -> int:
     args = parse_args()
     library = MatchLibrary()
     log = library.events(args.match)
-    labelled = [e for e in log.events if e.verdict in ("true", "false")]
-    if not labelled:
+    labeled = [e for e in log.events if e.verdict in ("true", "false")]
+    if not labeled:
         print("No verdicts on this match yet - review some candidates first (Step 4, under the player).")
         return 0
 
-    video = args.video or next((e.video for e in labelled if e.video), "")
+    video = args.video or next((e.video for e in labeled if e.video), "")
     if not video:
-        print("The labelled candidates do not record the video they came from; pass --video.")
+        print("The labeled candidates do not record the video they came from; pass --video.")
         return 1
     wav = Path(args.wav) if args.wav else REPO_ROOT / "data" / "cache" / f"{Path(video).stem}.wav"
     if not wav.exists():
@@ -64,12 +64,12 @@ def main() -> int:
         return 1
 
     samples, rate = read_wav_mono(wav)
-    print(f"{len(labelled)} labelled candidate(s) on {Path(video).name}, audio {samples.size / rate / 60:.1f} min")
+    print(f"{len(labeled)} labeled candidate(s) on {Path(video).name}, audio {samples.size / rate / 60:.1f} min")
     # The gates off: every candidate the *older* stages report, each carrying its own measurements.
     candidates = detect_whistles(samples, rate, max_voice_share=None, max_low_gain=None)
 
     rows: list[tuple[float, str, object]] = []
-    for event in labelled:
+    for event in labeled:
         near = [w for w in candidates if abs(w.time_s - event.time_s) < args.tolerance]
         if not near:
             print(f"  {event.time_s:8.2f} {event.verdict:>5}  no candidate within {args.tolerance}s - detector changed?")

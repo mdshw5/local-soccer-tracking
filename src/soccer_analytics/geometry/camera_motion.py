@@ -1,6 +1,6 @@
 """Recover a PTZ gimbal camera's motion from the footage itself.
 
-A gimbal camera pans, tilts, rolls slightly and zooms about (nearly) its optical centre, so successive frames are
+A gimbal camera pans, tilts, rolls slightly and zooms about (nearly) its optical center, so successive frames are
 related by ``H = K_c R K_g^-1``: a rotation ``R`` seen through intrinsics that differ only in focal length. We
 therefore integrate camera *orientation* (a rotation matrix) and focal length, not free 8-parameter homographies.
 
@@ -11,9 +11,9 @@ every point maps to infinity (observed: a 674x "zoom" after 70 s). A rotation ma
 
 Conventions
 -----------
-* Pixel coordinates are normalised by the analysis frame *width* (``u = x / W``, ``v = y / W``) so results do not
-  depend on the resolution the motion was estimated at. Principal point is the frame centre ``(0.5, 0.5 * H / W)``.
-* ``to_ref`` maps normalised pixel coordinates of a frame to the *reference plane*: the normalised image plane of
+* Pixel coordinates are normalized by the analysis frame *width* (``u = x / W``, ``v = y / W``) so results do not
+  depend on the resolution the motion was estimated at. Principal point is the frame center ``(0.5, 0.5 * H / W)``.
+* ``to_ref`` maps normalized pixel coordinates of a frame to the *reference plane*: the normalized image plane of
   frame 0 of the segment. ``to_ref`` of frame 0 is the identity.
 * Focal lengths are in frame widths. Real footage gives about 0.9 (a ~58 degree horizontal field of view).
 """
@@ -55,12 +55,12 @@ def overlay_mask(
     return mask
 
 
-def normaliser(width: int) -> np.ndarray:
+def normalizer(width: int) -> np.ndarray:
     return np.array([[1.0 / width, 0.0, 0.0], [0.0, 1.0 / width, 0.0], [0.0, 0.0, 1.0]])
 
 
 def intrinsics(focal: float, aspect: float) -> np.ndarray:
-    """Normalised intrinsics; ``aspect = height / width``."""
+    """Normalized intrinsics; ``aspect = height / width``."""
     return np.array([[focal, 0.0, 0.5], [0.0, focal, 0.5 * aspect], [0.0, 0.0, 1.0]])
 
 
@@ -107,7 +107,7 @@ def step_rotation(step: np.ndarray, focal_current: float, focal_good: float, asp
 
     This is `decompose_step` without its one-dimensional search: the search exists to discover ``f_c``, and when the
     focal lengths come from the analysis pass (``SegmentData.focal``) skipping it costs one SVD per step instead of
-    a bounded minimisation of many - the difference between a 20-minute segment taking a minute to load and taking a
+    a bounded minimization of many - the difference between a 20-minute segment taking a minute to load and taking a
     second. The rotation is identical: the same matrix is decomposed and projected onto SO(3) the same way.
     """
     homography = _unit(np.asarray(step, dtype=np.float64))
@@ -285,7 +285,7 @@ class TrackerState:
     ok: bool
     inlier_ratio: float
     method: str
-    # Raw normalised step (last good frame -> this frame) that produced this state; None for init/lost frames.
+    # Raw normalized step (last good frame -> this frame) that produced this state; None for init/lost frames.
     step: np.ndarray | None = None
     focal: float = DEFAULT_FOCAL
     spread: float = 0.0
@@ -315,7 +315,7 @@ class CameraMotionTracker:
         self.min_inlier_ratio = min_inlier_ratio
         self.min_inliers = min_inliers
         self.max_spread = max_spread
-        self._norm = normaliser(self.width)
+        self._norm = normalizer(self.width)
         self._norm_inv = np.linalg.inv(self._norm)
         self.chain = chain or RotationChain(focal0, self.height / self.width)
         self._good_gray: np.ndarray | None = None
@@ -327,14 +327,14 @@ class CameraMotionTracker:
     def _try_step(self, step: MotionStep | None) -> TrackerState | None:
         if step is None or step.inliers < self.min_inliers or step.inlier_ratio < self.min_inlier_ratio:
             return None
-        normalised = _unit(self._norm @ step.homography @ self._norm_inv)
-        if not step_is_plausible(normalised):
+        normalized = _unit(self._norm @ step.homography @ self._norm_inv)
+        if not step_is_plausible(normalized):
             return None
-        q, focal, spread = self.chain.preview(normalised)
+        q, focal, spread = self.chain.preview(normalized)
         if spread > self.max_spread or not (FOCAL_RANGE[0] <= focal <= FOCAL_RANGE[1]):
             return None  # not something a pan/tilt/zoom camera can do: the fit latched onto the wrong thing
         self.chain.commit(q, focal)
-        return TrackerState(self.chain.to_ref, True, step.inlier_ratio, step.method, normalised, focal, spread)
+        return TrackerState(self.chain.to_ref, True, step.inlier_ratio, step.method, normalized, focal, spread)
 
     def update(self, gray: np.ndarray) -> TrackerState:
         if gray.shape != (self.height, self.width):

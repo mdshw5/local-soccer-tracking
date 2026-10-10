@@ -78,7 +78,7 @@ def test_bystanders_are_excluded_from_the_field_of_play() -> None:
     """The detector tracks everyone in frame - coaches, photographers, spectators - and the pitch animation
     must not draw them on the field of play.
 
-    A synthetic spectator stands still all match, so their track spans a metre or two and never moves; a player
+    A synthetic spectator stands still all match, so their track spans a meter or two and never moves; a player
     covers ground. The payload keeps the players and drops the spectators, and says how many it dropped.
     """
     from soccer_analytics.analysis.projection import on_pitch_mask
@@ -108,7 +108,7 @@ def test_bystanders_are_excluded_from_the_field_of_play() -> None:
     )
     kept_ids = {player["track_id"] for player in replay["players"]}
     assert replay["bystanders_excluded"] == len(report.players) - len(replay["players"])
-    # No team-labelled player may be dropped as a bystander: the rule is for people off the field of play.
+    # No team-labeled player may be dropped as a bystander: the rule is for people off the field of play.
     for player in report.players:
         if player.team in (0, 1):
             assert player.track_id in kept_ids, f"team player {player.track_id} was dropped as a bystander"
@@ -171,11 +171,11 @@ def test_the_payload_carries_the_camera_position(replay_case) -> None:
 
 
 def test_a_ball_record_projects_back_onto_the_pitch(ball_case) -> None:
-    """A scan record stores a pixel; the replay needs metres, and the round trip must return the same spot.
+    """A scan record stores a pixel; the replay needs meters, and the round trip must return the same spot.
 
     ``pitch_to_pixels`` is the oracle: the simulated ball's true position, projected with the same calibration the
-    scan's records are projected with. If framing, normalisation or the corrected chain were off, the ball would
-    be drawn metres from the spot it was on.
+    scan's records are projected with. If framing, normalization or the corrected chain were off, the ball would
+    be drawn meters from the spot it was on.
     """
     segment, truth, calibration, q, focal = ball_case
     frames = [12, 40, 90, 150]
@@ -243,11 +243,11 @@ def test_the_payload_keeps_the_ball_and_marks_forecasts(replay_case) -> None:
     assert len(rebuilt["ball"]) == frames
 
 
-def test_the_payload_carries_the_measured_kit_colours(replay_case) -> None:
-    """The markers wear the kit the clustering measured, so the colours must ride in the payload - and stay absent.
+def test_the_payload_carries_the_measured_kit_colors(replay_case) -> None:
+    """The markers wear the kit the clustering measured, so the colors must ride in the payload - and stay absent.
 
     ``None`` is a value here, not a gap: a team whose kits could not be separated must arrive as ``None`` so the
-    component falls back to its own palette, rather than being handed a made-up colour that looks measured.
+    component falls back to its own palette, rather than being handed a made-up color that looks measured.
     """
     replay, report, segment, detections = replay_case
     common = (
@@ -259,20 +259,20 @@ def test_the_payload_carries_the_measured_kit_colours(replay_case) -> None:
         ["Team A", "Team B"],
     )
 
-    rebuilt = build_replay(*common, team_colours=[(220, 30, 30), None])
-    assert rebuilt["team_colours"] == [[220, 30, 30], None]
-    assert replay["team_colours"] is None, "a replay built without colours must not carry an invented palette"
+    rebuilt = build_replay(*common, team_colors=[(220, 30, 30), None])
+    assert rebuilt["team_colors"] == [[220, 30, 30], None]
+    assert replay["team_colors"] is None, "a replay built without colors must not carry an invented palette"
 
     # The browser builds rgb(...) from these numbers; out-of-range values would make that string invalid.
-    clamped = build_replay(*common, team_colours=[(300, -5, 128), (0, 0, 0)])
-    assert clamped["team_colours"] == [[255, 0, 128], [0, 0, 0]]
+    clamped = build_replay(*common, team_colors=[(300, -5, 128), (0, 0, 0)])
+    assert clamped["team_colors"] == [[255, 0, 128], [0, 0, 0]]
 
 
-def test_role_labelled_tracks_survive_the_bystander_filter(replay_case) -> None:
+def test_role_labeled_tracks_survive_the_bystander_filter(replay_case) -> None:
     """A keeper stands still near one goal, which trips the bystander rule - the role must win.
 
-    Measured on the real game: 15 of 28 role-labelled tracks (keepers, all slow and compact) were being dropped
-    from the payload, so the view could not colour-code people it was not drawing anyway.
+    Measured on the real game: 15 of 28 role-labeled tracks (keepers, all slow and compact) were being dropped
+    from the payload, so the view could not color-code people it was not drawing anyway.
     """
     _replay, report, segment, detections = replay_case
     frames = np.arange(0, 300, dtype=np.int64)
@@ -428,7 +428,7 @@ def test_the_players_boxes_are_kept_out_of_the_payload() -> None:
         assert len(stored) == len(player["frames"]), "a box per observation, in the same order"
         for row in stored:
             x1, y1, x2, y2 = (float(v) for v in row)
-            assert 0.0 <= x1 <= x2 <= 1.2, "boxes are normalised by frame width"
+            assert 0.0 <= x1 <= x2 <= 1.2, "boxes are normalized by frame width"
             # y1 may be *below* y2: the simulator (like some real detections) emits inverted boxes, and the
             # framing code takes the absolute height for exactly this reason.
             assert abs(y2 - y1) >= 0.0
@@ -453,12 +453,12 @@ def test_a_player_without_boxes_is_left_out_rather_than_zeroed() -> None:
 
 
 def test_a_quick_tag_lands_on_the_recordings_clock() -> None:
-    """The tag bar sends the strip's clock (0 at the first analysed frame); events store the recording's own
+    """The tag bar sends the strip's clock (0 at the first analyzed frame); events store the recording's own
     seconds. The window's start is added back here, once, for every tag - the same translation the strip, the
     table and the reel cutter apply in reverse when they read it.
 
     Getting this wrong is the classic bug in this codebase (three clocks: the clip, the combined game, and the
-    analysed window), and a tag made while watching is otherwise indistinguishable from one typed in by hand.
+    analyzed window), and a tag made while watching is otherwise indistinguishable from one typed in by hand.
     """
     event = event_from_tag(
         {"type": "goal", "team": 0, "time_s": 12.5, "note": "  header  "},
@@ -487,9 +487,9 @@ def test_a_quick_tag_is_clamped_to_the_window_and_rejects_unknown_types() -> Non
         event_from_tag({"type": "wobble"}, video="v.mp4", window_start=0.0, duration_s=60.0)
 
 
-def test_a_re_delivered_press_is_recognised_as_already_stored() -> None:
+def test_a_re_delivered_press_is_recognized_as_already_stored() -> None:
     """A page that reconnects after a server restart re-sends the component's sticky value; the session that
-    would remember the acknowledgement is gone, so the store has to be idempotent by content or every reconnect
+    would remember the acknowledgment is gone, so the store has to be idempotent by content or every reconnect
     duplicates the user's last tags. Same type, team, recording and second means the same press."""
     from soccer_analytics.analysis.events import Event
 

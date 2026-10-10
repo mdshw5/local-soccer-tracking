@@ -33,6 +33,7 @@ from soccer_analytics.analysis.events import (
 )
 from soccer_analytics.analysis.library import MatchLibrary
 from soccer_analytics.ingest.ffmpeg_reader import extract_audio, read_wav_mono
+from soccer_analytics.ingest.source import as_source
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STATUS_FILE = "audio_scan.json"
@@ -99,7 +100,10 @@ def scan(
     """
     status = status or Status(library.path(match_id) / STATUS_FILE)
     try:
-        wav = Path(wav_path) if wav_path else REPO_ROOT / "data" / "cache" / f"{Path(video).stem}.wav"
+        # The cache is keyed by what the video *is*, not by its filename: every never-merge game's manifest is
+        # called game.json, and "game.wav" would hand the first game's audio to every later one. A clip set keys
+        # on its game id (manifest directory name); a plain file keeps its own stem, exactly as before.
+        wav = Path(wav_path) if wav_path else REPO_ROOT / "data" / "cache" / f"{as_source(video).key_name}.wav"
         base, span = 0.0, 1.0
         if wav.exists() and wav.stat().st_size > 1024:
             status.update(force=True, stage="detect", progress=0.0, message="Using the cached audio")

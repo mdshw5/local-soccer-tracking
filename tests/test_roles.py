@@ -32,7 +32,7 @@ def test_a_goalkeeper_needs_enough_observations() -> None:
     assert classify_roles(players, pitch_length_m=100.0) == {}
 
 
-def test_the_wide_ranging_unlabelled_track_is_the_referee() -> None:
+def test_the_wide_ranging_unlabeled_track_is_the_referee() -> None:
     players = [_spread(20, -1, 5.0, 95.0, 300), _spread(21, -1, 40.0, 60.0, 400)]
     roles = classify_roles(players, pitch_length_m=100.0)
     assert roles[20] == {"role": "referee"} and 21 not in roles
@@ -59,6 +59,6 @@ def test_a_goalkeeper_is_never_the_referee() -> None:
     assert roles[30]["role"] == "goalkeeper"
 
 
-def test_a_team_labelled_track_is_never_the_referee() -> None:
+def test_a_team_labeled_track_is_never_the_referee() -> None:
     players = [_spread(20, 0, 5.0, 95.0, 400)]
     assert classify_roles(players, pitch_length_m=100.0) == {}

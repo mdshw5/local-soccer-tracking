@@ -1,14 +1,14 @@
 """Build the animated pitch replay: the payload the pitch-view component fetches and draws.
 
-Pure maths, no Streamlit. The dashboard saves the result beside the match (``replay.json``) and hands the component
-a URL, so the tens of thousands of points are fetched once by the browser instead of being serialised onto the
+Pure math, no Streamlit. The dashboard saves the result beside the match (``replay.json``) and hands the component
+a URL, so the tens of thousands of points are fetched once by the browser instead of being serialized onto the
 Streamlit websocket on every rerun.
 
-One entry per player holds their frame indices, pitch positions (metres) and speeds; upstream positions stay in
+One entry per player holds their frame indices, pitch positions (meters) and speeds; upstream positions stay in
 ``PlayerTrack`` order, which is sorted by time - the component interpolates between consecutive observations.
 
 Beside the players the payload carries the two *measurements* the view draws as they are: each team's measured kit
-colour (what the clustering actually saw on the pitch) and the ball scan's track with its measured/forecast flag.
+color (what the clustering actually saw on the pitch) and the ball scan's track with its measured/forecast flag.
 """
 
 from __future__ import annotations
@@ -26,20 +26,20 @@ from soccer_analytics.dashboard.reports import team_name
 
 # A player is "on the ball" when they are the nearest player to the camera's aim point and within this distance.
 # Same gate as stage_b's momentum: the aim point is a ball proxy, not the scanned ball - a touch here means
-# "nearest to where the camera was pointed", and it is labelled that way in the UI.
+# "nearest to where the camera was pointed", and it is labeled that way in the UI.
 POSSESSION_RADIUS_M = 12.0
 ROUND_M = 0.1
 
 # Bystander exclusion. The detector sees everyone in frame - coaches on the touchline, photographers,
 # spectators beyond the far touchline - and the tracker tracks them like anyone else. Drawing them on the
 # pitch animation puts a crowd of stationary dots on the field of play. Two measurements separate them
-# from players (calibrated on the real 2026-10-03 game, where 64 team-labelled tracks are ground truth):
-# * a player track covers ground - the 5th percentile of team-labelled tracks spans a 17.9 m diagonal,
-#   while a spectator's track spans a metre or two;
-# * a player moves - the 5th percentile of team-labelled tracks is moving (over 1 km/h) 6% of observations,
+# from players (calibrated on the real 2026-10-03 game, where 64 team-labeled tracks are ground truth):
+# * a player track covers ground - the 5th percentile of team-labeled tracks spans a 17.9 m diagonal,
+#   while a spectator's track spans a meter or two;
+# * a player moves - the 5th percentile of team-labeled tracks is moving (over 1 km/h) 6% of observations,
 #   while a spectator essentially never moves.
 # The rule flags a track as a bystander when it is small, or small AND still. Measured on the same game:
-# 1,095 of 4,378 long tracks flagged, zero of them team-labelled, and the per-frame count of surviving
+# 1,095 of 4,378 long tracks flagged, zero of them team-labeled, and the per-frame count of surviving
 # tracks has a median of 14 - what a camera following the ball actually sees.
 BYSTANDER_MIN_EXTENT_M = 8.0  # below this diagonal the track never left its spot
 BYSTANDER_EXTENT_M = 15.0  # the "small and still" band's upper edge
@@ -50,7 +50,7 @@ BYSTANDER_MIN_OBSERVATIONS = 20  # shorter tracks say too little about extent or
 def _is_bystander(track: PlayerTrack) -> bool:
     """True for a track that behaves like a touchline bystander rather than a player.
 
-    Extent is the diagonal of the track's bounding box in pitch metres; movement is the share of observations
+    Extent is the diagonal of the track's bounding box in pitch meters; movement is the share of observations
     whose speed exceeds 1 km/h (the same threshold the report uses for "moving"). Tracks too short to judge are
     kept - dropping them would hide real players who were only briefly visible, and a short fragment cannot
     clutter the animation much either way.
@@ -76,12 +76,12 @@ def _round(value: float) -> float:
 def event_from_tag(tag: dict, *, video: str, window_start: float, duration_s: float) -> Event:
     """A manual tag from the playback's tag bar, as an ``Event`` on the recording's own clock.
 
-    The tag bar sends the strip's own second (0 at the first analysed frame), because that is the clock the
+    The tag bar sends the strip's own second (0 at the first analyzed frame), because that is the clock the
     playback shows. Events are stored with seconds of the *recording* they were made against - the clock every
-    reader (the table, the strip, the reel cutter) translates back through the game manifest - so the analysed
+    reader (the table, the strip, the reel cutter) translates back through the game manifest - so the analyzed
     window's start is added back here, once, for every tag from the page.
 
-    Raises ``ValueError`` for an event type outside :data:`EVENT_TYPES`; the time is clamped into the analysed
+    Raises ``ValueError`` for an event type outside :data:`EVENT_TYPES`; the time is clamped into the analyzed
     window, so a tag arriving from a stale component value can never be stored off the end of the match.
     """
     tag_type = str(tag.get("type") or "")
@@ -101,7 +101,7 @@ def repeated_manual_tag(events: Sequence[Event], event: Event, *, within_s: floa
     """The already-stored manual tag that ``event`` repeats, if there is one.
 
     A press is delivered *at least* once, not exactly once: a page that reconnects after a server restart re-sends
-    the component's sticky value, and the new session has no acknowledgement to compare it against - so without
+    the component's sticky value, and the new session has no acknowledgment to compare it against - so without
     this check the same press would be stored again on every reconnect (a duplicate tag on the timeline, and in
     every reel that uses it). Two manual tags of the same type for the same team on the same recording within a
     centisecond are one press; a different type, team, second or recording is a different event and is left alone.
@@ -119,8 +119,8 @@ def repeated_manual_tag(events: Sequence[Event], event: Event, *, within_s: floa
     return None
 
 
-def _kit_colour(entry: Sequence[int] | None) -> list[int] | None:
-    """One team's kit colour as a plain JSON list of three ints, or None when there is none to show.
+def _kit_color(entry: Sequence[int] | None) -> list[int] | None:
+    """One team's kit color as a plain JSON list of three ints, or None when there is none to show.
 
     Clamped rather than trusted: the browser paints markers with ``rgb(...)`` built from these numbers, and a
     value that can make that string invalid must not leave here. ``None`` is kept as ``None`` - it means the kits
@@ -148,10 +148,10 @@ def attack_summary(orientations, *, half_frame: int | None) -> dict | None:
     return {"half_frame": None if half_frame is None else int(half_frame), "directions": directions}
 
 
-# What kind of act an event is, by its type: an attack on the opponent's goal or a defence of its own. The
+# What kind of act an event is, by its type: an attack on the opponent's goal or a defense of its own. The
 # classification is the type's own meaning, not a guess from where it happened - a clearance is a defensive act
 # wherever it is played from. The types that straddle both stay out of both sets: a fouled attacker is neither
-# an attack nor a defence, and a blank is more honest than a forced answer.
+# an attack nor a defense, and a blank is more honest than a forced answer.
 ATTACKING_EVENT_TYPES = frozenset(("goal", "shot", "corner", "penalty"))
 DEFENSIVE_EVENT_TYPES = frozenset(("clearance", "tackle", "save", "block"))
 
@@ -208,7 +208,7 @@ def build_replay(
     players: list[PlayerTrack],
     team_names: list[str],
     ball: tuple[np.ndarray, np.ndarray] | None = None,
-    team_colours: Sequence[Sequence[int] | None] | None = None,
+    team_colors: Sequence[Sequence[int] | None] | None = None,
     camera_xy: Sequence[float] | None = None,
     roles: dict[int, dict] | None = None,
     attack: dict | None = None,
@@ -224,8 +224,8 @@ def build_replay(
     the view can draw a detection differently from a forecast across a missed frame - the scan's own honesty rule,
     kept through to the last consumer.
 
-    ``team_colours`` is each team's measured kit colour as ``(r, g, b)``, ``None`` where the clustering could not
-    separate the kits: the component paints its markers with the colour that was actually on the pitch, and keeps
+    ``team_colors`` is each team's measured kit color as ``(r, g, b)``, ``None`` where the clustering could not
+    separate the kits: the component paints its markers with the color that was actually on the pitch, and keeps
     its own palette only as the fallback.
 
     ``camera_xy`` is the camera's own ground position (its X/Y, ignoring height). The replay draws a line from it
@@ -233,7 +233,7 @@ def build_replay(
     when the caller has no calibration to give one.
 
     ``roles`` labels the few non-team people the build could identify (``{"role": "referee"}``, or a keeper with
-    its goal ``side``), attached per track so the view can colour-code them; ``attack`` is the compact per-half
+    its goal ``side``), attached per track so the view can color-code them; ``attack`` is the compact per-half
     direction pair from :func:`attack_summary`, so the view can point each team at the goal it attacks. Both are
     optional and absent from payloads built before this existed.
     """
@@ -256,7 +256,7 @@ def build_replay(
 
     # Who was on the ball each frame, by proximity to the camera's aim point (the same proxy stage_b uses).
     # Bystanders are excluded first: they are not players, and counting their proximity to the aim point
-    # would credit touches to people who cannot touch a ball. Role-labelled tracks are never bystanders,
+    # would credit touches to people who cannot touch a ball. Role-labeled tracks are never bystanders,
     # however still they stand: keepers hang around one goal and drift little, which trips the "small AND still"
     # rule measured on sideline crowds - but a keeper is exactly who must be drawn (15 of 28 role tracks were
     # being dropped from the payload before this).
@@ -315,7 +315,7 @@ def build_replay(
         "frame_count": int(frame_count),
         "duration_s": _round(frame_count / max(fps, 1e-6)),
         "team_names": list(team_names),
-        "team_colours": None if team_colours is None else [_kit_colour(entry) for entry in team_colours],
+        "team_colors": None if team_colors is None else [_kit_color(entry) for entry in team_colors],
         "aim": aim,
         "camera": camera,
         "ball": ball_out,
@@ -333,7 +333,7 @@ def player_table_rows(replay: dict, numbers: dict[int, dict] | None = None):  # 
 
     Sorted by time on screen descending: with fragmented real-footage tracks there are hundreds of rows, and the
     players who were actually followed belong at the top. The team names come out of the replay payload itself -
-    it already carries them for the frontend, so the table cannot end up labelling the teams differently from the
+    it already carries them for the frontend, so the table cannot end up labeling the teams differently from the
     map beside it.
     """
     import pandas as pd
@@ -365,12 +365,12 @@ def player_table_rows(replay: dict, numbers: dict[int, dict] | None = None):  # 
 
 
 def track_boxes(players) -> dict[str, np.ndarray]:
-    """Each tracked player's own image boxes, keyed by track id as a string, for the centred-clip cutter.
+    """Each tracked player's own image boxes, keyed by track id as a string, for the centered-clip cutter.
 
     These deliberately do *not* travel inside the replay payload. The component draws pitch positions and never
     looks at a box, while a whole game's boxes are ~35 MB of JSON - which the browser would download and parse on
     every view of a match just so that a clip cut later, from Python, could follow one player. They are written
-    beside the payload as a small ``.npz`` instead (float16: the crop maths cannot see the difference, and it
+    beside the payload as a small ``.npz`` instead (float16: the crop math cannot see the difference, and it
     halves the file), and only the page's own code reads them.
 
     A player whose track has no boxes (built without detections, or a payload from an older build) is left out

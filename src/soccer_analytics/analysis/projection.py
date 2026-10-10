@@ -1,8 +1,8 @@
-"""Stage B, step 1: project raw detections into pitch metres, with an honest uncertainty for every position.
+"""Stage B, step 1: project raw detections into pitch meters, with an honest uncertainty for every position.
 
-A detection's *foot point* (bottom-centre of its box) is where the player meets the ground, so it is the pixel whose
+A detection's *foot point* (bottom-center of its box) is where the player meets the ground, so it is the pixel whose
 ray we intersect with the pitch plane. Depth is the weak axis: on distant ground one pixel of vertical error is worth
-several metres. Each projected point therefore carries ``sigma_m``, the ground distance of a one-pixel vertical
+several meters. Each projected point therefore carries ``sigma_m``, the ground distance of a one-pixel vertical
 shift, so downstream metrics (distance run, speed, possession proxies) can ignore or down-weight unreliable far-side
 positions instead of silently treating them as exact.
 """
@@ -18,7 +18,7 @@ from soccer_analytics.geometry.camera_motion import integrate_poses
 from soccer_analytics.geometry.gimbal_motion import log_poses_for_segment
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration, pixels_to_pitch
 
-# Typical foot-point localisation error of a YOLO box bottom edge, in pixels at 1920 wide. Players' feet are not
+# Typical foot-point localization error of a YOLO box bottom edge, in pixels at 1920 wide. Players' feet are not
 # always inside the box tightly (running poses, occlusion), so this is deliberately not 1.
 FOOT_PIXEL_SIGMA = 4.0
 PITCH_MARGIN_M = 1.5  # a player's foot may sit just outside the line; spectators stand well beyond it
@@ -30,11 +30,11 @@ class PitchDetections:
 
     frame: np.ndarray  # (D,) analysis-frame index within the segment
     time: np.ndarray  # (D,) source seconds
-    xy: np.ndarray  # (D, 2) pitch metres, NaN where the ray never meets the ground
+    xy: np.ndarray  # (D, 2) pitch meters, NaN where the ray never meets the ground
     sigma_m: np.ndarray  # (D,) ground uncertainty of this position (m); inf where invalid
     valid: np.ndarray  # (D,) bool: foot ray hits the ground and the camera state was trustworthy
     height_px: np.ndarray  # (D,) box height, pixels at 1920 wide
-    # (D, 4) the detection's own box, ``(x1, y1, x2, y2)`` normalised by frame width. The pitch position is where
+    # (D, 4) the detection's own box, ``(x1, y1, x2, y2)`` normalized by frame width. The pitch position is where
     # the player stands; this is where they *are in the picture*, which is what a clip cropped around them has to
     # follow - so it travels with the detections instead of being looked up again from the segment by every caller.
     box: np.ndarray
@@ -59,7 +59,7 @@ def segment_poses(segment: SegmentData, focal0: float | None = None) -> tuple[np
 
     When the requested ``focal0`` is the one the analysis pass used (the default), the stored per-frame focal
     lengths are reused and the per-step focal search is skipped - same chain, one SVD per frame instead of a bounded
-    minimisation of many. On a whole-game segment (21k frames) that is 41 s of every dashboard rerun turned into
+    minimization of many. On a whole-game segment (21k frames) that is 41 s of every dashboard rerun turned into
     under a second.
 
     When the footage has a gimbal log (``geometry.gimbal_motion``), the *orientation* is taken from the log instead
@@ -87,7 +87,7 @@ def project_segment(
     pitch_size: tuple[float, float] | None = None,
     on_progress=None,
 ) -> PitchDetections:
-    """Map every detection to pitch metres. If ``pitch_size=(length, width)`` is given, nothing is clipped here;
+    """Map every detection to pitch meters. If ``pitch_size=(length, width)`` is given, nothing is clipped here;
     use ``on_pitch_mask`` to decide who is a player. ``on_progress(fraction)`` is called a few times per run."""
     q, focal = poses if poses is not None else segment_poses(segment)
     # The calibration's drift correction belongs to the chain, not to the caller's copy of it: every projection in
@@ -97,7 +97,7 @@ def project_segment(
     focal = calibration.corrected_focal(focal)
     frames = segment.det_frame
     boxes = segment.det_box
-    foot_uv = np.column_stack([(boxes[:, 0] + boxes[:, 2]) / 2.0, boxes[:, 3]])  # bottom-centre, width-normalised
+    foot_uv = np.column_stack([(boxes[:, 0] + boxes[:, 2]) / 2.0, boxes[:, 3]])  # bottom-center, width-normalized
     n = len(frames)
     xy = np.full((n, 2), np.nan)
     sigma = np.full(n, np.inf)
@@ -140,9 +140,9 @@ def _aim_points(
 ) -> np.ndarray:
     """Ground position the camera was pointing at for every frame (NaN when aimed above the horizon)."""
     aim = np.full((frames, 2), np.nan)
-    centre = np.array([[0.5, 0.5 * aspect]])
+    center = np.array([[0.5, 0.5 * aspect]])
     for frame in range(min(frames, len(q))):
-        hit, ok = pixels_to_pitch(calibration, centre, q[frame], focal[frame])
+        hit, ok = pixels_to_pitch(calibration, center, q[frame], focal[frame])
         if ok[0]:
             aim[frame] = hit[0]
     return aim
@@ -154,7 +154,7 @@ def project_ball_track(
     q: np.ndarray,
     focal: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """The ball scan's per-frame positions in pitch metres, and whether each one was a detection.
+    """The ball scan's per-frame positions in pitch meters, and whether each one was a detection.
 
     ``records`` is the ``frames`` list of a segment's ``ball_track.json`` (see ``analysis.ball`` and
     ``scripts/run_ball_scan.py``) - one entry per analysis frame with ``status`` and image-space ``u``/``v``.
@@ -163,9 +163,9 @@ def project_ball_track(
     across a miss. Frames the scan has not reached, and frames where the ball was out of view or lost, stay NaN -
     a forecast that left the picture is exactly what the replay must not draw as a sighting.
 
-    The projection intersects the ball's *centre* pixel with the ground, the same way the foot points are
+    The projection intersects the ball's *center* pixel with the ground, the same way the foot points are
     intersected, so a frame reads a ball radius or so beyond the true spot; at these distances that is well
-    inside the ±metre spread of a click. The camera path is the calibration's corrected chain, so ball and
+    inside the ±meter spread of a click. The camera path is the calibration's corrected chain, so ball and
     players land on the same pitch.
     """
     q = calibration.corrected_chain(q)
@@ -192,8 +192,8 @@ def on_pitch_mask(
     """True for detections standing on the pitch (within ``margin_m`` of its lines).
 
     The pitch rectangle spans ``x in [0, length]`` and ``y in [0, width]`` in the calibration's frame. A foot point
-    that projects beyond this (spectators, coaches, subs) is excluded *geometrically*, which kit colour cannot do.
-    The margin widens with the point's own uncertainty so a far-side player is not dropped by a metre of noise.
+    that projects beyond this (spectators, coaches, subs) is excluded *geometrically*, which kit color cannot do.
+    The margin widens with the point's own uncertainty so a far-side player is not dropped by a meter of noise.
     """
     x, y = detections.xy[:, 0], detections.xy[:, 1]
     slack = margin_m + np.where(np.isfinite(detections.sigma_m), np.minimum(detections.sigma_m, 4.0), 0.0)

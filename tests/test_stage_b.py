@@ -61,7 +61,7 @@ def test_team_clustering_matches_the_simulated_kits(prepared) -> None:
     _, truth, detections = _prepared()
     keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
     assignment = _track_people(detections, keep)
-    teams, quality, _colours = _team_assignment(detections, assignment)
+    teams, quality, _colors = _team_assignment(detections, assignment)
 
     correct = total = 0
     for tid, team in teams.items():
@@ -76,12 +76,12 @@ def test_team_clustering_matches_the_simulated_kits(prepared) -> None:
     assert correct / total > 0.9, f"team assignment accuracy {correct}/{total}"
 
 
-def test_each_clustered_team_carries_the_colour_it_wears() -> None:
+def test_each_clustered_team_carries_the_color_it_wears() -> None:
     """The clustering already knows which kit is which; the report has to keep that so a team can be named.
 
-    The simulated kits are deliberately invented numbers rather than colours (the simulator only promises that the
-    two are *separable*), so this checks the plumbing - a colour per team, read back as RGB - while the colour
-    maths itself is held by ``test_kit_colour``.
+    The simulated kits are deliberately invented numbers rather than colors (the simulator only promises that the
+    two are *separable*), so this checks the plumbing - a color per team, read back as RGB - while the color
+    math itself is held by ``test_kit_color``.
     """
     from soccer_analytics.analysis.kit import kit_rgb
     from soccer_analytics.analysis.projection import on_pitch_mask
@@ -89,25 +89,25 @@ def test_each_clustered_team_carries_the_colour_it_wears() -> None:
     _, _truth, detections = _prepared()
     keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
     assignment = _track_people(detections, keep)
-    teams, _quality, colours = _team_assignment(detections, assignment)
+    teams, _quality, colors = _team_assignment(detections, assignment)
 
     assert teams, "no team labels were produced"
-    assert set(colours) == {0, 1}, f"expected a colour for each team, got {sorted(colours)}"
-    red, blue = kit_rgb(colours[0]), kit_rgb(colours[1])
-    assert red is not None and blue is not None, "a team's colour did not read back as RGB"
-    assert red != blue, "the two kits are separable, so they cannot be reported as the same colour"
-    # The colour vector is [L, a, b, sat, val] padded into the 12-float descriptor layout. Measured on the real
-    # game, passing the bare 5-float vector read a/b/sat as L/a/b and turned a red kit into "light grey" - the
+    assert set(colors) == {0, 1}, f"expected a color for each team, got {sorted(colors)}"
+    red, blue = kit_rgb(colors[0]), kit_rgb(colors[1])
+    assert red is not None and blue is not None, "a team's color did not read back as RGB"
+    assert red != blue, "the two kits are separable, so they cannot be reported as the same color"
+    # The color vector is [L, a, b, sat, val] padded into the 12-float descriptor layout. Measured on the real
+    # game, passing the bare 5-float vector read a/b/sat as L/a/b and turned a red kit into "light gray" - the
     # swatch must decode the L/a/b the clustering actually clustered on.
-    for colour in colours.values():
-        assert len(colour) == 12, f"expected a full 12-float descriptor, got {len(colour)}"
-        assert colour[0] > 0, "kit_fraction must be set or kit_rgb refuses to decode the colour"
+    for color in colors.values():
+        assert len(color) == 12, f"expected a full 12-float descriptor, got {len(color)}"
+        assert color[0] > 0, "kit_fraction must be set or kit_rgb refuses to decode the color"
 
 
-def test_the_report_records_the_colour_of_each_team_s_kit() -> None:
+def test_the_report_records_the_color_of_each_team_s_kit() -> None:
     """What the page shows as a swatch and turns into a name has to survive into the saved report.
 
-    The report is what the dashboard reads back, so the colour has to be in it - not only in the moment the
+    The report is what the dashboard reads back, so the color has to be in it - not only in the moment the
     clustering ran.
     """
     from soccer_analytics.analysis.stage_b import build_report
@@ -118,14 +118,14 @@ def test_the_report_records_the_colour_of_each_team_s_kit() -> None:
     )
     assert report.teams, "the report has no teams"
     for team in report.teams:
-        assert team.kit_rgb is not None, f"team {team.team} has no kit colour"
+        assert team.kit_rgb is not None, f"team {team.team} has no kit color"
         assert len(team.kit_rgb) == 3 and all(0 <= channel <= 255 for channel in team.kit_rgb)
 
 
-def test_kit_quality_is_low_when_two_teams_wear_similar_colours(monkeypatch) -> None:
+def test_kit_quality_is_low_when_two_teams_wear_similar_colors(monkeypatch) -> None:
     """The report must be able to say 'this is a guess' rather than assert a team.
 
-    Everything on the pitch wears the same colour here (teams *and* the referee), so any split k-means produces is
+    Everything on the pitch wears the same color here (teams *and* the referee), so any split k-means produces is
     arbitrary and the separation must collapse.
     """
     import synthetic_match as sim
@@ -138,7 +138,7 @@ def test_kit_quality_is_low_when_two_teams_wear_similar_colours(monkeypatch) -> 
 
     keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
     assignment = _track_people(detections, keep)
-    _, quality, _colours = _team_assignment(detections, assignment)
+    _, quality, _colors = _team_assignment(detections, assignment)
     assert quality and max(quality.values()) < 0.5
 
 
@@ -197,7 +197,7 @@ def test_report_states_its_own_limitations(prepared) -> None:
     joined = " ".join(report.notes).lower()
     assert "manual" in joined and "ball" in joined
     assert report.detections_used > 0
-    assert report.frames_analysed == 400
+    assert report.frames_analyzed == 400
 
 
 def test_tracking_is_deterministic(prepared) -> None:
@@ -210,25 +210,25 @@ def test_tracking_is_deterministic(prepared) -> None:
     assert np.array_equal(first, second)
 
 
-def test_the_weak_label_note_counts_only_labelled_tracks() -> None:
+def test_the_weak_label_note_counts_only_labeled_tracks() -> None:
     """A track whose label is -1 has no label, so it cannot be a "best guess" of one.
 
-    The old rule counted every track with quality below the bar, and unlabelled fragments carry quality 0 - on the
+    The old rule counted every track with quality below the bar, and unlabeled fragments carry quality 0 - on the
     real game the note fired with 13,257 entries out of 9,164 tracks, which drowned the signal it exists to carry.
     """
     from soccer_analytics.analysis.stage_b import _weak_labels
 
     teams = {1: 0, 2: 1, 3: -1}
-    quality = {0: 0.0, 1: 0.9, 2: 0.1, 3: 0.5}  # track 0 is unlabelled; 1 solid; 2 marginal; 3 "other"
+    quality = {0: 0.0, 1: 0.9, 2: 0.1, 3: 0.5}  # track 0 is unlabeled; 1 solid; 2 marginal; 3 "other"
 
     assert _weak_labels(teams, quality) == [2]
 
 
 def test_a_clean_match_does_not_report_weak_labels() -> None:
-    """The synthetic kits are plainly separable, so a note about weakly separated colours would be crying wolf.
+    """The synthetic kits are plainly separable, so a note about weakly separated colors would be crying wolf.
 
     With the old rule this note fired for essentially every match, because every non-voter track (most of them
-    unlabelled fragments) counted as weak - it said nothing about whether any displayed label was doubtful.
+    unlabeled fragments) counted as weak - it said nothing about whether any displayed label was doubtful.
     """
     from soccer_analytics.analysis.projection import on_pitch_mask
     from soccer_analytics.analysis.stage_b import _weak_labels
@@ -236,7 +236,7 @@ def test_a_clean_match_does_not_report_weak_labels() -> None:
     _, _truth, detections = _prepared(frames=200, seed=4)
     keep = on_pitch_mask(detections, PITCH_LENGTH, PITCH_WIDTH)
     assignment = _track_people(detections, keep)
-    teams, quality, _colours = _team_assignment(detections, assignment)
+    teams, quality, _colors = _team_assignment(detections, assignment)
 
     assert sum(1 for team in teams.values() if team >= 0) > 0, "no labels to judge"
     assert _weak_labels(teams, quality) == []

@@ -1,4 +1,4 @@
-"""Jersey numbers: crop maths, OCR sanitation and per-track voting.
+"""Jersey numbers: crop math, OCR sanitation and per-track voting.
 
 The expensive part - running EasyOCR over torso crops - lives in ``scripts/extract_jerseys.py``. Everything that
 decides *what number a track wears* is pure and lives here, so the voting logic is unit-tested without a model:
@@ -16,7 +16,7 @@ import numpy as np
 # intentionally skips the head and the legs.
 TORSO_TOP = 0.14
 TORSO_BOTTOM = 0.62
-# A crop smaller than this at the analysed resolution cannot contain a readable number; skip it upstream.
+# A crop smaller than this at the analyzed resolution cannot contain a readable number; skip it upstream.
 MIN_CROP_HEIGHT_PX = 20
 # Readings that must agree before a track is reported. The scan uses this to skip tracks that cannot possibly
 # reach the quorum (fewer usable crops than readings needed).
@@ -34,10 +34,10 @@ class JerseyCandidate:
 
 
 def crop_torso(frame: np.ndarray, box: tuple[float, float, float, float]) -> np.ndarray | None:
-    """Crop the torso band from a frame; ``box`` is ``(x1, y1, x2, y2)`` normalised by the frame *width*.
+    """Crop the torso band from a frame; ``box`` is ``(x1, y1, x2, y2)`` normalized by the frame *width*.
 
     Detection boxes are stored as fractions of the frame width (both axes), which is also how click coordinates are
-    normalised elsewhere; this is the inverse. Returns None when the crop would be empty or clipped away entirely.
+    normalized elsewhere; this is the inverse. Returns None when the crop would be empty or clipped away entirely.
     """
     height, width = frame.shape[:2]
     x1, y1, x2, y2 = (float(value) * width for value in box)

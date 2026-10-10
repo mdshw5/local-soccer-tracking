@@ -254,9 +254,9 @@ def test_the_pitch_model_is_drawn_through_the_calibration(stream_case) -> None:
     assert np.count_nonzero(np.any(frame != before, axis=2)) > 0, "no marking landed in the frame"
 
 
-def test_each_player_box_lands_on_its_recorded_pixels_in_the_team_colour(stream_case) -> None:
+def test_each_player_box_lands_on_its_recorded_pixels_in_the_team_color(stream_case) -> None:
     """Rendered on its own so nothing can overlap the assertion: the rectangle must sit on the box's own pixels
-    (in stream pixels - normalised by width, both axes) and be painted in the player's team colour."""
+    (in stream pixels - normalized by width, both axes) and be painted in the player's team color."""
     _segment, _calibration, _q, _focal, replay, boxes = stream_case
     player = next(p for p in replay["players"] if boxes.get(str(p["track_id"])) is not None)
     stored = boxes[str(player["track_id"])]
@@ -269,16 +269,16 @@ def test_each_player_box_lands_on_its_recorded_pixels_in_the_team_colour(stream_
     top, bottom = sorted((round(y1 * 640), round(y2 * 640)))
     expected = np.array(match.teams[int(player["team"])].bgr)
     painted = np.all(frame[top : bottom + 1, left : right + 1] == expected, axis=-1)
-    # The rectangle's own perimeter at this size is ~4*(w+h) pixels; the chip (same colour) can only add more.
+    # The rectangle's own perimeter at this size is ~4*(w+h) pixels; the chip (same color) can only add more.
     assert painted.sum() >= 3 * ((right - left) + (bottom - top))
 
 
-def test_officials_are_colour_coded_by_role_not_by_side(stream_case) -> None:
-    """A goalkeeper draws in the role colour wherever the team colour would have put it, and the HUD names
-    that colour only when such a player is on screen - an unnamed colour key is decoration.
+def test_officials_are_color_coded_by_role_not_by_side(stream_case) -> None:
+    """A goalkeeper draws in the role color wherever the team color would have put it, and the HUD names
+    that color only when such a player is on screen - an unnamed color key is decoration.
 
-    The role rides the replay payload, where the pipeline classified it from goal-pocket behaviour (kit colour
-    was too noisy to trust); a payload from before roles existed draws exactly the team colours it always did.
+    The role rides the replay payload, where the pipeline classified it from goal-pocket behavior (kit color
+    was too noisy to trust); a payload from before roles existed draws exactly the team colors it always did.
     """
     _segment, _calibration, _q, _focal, replay, boxes = stream_case
     player = next(p for p in replay["players"] if boxes.get(str(p["track_id"])) is not None)
@@ -293,11 +293,11 @@ def test_officials_are_colour_coded_by_role_not_by_side(stream_case) -> None:
 
     frame = np.full((360, 640, 3), 60, dtype=np.uint8)
     match.render(frame, index, pitch=False, boxes=True, numbers=False, ball=False, hud=False, debug=False)
-    assert tuple(int(v) for v in frame[(top + bottom) // 2, left]) == role_bgr, "the box wears the role colour"
+    assert tuple(int(v) for v in frame[(top + bottom) // 2, left]) == role_bgr, "the box wears the role color"
 
     keyed = np.full((360, 640, 3), 60, dtype=np.uint8)
     match.render(keyed, index, pitch=False, boxes=False, numbers=False, ball=False, hud=True, debug=False)
-    assert np.count_nonzero(np.all(keyed == np.array(role_bgr), axis=-1)) > 0, "the HUD keys the colour"
+    assert np.count_nonzero(np.all(keyed == np.array(role_bgr), axis=-1)) > 0, "the HUD keys the color"
 
     plain = _annotated(stream_case, players=[player])
     bare = np.full((360, 640, 3), 60, dtype=np.uint8)
@@ -380,7 +380,7 @@ def test_the_debug_layer_carries_the_diagnostics_and_switches_off_alone(stream_c
 
 
 def test_the_hud_clock_reads_the_animation_clock_not_the_recording_clock(stream_case, monkeypatch) -> None:
-    """The pane's animation counts from the analysed window's start - kick-off on a marked build - and the HUD
+    """The pane's animation counts from the analyzed window's start - kick-off on a marked build - and the HUD
     must show that same clock. The recording's own clock starts earlier, and a stamp in recording seconds reads
     minutes away from the animation the viewer compares it with."""
     drawn: list[str] = []
@@ -437,8 +437,8 @@ def test_a_seen_ball_is_marked_where_the_scan_put_it_and_a_forecast_rings_differ
     match.ball[index] = (np.nan, np.nan, np.nan)
     empty = np.full((360, 640, 3), 60, dtype=np.uint8)
     match.render(empty, index, pitch=False, boxes=False, numbers=False, ball=True, hud=False)
-    centre = empty[100:260, 200:440]
-    assert np.all(centre == 60), "nothing to draw means nothing drawn"
+    center = empty[100:260, 200:440]
+    assert np.all(center == 60), "nothing to draw means nothing drawn"
 
 
 # --------------------------------------------------------------------------------------------------------------
@@ -516,7 +516,7 @@ def _write_match(root: Path, match_id: str, *, segment_dir: Path, with_replay: b
                     "fps": 5.0,
                     "frame_count": 10,
                     "team_names": ["Reds", "Blues"],
-                    "team_colours": None,
+                    "team_colors": None,
                     "players": [{"track_id": 1, "team": 0, "frames": []}],
                 }
             )
@@ -529,7 +529,7 @@ def _write_match(root: Path, match_id: str, *, segment_dir: Path, with_replay: b
     return directory
 
 
-def test_the_listing_needs_a_calibration_and_a_replay_and_carries_team_colours(tmp_path) -> None:
+def test_the_listing_needs_a_calibration_and_a_replay_and_carries_team_colors(tmp_path) -> None:
     segment_dir = tmp_path / "segments" / "s1"
     segment_dir.mkdir(parents=True)
     (segment_dir / "meta.json").write_text(
@@ -541,7 +541,7 @@ def test_the_listing_needs_a_calibration_and_a_replay_and_carries_team_colours(t
     rows = {row["match_id"]: row for row in streamable_matches(root)}
     assert rows["2026-01-01_ok"]["streamable"] is True
     assert rows["2026-01-01_ok"]["team_names"] == ["Reds", "Blues"]
-    assert rows["2026-01-01_ok"]["team_colours"][0] == [200, 50, 50]
+    assert rows["2026-01-01_ok"]["team_colors"][0] == [200, 50, 50]
     assert rows["2026-01-02_no_replay"]["streamable"] is False
 
 

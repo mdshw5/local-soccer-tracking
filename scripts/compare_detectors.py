@@ -2,8 +2,9 @@
 
 The question this answers: which model should sit behind the report's analytics - the Stage A person pass (COCO
 class 0) and the ball scan (COCO class 32)? Every model is run over the same sampled frames, at the width and
-thresholds the pipeline uses (``stage_a.DETECT_WIDTH`` / ``PERSON_CONF`` read, lower ones accepted), and the
-report covers the things the analytics actually feel:
+thresholds the pipeline uses (``stage_a.DETECT_WIDTH`` - 0 = the video's own width, the full-resolution default -
+and ``PERSON_CONF``; lower confidences are accepted), and the report covers the things the analytics actually
+feel:
 
 * person counts, confidence and *size distribution* - far-side players arrive as 14-40 px boxes, and a model
   that loses them loses the shape of the game;
@@ -42,13 +43,19 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from soccer_analytics.analysis.stage_a import DETECT_WIDTH, MIN_PERSON_HEIGHT_PX, PERSON_CONF  # noqa: E402
-from soccer_analytics.ingest.ffmpeg_reader import grab_frame, probe_video  # noqa: E402
+from soccer_analytics.analysis.stage_a import (  # noqa: E402
+    DETECT_WIDTH,
+    FLOOR_WIDTH,
+    MIN_PERSON_HEIGHT_PX,
+    PERSON_CONF,
+)
+from soccer_analytics.ingest.ffmpeg_reader import grab_frame  # noqa: E402
+from soccer_analytics.ingest.source import probe_source  # noqa: E402
 
 BALL_CLASS = 32
 BALL_CONF = 0.05  # what the ball scan uses
 MATCH_IOU = 0.5
-BALL_MATCH_DISTANCE = 0.03  # in frame-width-normalised units - a generous "same part of the pitch"
+BALL_MATCH_DISTANCE = 0.03  # in frame-width-normalized units - a generous "same part of the pitch"
 
 _PERSON_NAMES = {"person", "player", "players", "goalkeeper", "goalkeepers", "keeper", "referee", "referees"}
 _BALL_NAMES = {"ball", "balls", "football", "soccer ball", "sports ball"}
@@ -96,7 +103,7 @@ class RoboflowModelAdapter:
         self.names = {i: str(name) for i, name in enumerate(class_names)}
 
     def detect(self, frame: np.ndarray, conf: float, classes: list[int]):
-        """One pass over a frame; x/y from the service are box centres in pixels."""
+        """One pass over a frame; x/y from the service are box centers in pixels."""
         predictions = [p for p in self._model.infer(frame, confidence=conf)[0].predictions if p.class_id in classes]
         if not predictions:
             return np.zeros((0, 4)), np.zeros(0), np.zeros(0, dtype=int)
@@ -196,9 +203,14 @@ def match(a: np.ndarray, b: np.ndarray) -> tuple[int, int, int]:
     return matched, len(a) - matched, len(b) - matched
 
 
-def person_bands(people: list[np.ndarray]) -> dict[str, int]:
-    """Detections by box height at the analysis width - the far side of the pitch lives under 40 px."""
-    heights = np.concatenate([b[:, 3] - b[:, 1] for b in people]) if people else np.zeros(0)
+def person_bands(people: list[np.ndarray], width: int) -> dict[str, int]:
+    """Detections by box height, expressed at 1920 width - the far side of the pitch lives under 40 px there.
+
+    The boxes are in pixels at the sampled width, so heights are rescaled before banding: without this, a run at
+    the full-resolution default would file far-side players into the buckets the 1920 run used for everybody.
+    """
+    scale = FLOOR_WIDTH / max(1, int(width))
+    heights = np.concatenate([(b[:, 3] - b[:, 1]) * scale for b in people]) if people else np.zeros(0)
     return {
         "all": int(len(heights)),
         "h<14 (filtered)": int((heights < 14).sum()),
@@ -215,23 +227,27 @@ def main() -> int:
     parser.add_argument("--start-s", type=float, required=True)
     parser.add_argument("--end-s", type=float, required=True)
     parser.add_argument("--frames", type=int, default=150)
-    parser.add_argument("--width", type=int, default=DETECT_WIDTH)
+    parser.add_argument(
+        "--width", type=int, default=DETECT_WIDTH,
+        help="frame width to sample at; 0 (default) = the video's own width, the pipeline's full-resolution default",
+    )
     parser.add_argument("--models", nargs="+", default=["yolov8n.pt", "weights/yolo26n.pt", "yolov8s.pt"])
     parser.add_argument("--segment", type=Path, default=None, help="segment dir with ball_track.json + meta.json")
     parser.add_argument("--device", default="0")
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "outputs" / "detector_compare")
     args = parser.parse_args()
 
-    probe = probe_video(args.video)
+    probe = probe_source(args.video)
+    width = int(args.width) or int(probe.width)  # 0 = full resolution, the pipeline's default
     print(f"video {args.video}: {probe.width}x{probe.height}, {probe.duration_s:.0f}s")
     span = args.end_s - args.start_s
     times = args.start_s + (np.arange(args.frames) + 0.5) * span / args.frames
-    print(f"sampling {args.frames} frames over {span:.0f}s at width {args.width}")
+    print(f"sampling {args.frames} frames over {span:.0f}s at width {width}")
 
     frames: list[np.ndarray] = []
     kept_times: list[float] = []
     for t in times:
-        frame = grab_frame(args.video, float(t), width=args.width)
+        frame = grab_frame(args.video, float(t), width=width)
         if frame is None:
             continue
         frames.append(frame)
@@ -254,14 +270,16 @@ def main() -> int:
         profiles[name] = profile
         print(f"running {name} ({suffix}) persons={profile['person_ids']} ball={profile['ball_id']}...")
         results[name] = run_model(
-            model, frames, device=args.device if args.device != "cpu" else "cpu", imgsz=args.width, profile=profile
+            model, frames, device=args.device if args.device != "cpu" else "cpu", imgsz=width, profile=profile
         )
         del model
 
     # --- report -------------------------------------------------------------------------------------------
-    min_height = MIN_PERSON_HEIGHT_PX  # boxes below this never reach the pipeline
+    # The floor is a physical size, so at the full-resolution default it is more pixels than the 14 measured at
+    # 1920; scaling keeps "boxes below this never reach the pipeline" true at any sampled width.
+    min_height = MIN_PERSON_HEIGHT_PX * width / FLOOR_WIDTH
     print("\n=== persons (model's person classes, conf {:.2f}) ===".format(PERSON_CONF))
-    print(f"{'model':<30}{'dets':>7}{'>=14px':>8}{'median/frame':>13}{'conf med':>9}{'person ms':>10}{'ball ms':>9}")
+    print(f"{'model':<30}{'dets':>7}{'>=floor':>8}{'median/frame':>13}{'conf med':>9}{'person ms':>10}{'ball ms':>9}")
     for name, r in results.items():
         above = [b[(b[:, 3] - b[:, 1]) >= min_height] for b in r["people"]]
         counts = [len(b) for b in above]
@@ -285,7 +303,7 @@ def main() -> int:
 
     print("\nheight bands (at 1920):")
     for name, r in results.items():
-        print(f"  {name:<22}{person_bands(r['people'])}")
+        print(f"  {name:<22}{person_bands(r['people'], width)}")
 
     print("\npairwise agreement (persons, IoU>={:.1f}):".format(MATCH_IOU))
     names = list(results)
@@ -328,8 +346,8 @@ def main() -> int:
                         total += 1
                     continue
                 total += 1
-                centre = ((balls[:, 0] + balls[:, 2]) / 2 / args.width, (balls[:, 1] + balls[:, 3]) / 2 / args.width)
-                if min(np.hypot(centre[0] - ball["u"], centre[1] - ball["v"])) <= BALL_MATCH_DISTANCE:
+                center = ((balls[:, 0] + balls[:, 2]) / 2 / width, (balls[:, 1] + balls[:, 3]) / 2 / width)
+                if min(np.hypot(center[0] - ball["u"], center[1] - ball["v"])) <= BALL_MATCH_DISTANCE:
                     hit += 1
             print(f"  {name:<22} {hit}/{total}")
 
@@ -343,9 +361,9 @@ def main() -> int:
         worst = np.argsort(-np.asarray(diffs))[:3]
         for rank, k in enumerate(worst):
             image = frames[k].copy()
-            for boxes, colour in ((results[a]["people"][k], (0, 220, 0)), (results[b]["people"][k], (50, 50, 255))):
+            for boxes, color in ((results[a]["people"][k], (0, 220, 0)), (results[b]["people"][k], (50, 50, 255))):
                 for x1, y1, x2, y2 in boxes.astype(int):
-                    cv2.rectangle(image, (x1, y1), (x2, y2), colour, 3)
+                    cv2.rectangle(image, (x1, y1), (x2, y2), color, 3)
             path = args.out / f"disagree_{rank}_{Path(a).stem}_green_{Path(b).stem}_red_{kept_times[k]:.0f}s.jpg"
             cv2.imwrite(str(path), image)
             print(f"saved {path}")

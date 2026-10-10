@@ -18,14 +18,14 @@ def test_long_runs_keeps_only_sustained_spells() -> None:
     assert kept.tolist() == [False, False, False, True, True, True, True, False, False]
 
 
-def test_ball_lock_from_aligned_normalises_image_x() -> None:
+def test_ball_lock_from_aligned_normalizes_image_x() -> None:
     aligned = {
         "lock": np.array([1.0, 0.0, 1.0]),
         "ball_x": np.array([1280.0, np.nan, 2560.0]),
     }
     lock = ball_lock_from_aligned(aligned)
     assert lock.locked.tolist() == [True, False, True]
-    assert lock.u[0] == 0.5  # centre of a 2560-wide frame
+    assert lock.u[0] == 0.5  # center of a 2560-wide frame
     assert lock.u[2] == 1.0
     assert not np.isfinite(lock.u[1])
 

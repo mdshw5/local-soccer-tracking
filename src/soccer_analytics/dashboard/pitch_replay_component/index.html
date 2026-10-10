@@ -85,6 +85,16 @@
         flex: 1 1 55%;
         min-width: 260px;
       }
+      /* The "full width" toggle: the pitch column steps aside and the footage spans the page on its own - the
+         mode for watching the match itself. The tag bar lives in the pitch column and comes back with it; a
+         paused pane refetches its still at the new width, a running stream keeps playing and is re-asked at
+         the new width on its next restart. */
+      body.wide #pitch-pane {
+        display: none;
+      }
+      body.wide #footage-pane {
+        flex: 1 1 100%;
+      }
       #stage {
         border: 1px solid #374151;
         background: #05240f;
@@ -269,6 +279,10 @@
           <option value="all">all</option>
         </select>
       </label>
+      <button
+        id="wide"
+        title="Show the footage alone at full page width (the pitch comes back on the next click)"
+      >full width</button>
     </div>
     <div id="panes">
       <div id="pitch-pane">
@@ -301,7 +315,7 @@
     </div>
     <div id="tl-hint">
       The strip above is the match timeline: the momentum curve (share of contested frames, team 1 above the
-      centre line) with every tagged and detected event marked. Click it to jump the replay to that moment,
+      center line) with every tagged and detected event marked. Click it to jump the replay to that moment,
       hover a marker to see the event, or use the event arrows beside play to step between them.
     </div>
     <div id="tl-popover"></div>
@@ -340,23 +354,23 @@
       // ---------------------------------------------------------------------------------------------------
       // State and small helpers.
       // ---------------------------------------------------------------------------------------------------
-      const TEAM_COLOURS = ['#4f8ef7', '#fb7185'];
-      const OTHER_COLOUR = '#9ca3af';
-      const AIM_COLOUR = '#fde047';
-      const CAMERA_COLOUR = '#38bdf8';
-      const BALL_COLOUR = '#f8fafc';
-      // Role colour-coding: the referee and goalkeepers are marked with a fixed-colour ring instead of a text
-      // label. One keeper's kit on the real game read "red" in the colour descriptor while being orange to the
-      // eye, so the role rides a colour the kit maths cannot muddy; the legend names the two ring colours.
-      const ROLE_COLOURS = {referee: '#a855f7', goalkeeper: '#f59e0b'};
+      const TEAM_COLORS = ['#4f8ef7', '#fb7185'];
+      const OTHER_COLOR = '#9ca3af';
+      const AIM_COLOR = '#fde047';
+      const CAMERA_COLOR = '#38bdf8';
+      const BALL_COLOR = '#f8fafc';
+      // Role color-coding: the referee and goalkeepers are marked with a fixed-color ring instead of a text
+      // label. One keeper's kit on the real game read "red" in the color descriptor while being orange to the
+      // eye, so the role rides a color the kit math cannot muddy; the legend names the two ring colors.
+      const ROLE_COLORS = {referee: '#a855f7', goalkeeper: '#f59e0b'};
       const MARGIN_M = 3.5; // room around the pitch for goals and breathing space
       const TRAIL_SECONDS = 4.0;
       const HEAT_RADIUS_M = 2.6;
       const TL_HEIGHT = 74; // the timeline strip's height in CSS pixels
-      const TL_PAD = 6; // the strip's drawing padding: the click maths and the marker hit test share it
-      // One colour per event type, so a glance at the strip says what happened. Detected events are drawn hollow
+      const TL_PAD = 6; // the strip's drawing padding: the click math and the marker hit test share it
+      // One color per event type, so a glance at the strip says what happened. Detected events are drawn hollow
       // (a ring) and manual tags filled, so a machine's guess never reads as a human's certainty.
-      const EVENT_COLOURS = {
+      const EVENT_COLORS = {
         goal: '#22c55e',
         penalty: '#f97316',
         shot: '#eab308',
@@ -435,7 +449,7 @@
         seekSeq: 0, // the last seek request acted on (from Python's moment buttons)
         pendingSeek: null, // a seek that arrived before the replay payload finished loading
         // Quick tags: every press gets a sequence number so Python can acknowledge exactly what it has stored,
-        // and the pending list keeps the markers on the strip until that acknowledgement comes back.
+        // and the pending list keeps the markers on the strip until that acknowledgment comes back.
         tagSeq: 0,
         pendingTags: [],
         tagTeamValue: '-1',
@@ -457,6 +471,7 @@
       const tlPopover = document.getElementById('tl-popover');
       const pitchPane = document.getElementById('pitch-pane');
       const footagePane = document.getElementById('footage-pane');
+      const wideBtn = document.getElementById('wide');
       let footage = document.getElementById('footage');
       const footageVideo = document.getElementById('footage-video');
       const footageEmpty = document.getElementById('footage-empty');
@@ -474,18 +489,18 @@
       }
 
       function detectedKit(team) {
-        const entry = team >= 0 ? (state.data.team_colours || [])[team] : null;
+        const entry = team >= 0 ? (state.data.team_colors || [])[team] : null;
         return Array.isArray(entry) && entry.length === 3 ? entry : null;
       }
-      function teamColour(team) {
+      function teamColor(team) {
         // Markers wear the kit the clustering measured for their team; the fixed palette is only the fallback
-        // (a replay built before the colours were recorded, or kits the clustering could not separate).
+        // (a replay built before the colors were recorded, or kits the clustering could not separate).
         const rgb = detectedKit(team);
         if (rgb) return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
-        return team >= 0 && team < TEAM_COLOURS.length ? TEAM_COLOURS[team] : OTHER_COLOUR;
+        return team >= 0 && team < TEAM_COLORS.length ? TEAM_COLORS[team] : OTHER_COLOR;
       }
-      function markerTextColour(team) {
-        // The shirt number has to stay readable *on the kit colour*: a white number on a white kit disappears.
+      function markerTextColor(team) {
+        // The shirt number has to stay readable *on the kit color*: a white number on a white kit disappears.
         const rgb = detectedKit(team);
         if (!rgb) return '#ffffff';
         return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 150 ? '#0f172a' : '#ffffff';
@@ -499,7 +514,7 @@
         const entry = state.numbers[player.track_id];
         if (entry && entry.number) return String(entry.number); // a number read off a shirt is a detection, not debug
         // Only label substantial tracks with their id: on real footage the camera loses players out of shot and
-        // they return as new tracks, so there are many short fragments - labelling all of them is noise. The id
+        // they return as new tracks, so there are many short fragments - labeling all of them is noise. The id
         // is the tracker's own key - debug information, which the stream prints only under debug too - so it
         // follows the debug toggle rather than a toggle of its own.
         const major = player.stats && player.stats.observations >= 60;
@@ -512,12 +527,12 @@
       }
 
       function drawSoccerBall(bx, by, r) {
-        // The classic pattern at mark size: a white disc, a dark pentagon at the centre and five patches around
+        // The classic pattern at mark size: a white disc, a dark pentagon at the center and five patches around
         // it. Drawn bigger than a player dot on purpose (see the draw loop) - this is the mark the eye follows.
         const dark = 'rgba(15,23,42,0.92)';
         ctx.beginPath();
         ctx.arc(bx, by, r, 0, Math.PI * 2);
-        ctx.fillStyle = BALL_COLOUR;
+        ctx.fillStyle = BALL_COLOR;
         ctx.fill();
         ctx.lineWidth = Math.max(1, r * 0.16);
         ctx.strokeStyle = dark;
@@ -548,7 +563,7 @@
       }
 
       // ---------------------------------------------------------------------------------------------------
-      // Geometry: pitch metres -> canvas pixels.
+      // Geometry: pitch meters -> canvas pixels.
       // ---------------------------------------------------------------------------------------------------
       function viewBounds() {
         // The pitch plus a margin, widened to include the camera's own ground position: the camera sits off the
@@ -592,7 +607,7 @@
         const c = layer.getContext('2d');
         c.scale(dpr, dpr);
         const s = g.scale;
-        // All markings drawn in pitch metres: y-up, so the canvas y axis is flipped.
+        // All markings drawn in pitch meters: y-up, so the canvas y axis is flipped.
         c.save();
         c.translate(-g.bounds.minX * s, g.bounds.maxY * s);
         c.scale(s, -s);
@@ -651,7 +666,7 @@
       }
 
       // ---------------------------------------------------------------------------------------------------
-      // Heat map: accumulate observation density on a 1 m grid, colour through a simple LUT.
+      // Heat map: accumulate observation density on a 1 m grid, color through a simple LUT.
       // ---------------------------------------------------------------------------------------------------
       function buildHeatCanvas() {
         const pitch = state.data.pitch;
@@ -677,7 +692,7 @@
           for (let col = 0; col < cols; col++) {
             const value = max > 0 ? counts[row * cols + col] / max : 0;
             // row 0 of the image is the top of the view, which is the FAR touchline (y = width)
-            const [r, g, b] = heatColour(Math.sqrt(value));
+            const [r, g, b] = heatColor(Math.sqrt(value));
             const i = ((rows - 1 - row) * cols + col) * 4; // flip so y=0 is at the bottom
             image.data[i] = r;
             image.data[i + 1] = g;
@@ -689,7 +704,7 @@
         state.heatCanvas = layer;
       }
 
-      function heatColour(t) {
+      function heatColor(t) {
         // transparent -> blue -> green -> yellow -> red
         const stops = [
           [0, 40, 80, 200],
@@ -743,17 +758,17 @@
         for (let team = 0; team < pair.length; team++) {
           const dir = pair[team];
           if (!dir) continue;
-          const colour = teamColour(team);
+          const color = teamColor(team);
           const start = dir > 0 ? 2.0 : pitch[0] - 2.0;
           const end = dir > 0 ? 10.0 : pitch[0] - 10.0;
-          ctx.strokeStyle = colour;
-          ctx.fillStyle = colour;
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
           ctx.lineWidth = 2.5;
           ctx.beginPath();
           ctx.moveTo(g.x(start), g.y(y));
           ctx.lineTo(g.x(end), g.y(y));
           ctx.stroke();
-          const head = 1.9; // metres
+          const head = 1.9; // meters
           ctx.beginPath();
           ctx.moveTo(g.x(end), g.y(y));
           ctx.lineTo(g.x(end - dir * head), g.y(y - head * 0.75));
@@ -800,7 +815,7 @@
             if (points.length < 2) continue;
             for (let i = 1; i < points.length; i++) {
               const alpha = 0.05 + 0.5 * (i / points.length);
-              ctx.strokeStyle = teamColour(player.team);
+              ctx.strokeStyle = teamColor(player.team);
               ctx.globalAlpha = alpha;
               ctx.lineWidth = 1.6;
               ctx.beginPath();
@@ -821,14 +836,14 @@
           ctx.beginPath();
           ctx.moveTo(g.x(cam[0]), g.y(cam[1]));
           ctx.lineTo(g.x(aim[0]), g.y(aim[1]));
-          ctx.strokeStyle = CAMERA_COLOUR;
+          ctx.strokeStyle = CAMERA_COLOR;
           ctx.lineWidth = 1.5;
           ctx.setLineDash([6, 4]);
           ctx.stroke();
           ctx.setLineDash([]);
           ctx.beginPath();
           ctx.arc(g.x(cam[0]), g.y(cam[1]), Math.max(3, 0.5 * g.scale), 0, Math.PI * 2);
-          ctx.fillStyle = CAMERA_COLOUR;
+          ctx.fillStyle = CAMERA_COLOR;
           ctx.fill();
           ctx.strokeStyle = 'rgba(0,0,0,0.55)';
           ctx.lineWidth = 1;
@@ -837,7 +852,7 @@
         if (aim) {
           ctx.beginPath();
           ctx.arc(g.x(aim[0]), g.y(aim[1]), Math.max(2.5, 0.35 * g.scale), 0, Math.PI * 2);
-          ctx.fillStyle = AIM_COLOUR;
+          ctx.fillStyle = AIM_COLOR;
           ctx.fill();
           ctx.strokeStyle = 'rgba(0,0,0,0.55)';
           ctx.lineWidth = 1;
@@ -855,27 +870,27 @@
           ctx.globalAlpha = dim ? 0.45 : 1;
           ctx.beginPath();
           ctx.arc(px, py, radius, 0, Math.PI * 2);
-          ctx.fillStyle = teamColour(player.team);
+          ctx.fillStyle = teamColor(player.team);
           ctx.fill();
           ctx.lineWidth = player.track_id === state.selected ? 3 : 1.4;
           ctx.strokeStyle = player.track_id === state.selected ? '#ffffff' : 'rgba(15,23,42,0.85)';
           ctx.stroke();
 
-          // Role colour-coding (referee / goalkeeper): a fixed-colour ring around the marker, so the roles are
+          // Role color-coding (referee / goalkeeper): a fixed-color ring around the marker, so the roles are
           // readable without text and without trusting the kit descriptor, which the real keepers occasionally
-          // fool. The legend names both colours when the payload carries any role.
-          const roleColour = player.role ? ROLE_COLOURS[player.role.role] : null;
-          if (roleColour) {
+          // fool. The legend names both colors when the payload carries any role.
+          const roleColor = player.role ? ROLE_COLORS[player.role.role] : null;
+          if (roleColor) {
             ctx.beginPath();
             ctx.arc(px, py, radius + 2.4, 0, Math.PI * 2);
-            ctx.strokeStyle = roleColour;
+            ctx.strokeStyle = roleColor;
             ctx.lineWidth = 2.2;
             ctx.stroke();
           }
 
           const text = textFor(player);
           if (text) {
-            ctx.fillStyle = markerTextColour(player.team);
+            ctx.fillStyle = markerTextColor(player.team);
             ctx.font = `bold ${Math.max(9, radius)}px sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -917,7 +932,7 @@
             ctx.beginPath();
             ctx.arc(bx, by, ballRadius, 0, Math.PI * 2);
             ctx.setLineDash([ballRadius * 0.55, ballRadius * 0.4]);
-            ctx.strokeStyle = BALL_COLOUR;
+            ctx.strokeStyle = BALL_COLOR;
             ctx.lineWidth = Math.max(1.5, ballRadius * 0.2);
             ctx.stroke();
             ctx.setLineDash([]);
@@ -934,8 +949,8 @@
       // ---------------------------------------------------------------------------------------------------
       // Timeline strip: momentum curve + event markers, click to seek.
       // ---------------------------------------------------------------------------------------------------
-      function eventColour(type) {
-        return EVENT_COLOURS[type] || EVENT_COLOURS.other;
+      function eventColor(type) {
+        return EVENT_COLORS[type] || EVENT_COLORS.other;
       }
 
       // ---------------------------------------------------------------------------------------------------
@@ -944,7 +959,7 @@
       // The tag bar under the pitch stamps an event with the second being watched *at the moment of the press*:
       // waiting for a round trip to Python before reading the clock would land the tag wherever playback got to
       // meanwhile. Python stores the tag in the match's event log and acknowledges by the sequence number, so a
-      // press is never lost to a slow rerun and never stored twice. The vocabulary and the colours match the
+      // press is never lost to a slow rerun and never stored twice. The vocabulary and the colors match the
       // timeline strip's, so a button, its marker and its table row read as one thing.
       // ---------------------------------------------------------------------------------------------------
       const TAG_TYPES = [
@@ -967,7 +982,7 @@
           const button = document.createElement('button');
           button.textContent = type.charAt(0).toUpperCase() + type.slice(1);
           button.title = `Tag a ${type} at the second being watched`;
-          button.style.borderLeft = `3px solid ${eventColour(type)}`;
+          button.style.borderLeft = `3px solid ${eventColor(type)}`;
           button.addEventListener('click', () => sendTag(type));
           tagButtons.appendChild(button);
         }
@@ -1032,10 +1047,10 @@
         tlCtx.lineTo(pad + plotW, midY);
         tlCtx.stroke();
 
-        // momentum: team 0's share above the centre line, team 1's below (mirrored), so a swing is a bulge.
+        // momentum: team 0's share above the center line, team 1's below (mirrored), so a swing is a bulge.
         const momentum = state.momentum || [];
         if (momentum.length >= 2) {
-          const drawSide = (key, sign, colour) => {
+          const drawSide = (key, sign, color) => {
             tlCtx.beginPath();
             momentum.forEach((bucket, i) => {
               const x = xOf(bucket.minute * 60 + 30);
@@ -1044,14 +1059,14 @@
               if (i === 0) tlCtx.moveTo(x, y);
               else tlCtx.lineTo(x, y);
             });
-            tlCtx.strokeStyle = colour;
+            tlCtx.strokeStyle = color;
             tlCtx.lineWidth = 1.6;
             tlCtx.globalAlpha = 0.85;
             tlCtx.stroke();
             tlCtx.globalAlpha = 1;
           };
-          drawSide('team_0', 1, teamColour(0));
-          drawSide('team_1', -1, teamColour(1));
+          drawSide('team_0', 1, teamColor(0));
+          drawSide('team_1', -1, teamColor(1));
         }
 
         // half-time marker
@@ -1066,13 +1081,13 @@
           tlCtx.setLineDash([]);
         }
 
-        // event markers: a vertical tick from the centre line, a filled dot for a manual tag and a hollow ring
-        // for a detected one. The type's colour is the legend.
+        // event markers: a vertical tick from the center line, a filled dot for a manual tag and a hollow ring
+        // for a detected one. The type's color is the legend.
         for (const event of state.events || []) {
           const x = xOf(event.time_s);
-          const colour = eventColour(event.type);
+          const color = eventColor(event.type);
           const manual = event.source === 'manual';
-          tlCtx.strokeStyle = colour;
+          tlCtx.strokeStyle = color;
           tlCtx.globalAlpha = 0.5;
           tlCtx.lineWidth = 1;
           tlCtx.beginPath();
@@ -1083,11 +1098,11 @@
           tlCtx.beginPath();
           tlCtx.arc(x, midY, 4.5, 0, Math.PI * 2);
           if (manual) {
-            tlCtx.fillStyle = colour;
+            tlCtx.fillStyle = color;
             tlCtx.fill();
           } else {
             tlCtx.lineWidth = 2;
-            tlCtx.strokeStyle = colour;
+            tlCtx.strokeStyle = color;
             tlCtx.stroke();
           }
         }
@@ -1105,9 +1120,9 @@
         // store is acknowledged, so the button gives feedback in the same frame it is pressed.
         for (const tag of state.pendingTags || []) {
           const x = xOf(tag.time_s);
-          const colour = eventColour(tag.type);
+          const color = eventColor(tag.type);
           tlCtx.globalAlpha = 0.45;
-          tlCtx.strokeStyle = colour;
+          tlCtx.strokeStyle = color;
           tlCtx.lineWidth = 1;
           tlCtx.beginPath();
           tlCtx.moveTo(x, midY - amp - 4);
@@ -1115,7 +1130,7 @@
           tlCtx.stroke();
           tlCtx.beginPath();
           tlCtx.arc(x, midY, 4.5, 0, Math.PI * 2);
-          tlCtx.fillStyle = colour;
+          tlCtx.fillStyle = color;
           tlCtx.fill();
           tlCtx.globalAlpha = 1;
         }
@@ -1265,7 +1280,7 @@
       // The annotated footage beside the pitch.
       //
       // The pane is the match's encoded stream (``/live/<match>.mp4``, from ``dashboard/video.py``): H.264 of
-      // the analysed window with the pitch model, the detection boxes and the shirt numbers drawn on it, at
+      // the analyzed window with the pitch model, the detection boxes and the shirt numbers drawn on it, at
       // the source's full frame rate (interpolated between analysis samples) and with the match's own audio.
       // Where that stream cannot play, the pane falls back to the MJPEG stream (``/stream/<match>.mjpg``) in
       // its <img>: a lower frame rate and no audio, but every browser plays it. WebKit-family browsers (desktop
@@ -1286,7 +1301,7 @@
       //   <img>'s load), so the encoder's start-up is not baked in as a permanent lag; the hold is capped (see
       //   ``FOOTAGE_PRIME_TIMEOUT_S``), so a stream that never starts cannot hold playback.
       //
-      // The animation's clock is the strip's (0 = first analysed frame); the stream's is the recording's, so
+      // The animation's clock is the strip's (0 = first analyzed frame); the stream's is the recording's, so
       // ``streamOffset`` is what makes "start at this second" mean the same on both clocks.
       // ---------------------------------------------------------------------------------------------------
       const FOOTAGE_FPS = 30; // full motion for the pane; 60 outruns this box's render at 1280 with overlays
@@ -1638,40 +1653,40 @@
           .slice(0, 2)
           .map(
             (name, i) =>
-              `<span><span class="chip" style="background:${teamColour(i)}"></span>${name} (${counts[i]})</span>`
+              `<span><span class="chip" style="background:${teamColor(i)}"></span>${name} (${counts[i]})</span>`
           )
           .join('');
-        // One chip per event type actually on the timeline, so the strip's colours are readable without a key.
+        // One chip per event type actually on the timeline, so the strip's colors are readable without a key.
         const types = [...new Set((state.events || []).map((e) => e.type))];
         const eventChips = types
           .map(
             (type) =>
-              `<span><span class="chip" style="background:${eventColour(type)}"></span>${type}</span>`
+              `<span><span class="chip" style="background:${eventColor(type)}"></span>${type}</span>`
           )
           .join('');
         const hasRole = (roleName) => state.data.players.some((p) => p.role && p.role.role === roleName);
         const roleChips =
           (hasRole('referee')
-            ? `<span><span class="chip" style="background:${ROLE_COLOURS.referee}"></span>referee (ring)</span>`
+            ? `<span><span class="chip" style="background:${ROLE_COLORS.referee}"></span>referee (ring)</span>`
             : '') +
           (hasRole('goalkeeper')
-            ? `<span><span class="chip" style="background:${ROLE_COLOURS.goalkeeper}"></span>goalkeeper (ring)</span>`
+            ? `<span><span class="chip" style="background:${ROLE_COLORS.goalkeeper}"></span>goalkeeper (ring)</span>`
             : '');
         legend.innerHTML =
           chips +
-          (other ? `<span><span class="chip" style="background:${OTHER_COLOUR}"></span>other (${other})</span>` : '') +
+          (other ? `<span><span class="chip" style="background:${OTHER_COLOR}"></span>other (${other})</span>` : '') +
           roleChips +
           (state.data.attack
-            ? `<span><span class="chip" style="background:${TEAM_COLOURS[0]}"></span>` +
-              `<span class="chip" style="background:${TEAM_COLOURS[1]}"></span>` +
+            ? `<span><span class="chip" style="background:${TEAM_COLORS[0]}"></span>` +
+              `<span class="chip" style="background:${TEAM_COLORS[1]}"></span>` +
               `arrows = attacking direction (swaps at half-time)</span>`
             : '') +
-          `<span><span class="chip" style="background:${AIM_COLOUR}"></span>ball proxy (camera aim)</span>` +
+          `<span><span class="chip" style="background:${AIM_COLOR}"></span>ball proxy (camera aim)</span>` +
           (state.data.camera
-            ? `<span><span class="chip" style="background:${CAMERA_COLOUR}"></span>camera position &amp; direction</span>`
+            ? `<span><span class="chip" style="background:${CAMERA_COLOR}"></span>camera position &amp; direction</span>`
             : '') +
           (state.data.ball
-            ? `<span><span class="chip" style="background:${BALL_COLOUR}"></span>` +
+            ? `<span><span class="chip" style="background:${BALL_COLOR}"></span>` +
               `ball (scan: drawn = seen, dashed ring = forecast)</span>`
             : '') +
           (eventChips ? `<span>events (filled = tagged, ring = detected):</span>${eventChips}` : '') +
@@ -1683,6 +1698,21 @@
 
       buildTagBar();
       playBtn.addEventListener('click', () => setPlaying(!state.playing));
+      // The layout toggle: one click hands the page to the footage pane alone, and the same click brings the
+      // split back. Client-side only, so the jump is instant; a paused pane refetches its still at the new
+      // width, a running stream keeps playing (its size is re-asked on the stream's next restart).
+      wideBtn.addEventListener('click', () => {
+        const wide = !document.body.classList.contains('wide');
+        document.body.classList.toggle('wide', wide);
+        wideBtn.textContent = wide ? 'split view' : 'full width';
+        wideBtn.title = wide
+          ? 'Bring the pitch back beside the footage'
+          : 'Show the footage alone at full page width';
+        if (!state.playing) scheduleStill();
+        // The layout height changed: the body's own resize observer follows, but say it here too so the iframe
+        // is right even before the replay payload has arrived (when resize() has nothing to size).
+        requestAnimationFrame(() => Streamlit.setFrameHeight(document.body.scrollHeight + 6));
+      });
       resyncFootageBtn.addEventListener('click', () => {
         // Restart the stream at the animation's own second - the way back into step after a stall - and re-couple
         // sync if it was switched off; a button that says "match the animation" while leaving them free to
@@ -1869,7 +1899,7 @@
         // The event arrows have nowhere to step until the timeline has events to step between.
         prevEventBtn.disabled = nextEventBtn.disabled = state.events.length === 0;
         state.halfMinute = args.half_minute === undefined ? null : args.half_minute;
-        // Tags Python has already stored, acknowledged by sequence: anything up to the acknowledgement is on the
+        // Tags Python has already stored, acknowledged by sequence: anything up to the acknowledgment is on the
         // strip as a real marker (it came with ``args.events``), so the faded pending copy is dropped. The team
         // names are the same list the legend uses, offered beside the buttons so a tag carries its team.
         const ackTagSeq = Number(args.ack_tag_seq || 0);

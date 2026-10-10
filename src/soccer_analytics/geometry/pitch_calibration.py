@@ -1,8 +1,8 @@
-"""Calibrate a PTZ camera against the pitch from landmark clicks, then map any pixel of any frame to pitch metres.
+"""Calibrate a PTZ camera against the pitch from landmark clicks, then map any pixel of any frame to pitch meters.
 
 Model
 -----
-World (pitch) frame: X along the touchline, Y across the pitch, Z up, metres. The camera sits at ``position`` (Z =
+World (pitch) frame: X along the touchline, Y across the pitch, Z up, meters. The camera sits at ``position`` (Z =
 height above the pitch) and never translates. Frame ``t`` has orientation ``R_t = R_base @ Q_t`` (``Q_t`` from
 ``camera_motion`` maps frame-t rays to the reference frame's rays) and focal length ``f_t = f_ref * (chain zoom)``.
 
@@ -30,13 +30,13 @@ FOCAL_SCALE_RANGE = (0.6, 1.8)
 
 # A drift knot has four degrees of freedom (a rotation and a scale) while a click supplies two equations, so a knot
 # fitted to a *single* click stays free in the two directions that click cannot see. On the whole-game clicks that
-# freedom was enough to walk an anchor 21 deg off its neighbours with the residual still small - the anchors read as
+# freedom was enough to walk an anchor 21 deg off its neighbors with the residual still small - the anchors read as
 # the solver's private opinion, not as measurements. Two agreeing clicks pin the direction of a correction and the
 # smoothness term settles the rest, so a moment clicked once cannot anchor the drift (the UI asks for a second
 # landmark there; the click is still checked and reported, it is just not fitted).
 MIN_CLICKS_PER_ANCHOR = 2
 
-# Registering the base pose on one frame needs the classic four landmarks. Doing so pins the metre scale of every
+# Registering the base pose on one frame needs the classic four landmarks. Doing so pins the meter scale of every
 # reported distance on the moment the user trusts most, instead of pooling clicks across a span the chain had
 # already drifted over. Measured on the whole-game clicks: the pooled fit parked the camera at the 12 m height
 # bound, while the frame the user clicked five times registers the same clicks at 5.3 m - a real tripod.
@@ -48,14 +48,14 @@ from soccer_analytics.geometry.drift import DriftCorrection, fit_drift
 
 @dataclass(frozen=True)
 class Landmark:
-    """A clicked pitch feature: pixel ``(u, v)`` (normalised by frame width) in frame ``frame`` and its pitch XY.
+    """A clicked pitch feature: pixel ``(u, v)`` (normalized by frame width) in frame ``frame`` and its pitch XY.
 
     ``direction`` turns the landmark into a *line observation*: the pitch point sits on a pitch marking whose
     image tangent is known, so the measurement constrains only the offset *perpendicular* to the line - sliding
     along the line is free. This is what automatic line detection supplies (it can say "the touchline passes
-    through here" but not "this exact spot is the touchline's 23rd metre"), while a user's click pins both
+    through here" but not "this exact spot is the touchline's 23rd meter"), while a user's click pins both
     coordinates. ``direction`` is the image-space unit normal of the line, and the residual is that perpendicular
-    offset converted to ground metres at the point's range, so it shares the solver's metre scale with clicks.
+    offset converted to ground meters at the point's range, so it shares the solver's meter scale with clicks.
     """
 
     frame: int
@@ -69,7 +69,7 @@ class Landmark:
 
 @dataclass(frozen=True)
 class PitchCalibration:
-    position: np.ndarray  # camera (x, y, z) in pitch metres
+    position: np.ndarray  # camera (x, y, z) in pitch meters
     base_rotation: np.ndarray  # R_base (3x3): reference-frame rays -> pitch rays
     focal_scale: float  # multiplies the chain's focal length
     aspect: float  # frame height / width
@@ -139,7 +139,7 @@ class PitchCalibration:
 def pixel_rays(
     uv: np.ndarray, q: np.ndarray, focal: float, aspect: float, base_rotation: np.ndarray, focal_scale: float
 ) -> np.ndarray:
-    """World-frame ray directions (N, 3, unit length) for normalised pixels ``uv`` (N, 2) of one frame.
+    """World-frame ray directions (N, 3, unit length) for normalized pixels ``uv`` (N, 2) of one frame.
 
     ``q`` maps frame rays to reference-frame rays (the convention of ``camera_motion.integrate_poses``), and
     ``base_rotation`` maps reference-frame rays to world rays.
@@ -170,7 +170,7 @@ def _agreeing_per_anchor(landmarks: list[Landmark], errors: list[float]) -> list
 
     A *drifted* anchor is off as a group - its clicks still agree with each other, which is exactly what makes it
     a usable ground control point. A mis-click disagrees with the other clicks on the same frame, and a single
-    such click must not bend the trajectory towards itself: given a knot of its own it could absorb almost any
+    such click must not bend the trajectory toward itself: given a knot of its own it could absorb almost any
     error, and the outlier report would go quiet. Anchors carrying one click are kept here (there is nothing to
     disagree with); whether their clicks can *anchor the drift* is a separate question, settled by
     `_drift_anchors`.
@@ -234,11 +234,11 @@ def _project_pitch_point(
     focal_scale: float,
     aspect: float,
 ) -> tuple[np.ndarray, bool]:
-    """Project one pitch point to normalised pixels for a *parametric* pose (solver state, not a calibration).
+    """Project one pitch point to normalized pixels for a *parametric* pose (solver state, not a calibration).
 
     The same projection :func:`pitch_to_pixels` performs for a fitted calibration, expressed with the pieces the
     residual functions have in hand - a rotation matrix, a focal scale - so line observations and clicks can be
-    residualised in one pass. Returns ``(uv, in_front)``.
+    residualized in one pass. Returns ``(uv, in_front)``.
     """
     world = np.array([pitch_xy[0] - position[0], pitch_xy[1] - position[1], -position[2]])
     cam = world @ (rotation @ q)
@@ -249,7 +249,7 @@ def _project_pitch_point(
     return projected[:2] / projected[2], True
 
 
-def _perpendicular_error_metres(
+def _perpendicular_error_meters(
     uv: np.ndarray,
     observed: tuple[float, float],
     direction: tuple[float, float],
@@ -257,11 +257,11 @@ def _perpendicular_error_metres(
     position: np.ndarray,
     focal: float,
 ) -> float:
-    """A line observation's perpendicular pixel offset, converted to the ground metres the solver speaks.
+    """A line observation's perpendicular pixel offset, converted to the ground meters the solver speaks.
 
-    A pixel offset ``du`` at ground range ``r`` with normalised focal ``f`` corresponds to a ground offset of
+    A pixel offset ``du`` at ground range ``r`` with normalized focal ``f`` corresponds to a ground offset of
     ``du * r / f`` - the same relation that makes far markings insensitive to a pixel of click noise. Working in
-    metres keeps line observations and clicks on one scale, so one robust loss and one outlier threshold serve both.
+    meters keeps line observations and clicks on one scale, so one robust loss and one outlier threshold serve both.
     """
     perp = (float(uv[0]) - observed[0]) * direction[0] + (float(uv[1]) - observed[1]) * direction[1]
     r = float(np.hypot(pitch_xy[0] - position[0], pitch_xy[1] - position[1]))
@@ -283,12 +283,12 @@ def _residuals(params: np.ndarray, landmarks: list[Landmark], chain: dict[int, t
             if not in_front:
                 out.append(50.0)  # same flat penalty the ground path uses for a ray at the sky
             else:
-                out.append(_perpendicular_error_metres(uv, (lm.u, lm.v), lm.direction, (lm.pitch_x, lm.pitch_y), position, focal * focal_scale))
+                out.append(_perpendicular_error_meters(uv, (lm.u, lm.v), lm.direction, (lm.pitch_x, lm.pitch_y), position, focal * focal_scale))
             continue
         ray = pixel_rays(np.array([[lm.u, lm.v]]), q, focal, aspect, base, focal_scale)
         hit, valid = intersect_ground(position, ray)
         if not valid[0]:
-            out += [50.0, 50.0]  # a clicked ground point whose ray points at the sky: heavily penalise
+            out += [50.0, 50.0]  # a clicked ground point whose ray points at the sky: heavily penalize
         else:
             out += [hit[0, 0] - lm.pitch_x, hit[0, 1] - lm.pitch_y]
     return np.asarray(out)
@@ -313,7 +313,7 @@ AMBIGUOUS_COST_FACTOR = 3.0
 AMBIGUOUS_POSITION_M = 5.0
 
 # Smallest singular value of the residual Jacobian below which the clicks barely constrain the camera (the camera
-# can slide metres for millimetres of residual). Measured: four far landmarks come out at ~0.02; healthy sets with a
+# can slide meters for millimeters of residual). Measured: four far landmarks come out at ~0.02; healthy sets with a
 # near landmark or a wide pan spread sit at 0.7+.
 ILL_CONDITIONED_SIGMA = 0.2
 
@@ -404,14 +404,14 @@ def _grid_starts(
 ) -> list[np.ndarray]:
     """Fallback when no single frame has four landmarks: positions around the pitch with several headings."""
     pts = np.array([[lm.pitch_x, lm.pitch_y] for lm in landmarks])
-    centre = pts.mean(0)
+    center = pts.mean(0)
     z0 = fixed_height_m if fixed_height_m is not None else (initial_position[2] if initial_position else 3.0)
     xy0 = np.array(initial_position[:2]) if initial_position else None
     spread = max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1]), 10.0)
     starts = []
     for dx, dy in ([(0, -1), (0, 1), (-1, 0), (1, 0)] if xy0 is None else [(0, 0)]):
-        start_xy = xy0 if xy0 is not None else centre + np.array([dx, dy]) * spread * 0.9
-        heading = np.arctan2(*(centre - start_xy)[::-1]) if xy0 is None else 0.0
+        start_xy = xy0 if xy0 is not None else center + np.array([dx, dy]) * spread * 0.9
+        heading = np.arctan2(*(center - start_xy)[::-1]) if xy0 is None else 0.0
         for yaw_offset in (0.0, np.pi / 2, -np.pi / 2, np.pi):
             look = np.array([np.cos(heading + yaw_offset), np.sin(heading + yaw_offset), -0.15])
             z_axis = look / np.linalg.norm(look)
@@ -437,7 +437,7 @@ def _ray_starts(
     two. So one position hypothesis buys a well-aimed start for the price of an SVD.
     """
     pts = np.array([[lm.pitch_x, lm.pitch_y] for lm in landmarks], dtype=np.float64)
-    centre = pts.mean(0)
+    center = pts.mean(0)
     spread = max(float(np.ptp(pts[:, 0])), float(np.ptp(pts[:, 1])), 10.0)
 
     # Observed rays in the reference frame, independent of where the camera turns out to be.
@@ -619,7 +619,7 @@ class FitDiagnosis:
 
 
 def diagnose_fit(calibration: PitchCalibration) -> FitDiagnosis:
-    """Characterise a calibration: was it a real fit, and if not, which clicks disagree.
+    """Characterize a calibration: was it a real fit, and if not, which clicks disagree.
 
     A parameter on the edge of its search range is the solver saying it wanted to go further, so the answer is not a
     solution of the problem but the corner of the box. Otherwise the clicks are sorted by how well they fit: those
@@ -652,7 +652,7 @@ def suspect_fit_reason(calibration: PitchCalibration) -> str | None:
     """
     if calibration.ill_conditioned:
         return "the clicks barely constrain the camera - the residual can look small while the camera is tens of " \
-               "metres out - add a landmark closer to the camera or spread them wider across frames"
+               "meters out - add a landmark closer to the camera or spread them wider across frames"
     if calibration.ambiguous:
         return "two very different cameras fit the clicks almost equally well, so the landmarks do not pin the " \
                "camera down - add a landmark closer to the camera"
@@ -684,7 +684,7 @@ def format_scale_note(calibration: PitchCalibration) -> str | None:
         return None
     return (
         f"the camera came out {height:.1f} m high, which is outside the usual tripod range. A match format that "
-        "does not match the pitch you filmed shows up here rather than in the residual - the format sets the metre "
+        "does not match the pitch you filmed shows up here rather than in the residual - the format sets the meter "
         "scale of everything reported - so it is worth double-checking."
     )
 
@@ -703,7 +703,7 @@ def calibrate(
     """Solves camera position, base orientation and focal scale from landmark clicks.
 
     ``chain[frame] = (Q, focal)`` is the camera-motion state of every frame that has a click, where ``Q`` maps
-    frame rays to reference-frame rays. Gross outliers (a mis-clicked or mislabelled landmark) are dropped and the
+    frame rays to reference-frame rays. Gross outliers (a mis-clicked or mislabeled landmark) are dropped and the
     fit repeated without them; they stay in ``residuals_m`` and are listed in ``excluded`` so a UI can point at them.
 
     ``fixed_height_m`` pins the camera height when the rig's height is known (the tripod does not move between
@@ -715,7 +715,7 @@ def calibrate(
     ``geometry.drift``) and everything after that - the outlier pass, the residuals, the conditioning check - runs
     on the corrected chain. That order matters in both directions: a good click late in the video would otherwise
     look like an outlier because the chain had drifted away from it, and a gross mis-click would otherwise be able
-    to bend the trajectory towards itself. The base pose itself is registered on the frame clicked most, when one
+    to bend the trajectory toward itself. The base pose itself is registered on the frame clicked most, when one
     frame carries at least four clicks (see ``_reference_anchor``); the correction is bounded and only fitted to
     moments whose clicks can identify it (see ``MIN_CLICKS_PER_ANCHOR``), so a lone click cannot move the pose.
     """
@@ -749,7 +749,7 @@ def calibrate(
             # The frame must stand on its own clicks: at least four of them must survive a screen against the fit.
             # Four is the minimum that registers a pose, so a screen that keeps fewer is saying the frame cannot
             # carry the pose by itself - and a registration against a height bound is a solve that tolerated its
-            # worst click, not a camera. Both cases fall back to pooling every click, the older behaviour.
+            # worst click, not a camera. Both cases fall back to pooling every click, the older behavior.
             kept = _agreeing_per_anchor(group, list(_errors(fit.x, group, chain, aspect)))
             sigma = _jacobian_conditioning(fit.x, group, {frame: chain[frame]}, aspect, fixed_height_m)
             if len(kept) < MIN_REFERENCE_CLICKS or not _plausible_registration(fit.x):
@@ -837,7 +837,7 @@ def calibrate(
 def pixels_to_pitch(
     calibration: PitchCalibration, uv: np.ndarray, q: np.ndarray, focal: float
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Map normalised pixels of one frame to pitch metres; returns ``(xy (N,2), valid (N,))``."""
+    """Map normalized pixels of one frame to pitch meters; returns ``(xy (N,2), valid (N,))``."""
     rays = pixel_rays(uv, q, focal, calibration.aspect, calibration.base_rotation, calibration.focal_scale)
     return intersect_ground(calibration.position, rays)
 
@@ -845,7 +845,7 @@ def pixels_to_pitch(
 def pitch_to_pixels(
     calibration: PitchCalibration, xy: np.ndarray, q: np.ndarray, focal: float
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Project pitch points (N, 2) into a frame; returns ``(uv (N,2), in_front (N,))`` (uv normalised by width)."""
+    """Project pitch points (N, 2) into a frame; returns ``(uv (N,2), in_front (N,))`` (uv normalized by width)."""
     xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
     world = np.column_stack([xy - calibration.position[None, :2], -np.full(len(xy), calibration.position[2])])
     cam = world @ (calibration.base_rotation @ q)  # = (R^-1) world  with R = base @ q
@@ -865,7 +865,7 @@ def recalibrate_orientation(
 ) -> PitchCalibration:
     """New segment, same tripod: keep camera position and focal scale, re-solve only the base orientation.
 
-    Needs just two landmarks (each is a ray constraint). Initialised in closed form: each landmark's true world
+    Needs just two landmarks (each is a ray constraint). Initialized in closed form: each landmark's true world
     direction from the (known) camera is aligned to its observed reference-frame ray with a Kabsch rotation, then
     refined on the ground-plane residual.
     """

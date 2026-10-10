@@ -52,7 +52,7 @@ def test_the_analysis_directory_is_derived_from_the_video(footage_root: Path) ->
 
 
 def test_the_id_uses_the_recording_date_not_today(tmp_path: Path) -> None:
-    """A folder that is not a date falls back to the file's own timestamp, never "when it was analysed"."""
+    """A folder that is not a date falls back to the file's own timestamp, never "when it was analyzed"."""
     video = _fake_video(tmp_path / "misc" / "game.mp4", mtime=1_700_000_000.0)  # 2023-11-14
     assert analysis_id_for(video).startswith("2023-11-14_")
 
@@ -195,7 +195,7 @@ def test_migration_moves_matches_segments_and_games_beside_the_footage(
     # Legacy match: absolute source and segment paths, the id dated by the save rather than the recording.
     legacy_match = repo / "data" / "matches" / "2026-10-04_16-58-38-391"
     legacy_match.mkdir(parents=True)
-    legacy_match.joinpath("report.json").write_text(json.dumps({"frames_analysed": 3}))
+    legacy_match.joinpath("report.json").write_text(json.dumps({"frames_analyzed": 3}))
     legacy_segment = repo / "data" / "segments" / "game_16-28-37.784_123__whole_game_1_2"
     legacy_segment.mkdir(parents=True)
     (legacy_segment / "meta.json").write_text(json.dumps({"video": str(video), "fps": 5.0}))
@@ -236,7 +236,7 @@ def test_migration_moves_matches_segments_and_games_beside_the_footage(
     target = analysis_dir_for(video)
     assert target.name == "2026-10-03_game_16-28-37-784"
     assert (target / "match.json").exists()
-    assert (target / "report.json").exists(), "every artefact moved with the record"
+    assert (target / "report.json").exists(), "every artifact moved with the record"
     assert (target / "segments" / legacy_segment.name / "chunk_00000.npz").exists()
     assert (target / "game.json").exists(), "the game manifest moved in beside the record"
     assert not legacy_match.exists() and not legacy_segment.exists() and not legacy_game.exists()

@@ -199,15 +199,15 @@ def test_a_pure_tone_survives_the_voice_rejection() -> None:
 
 
 def _voiced_sound(f0: float, duration: float, formants: tuple[tuple[float, float, float], ...]) -> np.ndarray:
-    """A voiced sound: harmonics of ``f0`` shaped by (centre Hz, width Hz, boost) formants."""
+    """A voiced sound: harmonics of ``f0`` shaped by (center Hz, width Hz, boost) formants."""
     time = np.arange(int(duration * SR)) / SR
     out = np.zeros_like(time)
     harmonic = 1
     while harmonic * f0 < 7800.0:
         frequency = harmonic * f0
         gain = 1.0 / harmonic
-        for centre, width, boost in formants:
-            gain += boost * np.exp(-((frequency - centre) / width) ** 2) / harmonic
+        for center, width, boost in formants:
+            gain += boost * np.exp(-((frequency - center) / width) ** 2) / harmonic
         out += gain * np.sin(2 * np.pi * frequency * time)
         harmonic += 1
     envelope = 0.7 + 0.3 * np.sin(2 * np.pi * 3.5 * time)  # a syllable's own shape
@@ -646,7 +646,7 @@ def test_export_moment_writes_a_playable_preview(tmp_path: Path) -> None:
     frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     out_fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
     capture.release()
-    # The preview is the moment's own window (~10 s), not the whole 30 s source. The export normalises the rate to
+    # The preview is the moment's own window (~10 s), not the whole 30 s source. The export normalizes the rate to
     # 30 fps, so measure the duration rather than the frame count.
     duration_s = frames / out_fps
     assert 4.0 < duration_s <= 12.0, f"preview is not the moment window ({duration_s:.1f}s)"
@@ -663,11 +663,11 @@ def test_a_preview_is_cut_from_the_recording_the_candidate_was_found_in(tmp_path
 
     first, second = tmp_path / "camera_a.mp4", tmp_path / "camera_b.mp4"
     width, height, fps = 160, 90, 10
-    for path, colour in ((first, (0, 0, 255)), (second, (0, 255, 0))):  # BGR: red and green
+    for path, color in ((first, (0, 0, 255)), (second, (0, 255, 0))):  # BGR: red and green
         with VideoWriter(path, fps=float(fps), width=width, height=height) as writer:
             for _ in range(fps * 20):  # 20 s
                 frame = np.zeros((height, width, 3), dtype=np.uint8)
-                frame[:, :] = colour
+                frame[:, :] = color
                 writer.write(frame)
 
     def first_frame(path: Path):
@@ -749,7 +749,7 @@ def test_preview_clip_audio_is_not_aac(tmp_path: Path) -> None:
         text=True,
     )
     if made.returncode != 0:
-        pytest.skip(f"could not synthesise a source clip: {made.stderr.strip()[:120]}")
+        pytest.skip(f"could not synthesize a source clip: {made.stderr.strip()[:120]}")
 
     moment = moment_for_event(Event(time_s=10.0, type="shot", team=0))
     out = export_moment(source, moment, tmp_path / "preview.mp4", width=320, use_gpu=False)
@@ -791,7 +791,7 @@ def test_an_audio_only_preview_is_a_playable_mp3_of_the_window(tmp_path: Path) -
         text=True,
     )
     if made.returncode != 0:
-        pytest.skip(f"could not synthesise a source clip: {made.stderr.strip()[:120]}")
+        pytest.skip(f"could not synthesize a source clip: {made.stderr.strip()[:120]}")
 
     moment = moment_for_event(Event(time_s=10.0, type="other", source="audio"))
     out = export_moment(source, moment, tmp_path / "preview.mp3", mode="audio", use_gpu=False)
@@ -838,7 +838,7 @@ def test_a_light_preview_keeps_the_timeline_but_loses_the_frames(tmp_path: Path)
         text=True,
     )
     if made.returncode != 0:
-        pytest.skip(f"could not synthesise a source clip: {made.stderr.strip()[:120]}")
+        pytest.skip(f"could not synthesize a source clip: {made.stderr.strip()[:120]}")
 
     moment = moment_for_event(Event(time_s=10.0, type="other", source="audio"))
     # Same width for both, so the comparison is about the frames rather than the pixels.
@@ -895,7 +895,7 @@ def test_export_rejects_an_empty_reel(tmp_path: Path) -> None:
         export_reel("whatever.mp4", Reel("clip", (), 0.0), tmp_path / "out.mp4")
 
 
-def test_match_library_archives_artefacts(tmp_path: Path) -> None:
+def test_match_library_archives_artifacts(tmp_path: Path) -> None:
     library = MatchLibrary(tmp_path / "matches")
     record = library.create("/videos/match.MP4", format="9v9", pitch_length_m=60.0, pitch_width_m=40.0)
     assert record.match_id.startswith("2")

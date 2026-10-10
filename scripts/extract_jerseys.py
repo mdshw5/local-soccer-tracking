@@ -41,7 +41,7 @@ from soccer_analytics.analysis.jerseys import (
 from soccer_analytics.analysis.library import MatchLibrary
 from soccer_analytics.analysis.projection import on_pitch_mask, project_segment
 from soccer_analytics.analysis.stage_a import load_segment
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader, probe_video
+from soccer_analytics.ingest.source import open_reader, probe_source  # noqa: E402
 
 MIN_CONFIDENCE = 0.55  # detections below this are not worth cropping
 UPSAMPLE_TARGET_PX = 96.0  # torso crops smaller than this are upscaled before OCR
@@ -203,21 +203,22 @@ def main() -> int:
         decode_end_s = float(segment.time[wanted_frames[-1]])
         # The crops are cut at the segment's clock, so the video must actually cover the segment's window: one raw
         # camera clip of a combined game keeps its own shorter clock, and decoding it at game-clock offsets reads
-        # the wrong film (and silently loses every crop past the clip's end). Cheap to check, ugly to debug.
-        span = probe_video(args.video)
+        # the wrong film (and silently loses every crop past the clip's end). A manifest reports the whole game's
+        # span, which is the number this check wants. Cheap to check, ugly to debug.
+        span = probe_source(args.video)
         if span.duration_s + 1.0 < decode_end_s:
             status.update(
                 state="error",
                 message=(
                     f"the video ends at {span.duration_s:.0f}s but the segment's window runs to "
-                    f"{decode_end_s:.0f}s - point the scan at the combined game video the segment was built "
-                    "from, not one raw clip"
+                    f"{decode_end_s:.0f}s - point the scan at the game manifest or the combined game video the "
+                    "segment was built from, not one raw clip"
                 ),
             )
             return 1
         # det boxes in segment order, looked up through the detections' provenance index
         boxes = segment.det_box[detections.det_index]
-        video_reader = FFmpegFrameReader(
+        video_reader = open_reader(
             args.video, fps=float(segment.meta["fps"]), width=args.width, start_s=decode_start_s, duration_s=decode_end_s - decode_start_s + 1.0
         )
         wanted = set(wanted_frames)
@@ -239,8 +240,8 @@ def main() -> int:
                     continue
                 # Motion blur makes small digits unreadable; a blurred crop wastes OCR time and produces
                 # confident nonsense. The variance of the Laplacian is the standard sharpness proxy.
-                grey = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                if cv2.Laplacian(grey, cv2.CV_64F).var() < BLUR_REJECT_LAPLACIAN:
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                if cv2.Laplacian(gray, cv2.CV_64F).var() < BLUR_REJECT_LAPLACIAN:
                     continue
                 scale = min(4.0, max(1.0, UPSAMPLE_TARGET_PX / max(1, crop.shape[0])))
                 if scale > 1.05:
@@ -261,7 +262,7 @@ def main() -> int:
             if done >= total:
                 break
 
-        # Second look around the frames that DID read (see REFINE_* at the top): harvest the neighbouring frames
+        # Second look around the frames that DID read (see REFINE_* at the top): harvest the neighboring frames
         # of each reading for tracks that do not yet sit on a comfortable quorum. Blur/quality rules apply
         # exactly as in the main pass; the extra readings vote alongside the originals, and the vote itself (not
         # this phase) decides whether the track now wears a number.
@@ -276,7 +277,7 @@ def main() -> int:
                 lookup: dict[int, int] = {}
                 # The track's FULL observation list, not its selected crops: the frames this phase is looking for
                 # are exactly the ones the selection did not pick (building this from `selected` skips every
-                # neighbour, because a neighbour is by definition not selected - the first shipped version of this
+                # neighbor, because a neighbor is by definition not selected - the first shipped version of this
                 # phase found zero frames and silently did nothing).
                 for row in assignment.tracks[track_id]:
                     lookup.setdefault(int(detections.frame[row]), int(row))
@@ -310,7 +311,7 @@ def main() -> int:
                     else:
                         clusters.append([frame_index])
                 for cluster in clusters:
-                    stream = FFmpegFrameReader(
+                    stream = open_reader(
                         args.video,
                         fps=fps,
                         width=args.width,
@@ -326,8 +327,8 @@ def main() -> int:
                             crop = crop_torso(frame, tuple(boxes[row]))
                             if crop is None:
                                 continue
-                            grey = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                            if cv2.Laplacian(grey, cv2.CV_64F).var() < BLUR_REJECT_LAPLACIAN:
+                            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                            if cv2.Laplacian(gray, cv2.CV_64F).var() < BLUR_REJECT_LAPLACIAN:
                                 continue
                             scale = min(4.0, max(1.0, UPSAMPLE_TARGET_PX / max(1, crop.shape[0])))
                             if scale > 1.05:

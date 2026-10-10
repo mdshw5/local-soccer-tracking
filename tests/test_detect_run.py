@@ -1,7 +1,7 @@
-"""``detect_run.run_detection``: the wiring from a match's saved artefacts to its event log.
+"""``detect_run.run_detection``: the wiring from a match's saved artifacts to its event log.
 
 The detectors themselves are exercised against the simulated match elsewhere; this file is about the *glue* the
-dashboard's button and the background run share - which artefacts are required before anything may run, that the
+dashboard's button and the background run share - which artifacts are required before anything may run, that the
 candidates keep the segment's own time base, and that a re-run reconciles rows (replacing its own, keeping a
 human's tags and the whistle candidates) instead of duplicating or stranding them.
 """
@@ -27,8 +27,8 @@ from synthetic_match import PITCH_LENGTH, PITCH_WIDTH, simulate_match
 def detection_case(tmp_path_factory):
     """A simulated match saved the way the pipeline saves one: replay, calibration and a ball scan.
 
-    The ball scan is synthesised by projecting the simulator's true ball path back into the image and storing the
-    per-frame normalised pixels a scan would have written, so the projection under test has the same ground to
+    The ball scan is synthesized by projecting the simulator's true ball path back into the image and storing the
+    per-frame normalized pixels a scan would have written, so the projection under test has the same ground to
     stand on the real one does. The segment itself is passed in directly (as the dashboard's cached loader does)
     - it never needs to be written to disk for detection.
     """
@@ -65,7 +65,7 @@ def detection_case(tmp_path_factory):
         ),
     )
 
-    # The "scan": the true ball path seen through the recovered camera chain, as normalised pixels per frame.
+    # The "scan": the true ball path seen through the recovered camera chain, as normalized pixels per frame.
     aspect = float(segment.meta["height"]) / float(segment.meta["width"])
     records = []
     for frame in range(len(segment.time)):
@@ -105,7 +105,7 @@ def test_missing_inputs_are_named_with_what_to_do(tmp_path: Path) -> None:
         detect_run.run_detection(library, record.match_id, segment_dir)
 
 
-def test_detection_runs_against_the_saved_artefacts(detection_case) -> None:
+def test_detection_runs_against_the_saved_artifacts(detection_case) -> None:
     library, match_id, segment, segment_dir, poses = detection_case
     _clear_events(library, match_id)
     result = detect_run.run_detection(
@@ -120,7 +120,7 @@ def test_detection_runs_against_the_saved_artefacts(detection_case) -> None:
         assert event.source == "ball", "the detectors' rows carry their own source"
         assert event.video == "synthetic.mp4"
         # The candidates must live on the segment's own time base - an off-by-`start_s` shift is the classic bug
-        # here, and it would land every event outside the analysed window.
+        # here, and it would land every event outside the analyzed window.
         assert times.min() - 1.0 <= event.time_s <= times.max() + 1.0
 
 

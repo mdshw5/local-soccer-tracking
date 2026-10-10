@@ -5,7 +5,7 @@
   <style>
     html, body { margin: 0; padding: 0; background: transparent; font-family: "Source Sans Pro", sans-serif; color: #fafafa; }
     #wrap { display: flex; flex-direction: column; gap: 10px; padding: 2px 2px 4px; }
-    video { width: 100%; border-radius: 6px; background: #000; display: block; }
+    #frame { width: 100%; border-radius: 6px; background: #000; display: block; aspect-ratio: 16 / 9; object-fit: contain; }
     #bar { position: relative; height: 10px; border-radius: 5px; background: #262730; cursor: pointer; margin-top: 14px; }
     #played { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #4a5568; border-radius: 5px; }
     .mark { position: absolute; top: -5px; bottom: -5px; width: 2px; background: #ffd166; display: none; }
@@ -27,8 +27,8 @@
 </head>
 <body>
   <div id="wrap">
-    <video id="video" controls preload="metadata"></video>
-    <div id="bar" title="Click to jump to that moment">
+    <img id="frame" alt="Game footage" />
+    <div id="bar" title="Click or drag to jump to that moment">
       <div id="played"></div>
       <div class="mark" id="mark-start"><span></span></div>
       <div class="mark" id="mark-half"><span></span></div>
@@ -36,14 +36,16 @@
       <div id="head"></div>
     </div>
     <div id="row">
+      <button id="play">Play</button>
       <button id="btn-start">Set kick-off</button>
       <button id="btn-half">Set half-time</button>
       <button id="btn-end">Set full-time</button>
       <span id="clock">0:00 / 0:00</span>
     </div>
     <div id="hint">
-      Scrub the low-resolution proxy to the moment, then mark it. Marking is a *game* clock: kick-off, half-time
-      and full-time decide which footage is analysed and which half every event belongs to.
+      Scrub to the moment, then mark it — frames stream straight from the camera clips, with no merged video and
+      no proxy to build. Marking is a *game* clock: kick-off, half-time and full-time decide which footage is
+      analyzed and which half every event belongs to.
     </div>
   </div>
 
@@ -72,14 +74,24 @@
 
     const NAMES = ['start', 'half', 'end'];
     const LABELS = {start: 'kick-off', half: 'half-time', end: 'full-time'};
-    const video = document.getElementById('video');
+    const frame = document.getElementById('frame');
     const bar = document.getElementById('bar');
     const played = document.getElementById('played');
     const head = document.getElementById('head');
     const clock = document.getElementById('clock');
+    const playBtn = document.getElementById('play');
     let marks = {start: null, half: null, end: null};
     let duration = 0;
     let seq = 0;
+    let gameId = '';
+    let streamPort = 8510;
+    let streamBase = '';
+    let position = 0;      // game seconds at the playhead
+    let playing = false;
+    let playBase = 0;      // the position playback (re)started from
+    let playStarted = 0;   // performance.now() at that moment
+    let raf = 0;
+    let started = false;   // whether a stream has been opened on this mount
 
     function fmt(seconds) {
       if (!isFinite(seconds) || seconds < 0) seconds = 0;
@@ -88,11 +100,64 @@
       return `${minutes}:${String(rest).padStart(2, '0')}`;
     }
 
+    function clamp(value) {
+      const upper = duration > 0 ? duration : value;
+      return Math.min(upper, Math.max(0, value));
+    }
+
+    function streamUrl(frames) {
+      // ``frames=1`` asks for a single still (the server closes after it); ``0`` streams until the game ends.
+      const base = streamBase || `${location.protocol}//${location.hostname}:${streamPort}`;
+      const t = clamp(position).toFixed(3);
+      return `${base}/game/${encodeURIComponent(gameId)}.mjpg?t=${t}&width=640&fps=8&frames=${frames}`;
+    }
+
+    function showStill() {
+      if (!gameId) return;
+      playing = false;
+      cancelAnimationFrame(raf);
+      playBtn.textContent = 'Play';
+      frame.src = streamUrl(1);
+    }
+
+    function startPlayback() {
+      if (!gameId) return;
+      cancelAnimationFrame(raf);
+      playing = true;
+      playBtn.textContent = 'Pause';
+      playBase = position;
+      playStarted = performance.now();
+      frame.src = streamUrl(0);
+      raf = requestAnimationFrame(tick);
+    }
+
+    function tick() {
+      if (!playing) return;
+      position = clamp(playBase + (performance.now() - playStarted) / 1000);
+      updatePosition();
+      if (position >= duration) {
+        showStill();
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    }
+
+    function seekTo(time) {
+      position = clamp(time);
+      updatePosition();
+      if (playing) {
+        playBase = position;
+        playStarted = performance.now();
+        frame.src = streamUrl(0);
+      } else {
+        showStill();
+      }
+    }
+
     function updatePosition() {
-      const time = video.currentTime || 0;
-      played.style.width = duration ? `${(time / duration) * 100}%` : '0%';
-      head.style.left = duration ? `calc(${(time / duration) * 100}% - 1px)` : '0px';
-      clock.textContent = `${fmt(time)} / ${fmt(duration)}`;
+      played.style.width = duration ? `${(position / duration) * 100}%` : '0%';
+      head.style.left = duration ? `calc(${(position / duration) * 100}% - 1px)` : '0px';
+      clock.textContent = `${fmt(position)} / ${fmt(duration)}`;
     }
 
     function renderMarks() {
@@ -113,50 +178,58 @@
     }
 
     function sendMark(name) {
-      if (!video.getAttribute('src')) return;
-      Streamlit.setComponentValue({action: 'mark', mark: name, time: video.currentTime, seq: ++seq});
+      if (!gameId) return;
+      Streamlit.setComponentValue({action: 'mark', mark: name, time: position, seq: ++seq});
     }
 
     for (const name of NAMES) {
       document.getElementById(`btn-${name}`).addEventListener('click', () => sendMark(name));
     }
+    playBtn.addEventListener('click', () => (playing ? showStill() : startPlayback()));
 
-    bar.addEventListener('click', (event) => {
-      if (!duration) return;
+    let dragging = false;
+
+    function positionFromEvent(event) {
       const rect = bar.getBoundingClientRect();
       const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-      video.currentTime = fraction * duration;
+      return fraction * duration;
+    }
+
+    bar.addEventListener('pointerdown', (event) => {
+      if (!duration) return;
+      dragging = true;
+      bar.setPointerCapture(event.pointerId);
+      position = clamp(positionFromEvent(event));
       updatePosition();
+    });
+    bar.addEventListener('pointermove', (event) => {
+      if (!dragging) return;
+      position = clamp(positionFromEvent(event));
+      updatePosition();
+    });
+    bar.addEventListener('pointerup', (event) => {
+      if (!dragging) return;
+      dragging = false;
+      seekTo(positionFromEvent(event));
     });
 
-    video.addEventListener('loadedmetadata', () => {
-      duration = isFinite(video.duration) ? video.duration : 0;
-      renderMarks();
-      updatePosition();
-      Streamlit.setFrameHeight();
-    });
-    video.addEventListener('timeupdate', updatePosition);
     window.addEventListener('resize', () => Streamlit.setFrameHeight());
 
     Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
       const args = event.detail.args || {};
       marks = args.marks || {start: null, half: null, end: null};
-      // The marking video can arrive two ways: a direct URL (a prebuilt proxy through Streamlit's media
-      // endpoint, or the game route URL), or - when the footage stream is running - composed here from the
-      // dashboard's own host, so the browser reaches the stream server the same way the replay pane does
-      // (a forwarded or LAN host, not a hard-coded localhost).
-      let url = typeof args.proxy_url === 'string' ? args.proxy_url : '';
-      if (!url && args.game_id) {
-        const port = Number(args.stream_port) || 8510;
-        const base = (args.stream_base || '') || `${location.protocol}//${location.hostname}:${port}`;
-        url = `${base}/game/${args.game_id}.mp4`;
-      }
-      if (url && video.getAttribute('src') !== url) {
-        // Re-setting the same URL would restart playback, so only a changed proxy reloads the element.
-        video.setAttribute('src', url);
-        video.load();
+      if (typeof args.game_id === 'string') gameId = args.game_id;
+      streamPort = Number(args.stream_port) || streamPort;
+      if (typeof args.stream_base === 'string' && args.stream_base) streamBase = args.stream_base;
+      duration = Number(args.duration_s) || duration;
+      // Open the stream once, paused on the first frame: a later render (a mark saved, another widget touched)
+      // must not restart playback under the user.
+      if (gameId && !started) {
+        started = true;
+        showStill();
       }
       renderMarks();
+      updatePosition();
       Streamlit.setFrameHeight();
     });
 

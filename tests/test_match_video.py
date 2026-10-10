@@ -537,7 +537,7 @@ class _TinyReader:
 
 @needs_ffmpeg
 def test_a_clip_really_encodes_to_an_h264_file_the_source_rate_reads_back(tmp_path) -> None:
-    """The end of the pipeline, against ffmpeg itself: the artefact is an H.264 MP4 with the frame count, rate
+    """The end of the pipeline, against ffmpeg itself: the artifact is an H.264 MP4 with the frame count, rate
     and size that were asked for - and it plays (the index is at the front, so a seek is a range, not an encode)."""
     from soccer_analytics.ingest.ffmpeg_reader import probe_video
 
@@ -564,7 +564,7 @@ def test_a_clip_really_encodes_to_an_h264_file_the_source_rate_reads_back(tmp_pa
 
 @needs_ffmpeg
 def test_a_live_stream_really_emits_a_fragmented_mp4_and_ends_when_stopped(tmp_path) -> None:
-    """The live artefact must be joinable mid-flight (ftyp + moof fragments) and must *stop* - a stream whose
+    """The live artifact must be joinable mid-flight (ftyp + moof fragments) and must *stop* - a stream whose
     token is set stops feeding the encoder and closes out, instead of running the window to its end."""
     match = _match()
     payload = b"".join(
@@ -687,3 +687,44 @@ def _stopped_live(match, control):
         if payload and not control.stopped:
             control.request_stop()
     return payload
+
+
+def test_multi_clip_audio_inputs_are_seeked_per_clip_and_joined_by_the_concat_filter() -> None:
+    """A clip-set window's sound comes in as one nicely bounded input per clip, stitched by ``concat``.
+
+    The shape matters as much as the sound: each input seeks inside its own clip (never the concat demuxer) and
+    is bounded by ``-t``, and the retiming happens once, after the join - so the pieces cannot drift apart.
+    """
+    command = encoder_command(
+        width=96,
+        height=64,
+        fps=5.0,
+        output="pipe:1",
+        live=False,
+        encoder="libx264",
+        keyframe_s=1.0,
+        rate=2.0,
+        audio_duration_s=3.0,
+        audio_inputs=[("/clips/a.mp4", 1.25, 0.75), ("/clips/b.mp4", 0.0, 1.5)],
+    )
+    joined = " ".join(command)
+    assert "-ss 1.250 -t 0.750 -i /clips/a.mp4" in joined
+    assert "-ss 0.000 -t 1.500 -i /clips/b.mp4" in joined
+    assert "[1:a:0][2:a:0]concat=n=2:v=0:a=1,atempo=2.0000[aout]" in joined
+    assert "-map [aout]" in joined
+
+
+def test_a_single_audio_piece_maps_exactly_like_a_single_source() -> None:
+    command = encoder_command(
+        width=96,
+        height=64,
+        fps=5.0,
+        output="pipe:1",
+        live=False,
+        encoder="libx264",
+        keyframe_s=1.0,
+        audio_inputs=[("/clips/a.mp4", 3.0, 2.0)],
+    )
+    joined = " ".join(command)
+    assert "-map 1:a:0?" in joined
+    assert "concat" not in joined and "filter_complex" not in joined

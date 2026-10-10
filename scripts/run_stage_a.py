@@ -5,8 +5,8 @@ Usage::
     python scripts/run_stage_a.py --video /path/match.MP4 --out <footage>/analysis/<id>/segments/<segment> \
         [--start 300] [--duration 600]
 
-``--duration 0`` (the default) analyses from the offset to the end of the video. Progress is written to
-``<out>/status.json`` by `analyse_segment`, which is what the dashboard polls. Resuming is implicit: the run starts
+``--duration 0`` (the default) analyzes from the offset to the end of the video. Progress is written to
+``<out>/status.json`` by `analyze_segment`, which is what the dashboard polls. Resuming is implicit: the run starts
 from the last completed chunk, so re-running this command after an interruption continues instead of starting over.
 """
 
@@ -18,7 +18,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from soccer_analytics.analysis.stage_a import ANALYSIS_FPS, SegmentConfig, analyse_segment, resolve_weights
+from soccer_analytics.analysis.stage_a import (
+    ANALYSIS_FPS,
+    DETECT_WIDTH,
+    SegmentConfig,
+    analyze_segment,
+    resolve_weights,
+)
 
 
 def main() -> int:
@@ -26,14 +32,19 @@ def main() -> int:
     parser.add_argument("--video", required=True, help="source video file")
     parser.add_argument("--out", required=True, help="output directory for this segment")
     parser.add_argument("--start", type=float, default=0.0, help="start offset in the source video (seconds)")
-    parser.add_argument("--duration", type=float, default=0.0, help="seconds to analyse; 0 = to the end of the video")
+    parser.add_argument("--duration", type=float, default=0.0, help="seconds to analyze; 0 = to the end of the video")
     parser.add_argument(
         "--fps",
         type=float,
         default=ANALYSIS_FPS,
         help="analysis frame rate (detections per second; default 15 - 60 and 30 fps sources both divide by it)",
     )
-    parser.add_argument("--width", type=int, default=1920, help="analysis frame width for detection")
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=DETECT_WIDTH,
+        help="analysis frame width for detection; 0 (default) = the source's own width (full resolution)",
+    )
     parser.add_argument("--chunk-frames", type=int, default=300, help="frames per checkpoint file")
     parser.add_argument(
         "--weights",
@@ -50,7 +61,7 @@ def main() -> int:
         weights=resolve_weights(args.weights),
         device="cpu" if args.cpu else 0,
     )
-    status = analyse_segment(
+    status = analyze_segment(
         args.video,
         args.out,
         config=config,

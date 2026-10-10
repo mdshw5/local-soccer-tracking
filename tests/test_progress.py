@@ -87,4 +87,4 @@ def test_progress_callbacks_are_optional() -> None:
     report, _assignment = stage_b.build_report(
         detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH, match_frames=len(segment.time)
     )
-    assert report.frames_analysed == len(segment.time)
+    assert report.frames_analyzed == len(segment.time)

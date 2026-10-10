@@ -1,10 +1,10 @@
 """Refining the camera-motion chain: the estimator choice, and that only the motion arrays change.
 
 The refinement exists because the analysis pass prefers sparse optical flow (LK) and only falls back to descriptor
-matching (SIFT) when LK *fails*. On a fast pan LK's linearisation under-estimates the rotation while still
+matching (SIFT) when LK *fails*. On a fast pan LK's linearization under-estimates the rotation while still
 "succeeding", so the fallback never runs and the error is integrated into the chain - the projected pitch then lags
 the real markings. The refinement re-estimates each step, preferring the descriptor match whenever the motion is
-large enough for LK's linearisation to matter.
+large enough for LK's linearization to matter.
 
 Two things are worth pinning. The estimator choice is pure logic and easy to get backwards. And the write-back must
 touch *only* the motion arrays - times, detections and kit descriptors are what the rest of the pipeline reads, and
@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from soccer_analytics.analysis.stage_a import SegmentConfig, analyse_segment, load_segment
+from soccer_analytics.analysis.stage_a import SegmentConfig, analyze_segment, load_segment
 from soccer_analytics.geometry.camera_motion import MotionStep
 from soccer_analytics.ingest.video_reader import VideoWriter
 
@@ -49,7 +49,7 @@ def test_choose_step_prefers_lk_for_small_motion() -> None:
 
 
 def test_choose_step_prefers_sift_for_large_motion() -> None:
-    """Large motion: LK's linearisation under-estimates the rotation, so the descriptor match wins."""
+    """Large motion: LK's linearization under-estimates the rotation, so the descriptor match wins."""
     module = _script()
     lk, sift = _step(200, 0.9, "lk"), _step(200, 0.9, "sift")
     chosen, source = module.choose_step(lk, sift, lk_deg=8.0, large_motion_deg=1.5)
@@ -92,7 +92,7 @@ def test_validate_step_accepts_a_pure_rotation() -> None:
 
 
 def _segment(tmp_path: Path):  # noqa: ANN202
-    """A tiny analysed segment: a moving square so the motion estimator has something to track."""
+    """A tiny analyzed segment: a moving square so the motion estimator has something to track."""
     video = tmp_path / "clip.mp4"
     writer = VideoWriter(str(video), fps=10.0, width=W, height=H)
     for index in range(40):
@@ -102,7 +102,7 @@ def _segment(tmp_path: Path):  # noqa: ANN202
         writer.write(frame)
     writer.close()
     out = tmp_path / "segment"
-    analyse_segment(video, out, config=SegmentConfig(fps=10.0, detect_width=W, motion_width=W, chunk_frames=20))
+    analyze_segment(video, out, config=SegmentConfig(fps=10.0, detect_width=W, motion_width=W, chunk_frames=20))
     return out
 
 

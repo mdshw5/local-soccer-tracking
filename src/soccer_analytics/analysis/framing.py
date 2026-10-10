@@ -1,12 +1,12 @@
 """Framing one player: where to point the crop, and the ffmpeg filter that follows them.
 
-The pitch replay draws tracks in metres; a clip centred on one player needs the same player in *pixels* of the
-source video. Those are exactly the boxes Stage A stored (bottom-centre boxes normalised by frame width), so no
-calibration is involved: a centred clip can be cut for any track, registered pitch or not.
+The pitch replay draws tracks in meters; a clip centered on one player needs the same player in *pixels* of the
+source video. Those are exactly the boxes Stage A stored (bottom-center boxes normalized by frame width), so no
+calibration is involved: a centered clip can be cut for any track, registered pitch or not.
 
 The crop does not chase the detector frame by frame - it would twitch with every box jitter, and a clip that
 shudders is worse than one that lags. Instead the trajectory is interpolated onto a fixed command grid, smoothed
-with a short centred window, and clamped to the frame; ffmpeg's ``sendcmd`` then drives a ``crop`` filter with the
+with a short centered window, and clamped to the frame; ffmpeg's ``sendcmd`` then drives a ``crop`` filter with the
 result, which is how the cut follows the player without re-encoding the whole picture through Python. The grid is
 dense on purpose - once per source frame: ``sendcmd`` cannot interpolate, so the command rate *is* the camera's
 update rate, and a sparse grid reads as a stuttering pan even when the trajectory underneath is smooth.
@@ -33,7 +33,7 @@ MIN_CROP_HEIGHT_PX = 480.0
 # in ~167 ms step-and-holds, which is what "choppy while panning" was). Stationary stretches collapse to two
 # commands and the schedule goes to ffmpeg by file, so the density costs nothing but a few dozen kilobytes.
 COMMAND_RATE_HZ = 60.0
-# Centred moving average over the crop centre. Long enough to ride out box jitter and detection flicker, short
+# Centered moving average over the crop center. Long enough to ride out box jitter and detection flicker, short
 # enough that a sprint is followed without visible lag.
 SMOOTH_WINDOW_S = 0.7
 # A gap longer than this inside the track means the player was not seen: the crop must not be asked to slide
@@ -70,12 +70,12 @@ class FramingPlan:
 
 
 def _pixel_track(times: np.ndarray, boxes: np.ndarray, source_width: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Track centres and heights in source pixels, from width-normalised boxes (both axes share the width scale)."""
+    """Track centers and heights in source pixels, from width-normalized boxes (both axes share the width scale)."""
     x1, y1, x2, y2 = (boxes[:, i].astype(np.float64) * source_width for i in range(4))
-    centre_x = (x1 + x2) / 2.0
-    centre_y = (y1 + y2) / 2.0
+    center_x = (x1 + x2) / 2.0
+    center_y = (y1 + y2) / 2.0
     height = np.abs(y2 - y1)
-    return centre_x, centre_y, height
+    return center_x, center_y, height
 
 
 def _even(value: float) -> int:
@@ -104,7 +104,7 @@ def crop_size(
 
 
 def _smooth(values: np.ndarray, window: int) -> np.ndarray:
-    """Centred moving average with edge-aware windows (no padding that would pull the ends inward)."""
+    """Centered moving average with edge-aware windows (no padding that would pull the ends inward)."""
     if window <= 1 or len(values) < 3:
         return values
     kernel = np.ones(window, dtype=np.float64) / window
@@ -144,9 +144,9 @@ def plan_framing(
     max_gap_s: float = MAX_GAP_S,
     tail_grace_s: float = TAIL_GRACE_S,
 ) -> FramingPlan | None:
-    """Build the crop rectangle and the commands that follow this track's player-centre for ``duration_s``.
+    """Build the crop rectangle and the commands that follow this track's player-center for ``duration_s``.
 
-    ``times`` are source seconds (sorted) and ``boxes`` the matching ``(x1, y1, x2, y2)`` width-normalised
+    ``times`` are source seconds (sorted) and ``boxes`` the matching ``(x1, y1, x2, y2)`` width-normalized
     rectangles. Returns ``None`` when the track has nothing to frame. The window is trimmed to the end of the
     track (with a short grace, so a detection flicker does not shave the clip), and further trimmed to just before
     the first gap longer than ``max_gap_s``, because across such a gap the tracker simply does not know where the
@@ -177,15 +177,15 @@ def plan_framing(
         covered = np.zeros(len(times), dtype=bool)
         covered[np.argmin(np.abs(times - start_s))] = True
     frame = times[covered]
-    centre_x, centre_y, heights = _pixel_track(frame, boxes[covered], source_width)
+    center_x, center_y, heights = _pixel_track(frame, boxes[covered], source_width)
 
     crop_w, crop_h = crop_size(heights, source_width, source_height, player_fraction=player_fraction,
                                min_crop_height_px=min_crop_height_px)
 
     grid = crop_times(duration_s=end_s - start_s, rate_hz=rate_hz)
     window_times = start_s + grid
-    xs = _smooth(np.interp(window_times, frame, centre_x), max(1, int(round(smooth_s * rate_hz))))
-    ys = _smooth(np.interp(window_times, frame, centre_y), max(1, int(round(smooth_s * rate_hz))))
+    xs = _smooth(np.interp(window_times, frame, center_x), max(1, int(round(smooth_s * rate_hz))))
+    ys = _smooth(np.interp(window_times, frame, center_y), max(1, int(round(smooth_s * rate_hz))))
 
     half_w, half_h = crop_w / 2.0, crop_h / 2.0
     max_x = max(0.0, source_width - crop_w)

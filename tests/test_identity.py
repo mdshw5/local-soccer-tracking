@@ -1,9 +1,9 @@
-"""Unique players: grouping appearances into people, and the payload the centred cut is built from.
+"""Unique players: grouping appearances into people, and the payload the centered cut is built from.
 
 The identity rule itself is deliberately trivial - team plus shirt number or name - because the measured
 alternative was tried and rejected (appearance embeddings do not separate players on this footage; see the
 README). What these tests pin is that the grouping is *exact*, stable across reloads, and never guesses at an
-appearance nobody has named; and that the geometry the centred cut needs survives the replay payload with the
+appearance nobody has named; and that the geometry the centered cut needs survives the replay payload with the
 right time base, which is the mistake that made every shirt-number reading come from the wrong frame once.
 """
 

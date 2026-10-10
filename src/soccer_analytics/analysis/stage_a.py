@@ -11,7 +11,7 @@ Output directory layout (one per segment)::
     chunk_00000.npz    frames [0, chunk_frames)    camera state + detections
     ...
 
-Each chunk holds, per analysed frame ``i``: time, ok flag, inlier ratio, the *raw* camera step (so the focal length
+Each chunk holds, per analyzed frame ``i``: time, ok flag, inlier ratio, the *raw* camera step (so the focal length
 can be recalibrated without re-reading video), and the detection arrays with a ``det_frame`` index.
 """
 
@@ -21,7 +21,7 @@ import json
 import os
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -34,15 +34,16 @@ from soccer_analytics.geometry.camera_motion import (
     RotationChain,
     overlay_mask,
 )
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader, probe_video
+from soccer_analytics.ingest.source import as_source, open_reader, probe_source
 
 # 60 fps and 30 fps sources both divide cleanly by 15, so every analysis sample is an actual source frame - and a
 # 15 fps sample captures a fast pass well inside the ball tracker's association gate.
 ANALYSIS_FPS = 15.0
 MOTION_WIDTH = 960  # motion is estimated on a small copy; detection uses the full analysis frame
-DETECT_WIDTH = 1920
+DETECT_WIDTH = 0  # 0 = decode and detect at the source's own width (full resolution); see `analyze_segment`
+FLOOR_WIDTH = 1920  # the frame width MIN_PERSON_HEIGHT_PX was measured at; the size floor scales with the width
 CHUNK_FRAMES = 300  # 20 s at 15 fps; small checkpoints, so an interruption loses little
-MIN_PERSON_HEIGHT_PX = 14  # at 1920 wide; smaller boxes are far-side noise
+MIN_PERSON_HEIGHT_PX = 14  # at FLOOR_WIDTH; smaller boxes are far-side noise
 PERSON_CONF = 0.25
 SCHEMA_VERSION = 2  # v2 adds det_track (BoT-SORT identity per detection)
 REPO_ROOT = Path(__file__).resolve().parents[3]  # src/soccer_analytics/analysis/stage_a.py -> repo root
@@ -93,6 +94,14 @@ def tracker_config_path(fps: float) -> str:
 
 @dataclass(frozen=True)
 class SegmentConfig:
+    """One segment's analysis settings.
+
+    ``detect_width = 0`` (the default) is full resolution: decode and detect at the source's own width. On the
+    reference 4K footage that finds ~40 players per frame against ~33 at the old 1920 default - and ~73% more
+    far-side players (the 14-40 px band at 1920) - for roughly 3.5x the detection time, which is why the width
+    can be pinned lower per run (``--width``).
+    """
+
     fps: float = ANALYSIS_FPS
     motion_width: int = MOTION_WIDTH
     detect_width: int = DETECT_WIDTH
@@ -106,10 +115,10 @@ def resolve_weights(weights: str | None = None) -> str:
     """The weights to actually load, preferring a locally-supplied model over the stock download.
 
     The default used to be ``data/models/yolov8n-coco-baseline.pt``, a file that is gitignored (weights are
-    fetched again rather than stored) and that Ultralytics' downloader does not recognise by name - so a fresh
+    fetched again rather than stored) and that Ultralytics' downloader does not recognize by name - so a fresh
     clone died with a bare ``FileNotFoundError`` at ``YOLO(...)`` and no way to recover. The default is now the
     stock ``yolov8n.pt``, which Ultralytics fetches itself. With no explicit ``--weights``, a checkpoint under
-    ``data/models/`` is still honoured - the most recently modified ``*.pt`` there wins, because that is where a
+    ``data/models/`` is still honored - the most recently modified ``*.pt`` there wins, because that is where a
     fine-tuned model for this sideline camera would be dropped. Person detection is the only class Stage A needs,
     so stock COCO works - but a real fine-tuned checkpoint should detect far-side players better.
     """
@@ -133,19 +142,21 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
 
 
 def segment_dir_for(video_path: str | Path, root: str | Path, *, window_label: str | None = None) -> Path:
-    """Stable per-video output directory; keyed by name + size so a replaced file is not mistaken for a done one.
+    """Stable per-source output directory; keyed by name + size so a replaced source is not mistaken for a done one.
 
     ``window_label`` separates runs over different parts of the same video - the two halves of a game, say. Stored
     meta refuses a different window in the same directory (correctly), so each window needs its own directory; the
     label must be filename-safe, and :meth:`soccer_analytics.analysis.game.GameRecord.window_label` produces one.
+
+    A ``game.json`` manifest keys its segments by the game id instead of a file stat: the id already carries the
+    clips' total size, so a replaced clip is still a different game.
     """
-    video_path = Path(video_path)
-    size = video_path.stat().st_size
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in video_path.stem)
-    name = f"{safe}_{size}"
+    source = as_source(video_path)
+    name = f"{source.key_name}_{source.key_size}" if source.key_size else source.key_name
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
     if window_label:
-        name = f"{name}__{window_label}"
-    return Path(root) / name
+        safe = f"{safe}__{window_label}"
+    return Path(root) / safe
 
 
 def chunk_path(directory: Path, index: int) -> Path:
@@ -176,10 +187,10 @@ def read_status(directory: Path) -> dict | None:
 
 
 def resolve_window(start_s: float, duration_s: float | None, source_duration_s: float) -> tuple[float, float]:
-    """The analysed ``[start, end)`` window in source seconds.
+    """The analyzed ``[start, end)`` window in source seconds.
 
     ``duration_s`` of ``None`` or ``0`` means "to the end of the video from the offset" - the dashboard's default,
-    so picking a video and pressing run analyses everything unless a shorter length is typed in.
+    so picking a video and pressing run analyzes everything unless a shorter length is typed in.
     """
     start = max(0.0, float(start_s))
     source_end = max(0.0, float(source_duration_s))
@@ -228,12 +239,12 @@ def detect_people(model, frame: np.ndarray, config: SegmentConfig, ignore: np.nd
     out = []
     height, width = frame.shape[:2]
     for (x1, y1, x2, y2), conf in zip(boxes, confs):
-        if y2 - y1 < MIN_PERSON_HEIGHT_PX * width / DETECT_WIDTH:
+        if y2 - y1 < MIN_PERSON_HEIGHT_PX * width / FLOOR_WIDTH:
             continue
         foot_x, foot_y = int(np.clip((x1 + x2) / 2, 0, width - 1)), int(np.clip(y2 - 1, 0, height - 1))
         if ignore[foot_y, foot_x] == 0:  # the box's foot sits on the logo/clock overlay
             continue
-        out.append((x1 / width, y1 / width, x2 / width, y2 / width, float(conf)))  # normalised by frame width
+        out.append((x1 / width, y1 / width, x2 / width, y2 / width, float(conf)))  # normalized by frame width
     return out
 
 
@@ -265,7 +276,7 @@ def track_people(model, frame: np.ndarray, config: SegmentConfig, ignore: np.nda
     out = []
     height, width = frame.shape[:2]
     for (x1, y1, x2, y2), conf, tid in zip(boxes, confs, ids):
-        if y2 - y1 < MIN_PERSON_HEIGHT_PX * width / DETECT_WIDTH:
+        if y2 - y1 < MIN_PERSON_HEIGHT_PX * width / FLOOR_WIDTH:
             continue
         foot_x, foot_y = int(np.clip((x1 + x2) / 2, 0, width - 1)), int(np.clip(y2 - 1, 0, height - 1))
         if ignore[foot_y, foot_x] == 0:  # the box's foot sits on the logo/clock overlay
@@ -274,7 +285,7 @@ def track_people(model, frame: np.ndarray, config: SegmentConfig, ignore: np.nda
     return out
 
 
-def analyse_segment(
+def analyze_segment(
     video_path: str | Path,
     out_dir: str | Path,
     *,
@@ -285,18 +296,28 @@ def analyse_segment(
     should_stop=lambda: False,
     on_progress=lambda status: None,
 ) -> dict:
-    """Runs (or resumes) Stage A for one segment. Returns the final status dict."""
+    """Runs (or resumes) Stage A for one segment. Returns the final status dict.
+
+    ``video_path`` is a video file, or a ``game.json`` manifest: both are read through the clip-aware source
+    resolver, so a game that was never merged analyzes exactly like a single file, across its clip joins.
+    """
     config = config or SegmentConfig()
-    video_path, out_dir = Path(video_path), Path(out_dir)
+    source = as_source(video_path)
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    probe = probe_video(video_path)
+    probe = probe_source(source)
+    if not config.detect_width:
+        # Full resolution: decode and detect at the source's own width, which is what "4K detection" means for a
+        # 4K recording. The resolved number goes into meta, so resuming, the kit refresh and the dashboard's
+        # conflict check all see the width that was actually used - not the sentinel 0.
+        config = replace(config, detect_width=probe.width)
     start_s, end_s = resolve_window(start_s, duration_s, probe.duration_s)
     total_frames = max(1, int((end_s - start_s) * config.fps))
     total_chunks = -(-total_frames // config.chunk_frames)
 
     meta = {
         "schema": SCHEMA_VERSION,
-        "video": str(video_path),
+        "video": source.spec,
         "width": probe.width,
         "height": probe.height,
         "source_fps": probe.fps,
@@ -352,8 +373,8 @@ def analyse_segment(
     # boundary instead of measuring the first new frame against itself.
     frame_step = 1.0 / config.fps
     reader_start = start_s + first_chunk * config.chunk_frames / config.fps - resume_overlap * frame_step
-    reader = FFmpegFrameReader(
-        video_path, fps=config.fps, width=config.detect_width,
+    reader = open_reader(
+        source, fps=config.fps, width=config.detect_width,
         start_s=max(0.0, reader_start), duration_s=end_s - max(0.0, reader_start),
     )
     ignore_mask = None
@@ -442,10 +463,10 @@ class SegmentData:
     time: np.ndarray  # (F,) source seconds
     ok: np.ndarray  # (F,)
     inlier: np.ndarray  # (F,)
-    step: np.ndarray  # (F, 3, 3) raw normalised step (last good frame -> this frame); identity if none
+    step: np.ndarray  # (F, 3, 3) raw normalized step (last good frame -> this frame); identity if none
     focal: np.ndarray  # (F,) chain focal at analysis time
     det_frame: np.ndarray  # (D,) global frame index
-    det_box: np.ndarray  # (D, 4) x1,y1,x2,y2 normalised by frame width
+    det_box: np.ndarray  # (D, 4) x1,y1,x2,y2 normalized by frame width
     det_conf: np.ndarray  # (D,)
     det_kit: np.ndarray  # (D, DESCRIPTOR_SIZE)
     det_track: np.ndarray  # (D,) BoT-SORT identity, -1 where the tracker had none (v1 chunks, or a fresh track)

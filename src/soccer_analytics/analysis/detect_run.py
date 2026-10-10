@@ -1,7 +1,7 @@
 """Run the event detectors against everything a match has on disk.
 
 The detectors themselves are pure (``event_detection.detect_events``); this module is the wiring that loads a
-match's artefacts - the replay payload's player tracks, the ball scan's positions projected through the segment's
+match's artifacts - the replay payload's player tracks, the ball scan's positions projected through the segment's
 camera chain, the pitch calibration, the recorded whistles and the shirt numbers - and reconciles the result into
 the match's event log.
 
@@ -30,7 +30,7 @@ BALL_TRACK_FILE = "ball_track.json"  # written by scripts/run_ball_scan.py besid
 
 
 class MissingInput(Exception):
-    """A prerequisite artefact is missing; the message says which one and what to do about it."""
+    """A prerequisite artifact is missing; the message says which one and what to do about it."""
 
 
 def run_detection(
@@ -78,7 +78,7 @@ def run_detection(
     ball = project_ball_track(payload["frames"], calibration, q, focal)
     record = library.load(match_id)
     fps = float(segment.meta["fps"])
-    # Frame indices are within the analysed window, so the tracks' times need the window's own start offset -
+    # Frame indices are within the analyzed window, so the tracks' times need the window's own start offset -
     # the kick-off offset from Step 1. Without it every player-derived event lands `start_s` too early.
     players = player_tracks_from_replay(replay, fps, float(segment.meta.get("start_s", 0.0)))
     times = np.asarray(segment.time, dtype=np.float64)

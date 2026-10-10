@@ -70,7 +70,7 @@ def test_a_different_kit_is_not_stitched() -> None:
     detections, _, assignment = _two_fragments(KIT_A, KIT_B, start_b=24, x_b=12.0)
     assert len(assignment.tracks) == 2
     stitched = _stitch_tracks(detections, assignment)
-    assert len(stitched.tracks) == 2, "colour evidence must veto a spatial coincidence"
+    assert len(stitched.tracks) == 2, "color evidence must veto a spatial coincidence"
 
 
 def test_overlapping_tracks_are_never_stitched() -> None:

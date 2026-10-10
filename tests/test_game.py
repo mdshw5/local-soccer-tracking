@@ -228,11 +228,11 @@ def test_a_relative_video_path_still_finds_its_game(tmp_path: Path, monkeypatch:
     assert find_for_video(str(tmp_path / "game_16-28-37.784.mp4"), tmp_path / "games") is not None
 
 
-def _write_clip(path: Path, seconds: int, colour: int, fps: int = 10) -> None:
+def _write_clip(path: Path, seconds: int, color: int, fps: int = 10) -> None:
     with VideoWriter(path, fps=float(fps), width=160, height=90) as writer:
         for index in range(seconds * fps):
             frame = np.zeros((90, 160, 3), dtype=np.uint8)
-            frame[:, :] = (colour, index % 255, 40)
+            frame[:, :] = (color, index % 255, 40)
             writer.write(frame)
 
 

@@ -10,11 +10,11 @@ from __future__ import annotations
 import json
 
 from soccer_analytics.dashboard.reports import (
-    colours_were_recorded,
+    colors_were_recorded,
     is_default_team_name,
     momentum_on_window_clock,
     report_from_library,
-    team_colours,
+    team_colors,
     team_name,
 )
 
@@ -61,7 +61,7 @@ def test_report_without_momentum_still_loads() -> None:
 
 
 def test_momentum_minutes_shift_onto_the_window_clock() -> None:
-    """The strip draws everything on the analysed window's clock; Stage B's buckets are on the recording's.
+    """The strip draws everything on the analyzed window's clock; Stage B's buckets are on the recording's.
 
     On the real game the window starts at 9:00, so without the shift the curve sat nine minutes to the right of
     the events it belongs beside. Minute keys stay numeric after the shift - the window boundary can sit
@@ -90,7 +90,7 @@ def test_a_team_is_called_by_its_name_else_by_its_number() -> None:
     assert team_name(7, ["Reds", "Blues"]) == "Team 8", "an unexpected index still reads as a team"
 
 
-def test_placeholders_are_recognised_so_a_colour_name_can_replace_them() -> None:
+def test_placeholders_are_recognized_so_a_color_name_can_replace_them() -> None:
     """The suggestion only fills a placeholder: a team someone has already named keeps its name."""
     for placeholder in ("", "   ", "Team A", "team b", "Team 1", "team 2"):
         assert is_default_team_name(placeholder), placeholder
@@ -98,25 +98,25 @@ def test_placeholders_are_recognised_so_a_colour_name_can_replace_them() -> None
         assert not is_default_team_name(chosen), chosen
 
 
-def test_team_colours_are_read_back_in_team_order() -> None:
+def test_team_colors_are_read_back_in_team_order() -> None:
     """The swatch and the suggested name both come from the report's own team rows."""
     rows = [
         {"team": 1, "kit_rgb": [30, 30, 200]},
         {"team": 0, "kit_rgb": [200, 30, 30]},
     ]
-    assert team_colours(rows) == [(200, 30, 30), (30, 30, 200)]
-    # A report whose kits could not be separated, and one that never recorded colours at all.
-    assert team_colours([{"team": 0, "kit_rgb": None}, {"team": 1}]) == [None, None]
-    assert team_colours([]) == [None, None]
+    assert team_colors(rows) == [(200, 30, 30), (30, 30, 200)]
+    # A report whose kits could not be separated, and one that never recorded colors at all.
+    assert team_colors([{"team": 0, "kit_rgb": None}, {"team": 1}]) == [None, None]
+    assert team_colors([]) == [None, None]
     # A malformed value must not crash the page - it is just nothing to show.
-    assert team_colours([{"team": 0, "kit_rgb": "red"}]) == [None, None]
+    assert team_colors([{"team": 0, "kit_rgb": "red"}]) == [None, None]
     # Extra or missing rows: the two teams are what the page asks for, in order.
-    assert team_colours([{"team": 0, "kit_rgb": [1, 2, 3]}, {"team": 2, "kit_rgb": [9, 9, 9]}]) == [(1, 2, 3), None]
+    assert team_colors([{"team": 0, "kit_rgb": [1, 2, 3]}, {"team": 2, "kit_rgb": [9, 9, 9]}]) == [(1, 2, 3), None]
 
 
 def test_an_old_report_is_told_apart_from_one_that_could_not_separate_the_kits() -> None:
     """The advice differs: rebuild the report, or accept that the kits were not separable."""
     old = [{"team": 0, "name": "Team 1"}, {"team": 1, "name": "Team 2"}]
     empty = [{"team": 0, "name": "Team 1", "kit_rgb": None}, {"team": 1, "name": "Team 2", "kit_rgb": None}]
-    assert not colours_were_recorded(old)
-    assert colours_were_recorded(empty)
+    assert not colors_were_recorded(old)
+    assert colors_were_recorded(empty)

@@ -45,7 +45,7 @@ def _make_video(path: Path) -> Path:
 def _detector(state: dict):  # noqa: ANN202 - closure around the fake ball's position
     """A fake detector: a ball moving slowly right, returned regardless of the crop.
 
-    Returns absolute frame-normalised coordinates, as the production detector does. Also records what it saw, so
+    Returns absolute frame-normalized coordinates, as the production detector does. Also records what it saw, so
     the test can check the overlay regions were blanked before it was called.
     """
     state.setdefault("seen", [])
@@ -93,7 +93,7 @@ def test_the_scan_writes_a_track_and_reports_to_the_status_file(tmp_path: Path) 
 
     status = json.loads((out / module.STATUS_FILE).read_text())
     assert status["state"] == "done" and status["progress"] == 1.0
-    # The terminal status carries the coverage, so the dashboard can summarise the scan without reading the (large)
+    # The terminal status carries the coverage, so the dashboard can summarize the scan without reading the (large)
     # result file: how much of the game the ball was actually seen on is the number that says whether to trust it.
     assert status["counts"] == payload["counts"]
     assert status["scanned"] == FRAMES and status["total_frames"] == FRAMES
@@ -139,7 +139,7 @@ def test_the_checkpoint_carries_the_tracker_state(tmp_path: Path) -> None:
     """The resumed run must continue the *same* track: the checkpoint stores the tracker, not just records.
 
     A fresh tracker would still find the ball, so 'it works' is not the test - the test is that the state on disk
-    is the tracker's own serialisation and that resuming from it tracks without a hiccup (no coast, no lost).
+    is the tracker's own serialization and that resuming from it tracks without a hiccup (no coast, no lost).
     """
     module = _script()
     video = _make_video(tmp_path / "tiny.mp4")

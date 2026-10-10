@@ -1,7 +1,7 @@
 """Match events: what the audio can tell us, and what only a human can.
 
 The whistle is the one match event that is reliably detectable from this footage. It is a narrowband tone, so it is
-found by tracking how much a single frequency bin stands out from its neighbourhood in the 2-4.5 kHz band over time,
+found by tracking how much a single frequency bin stands out from its neighborhood in the 2-4.5 kHz band over time,
 rather than by loudness - on the real sample the whole match is dominated by speech near the microphone, and a
 loudness threshold flagged nothing at all.
 
@@ -40,10 +40,10 @@ _PEAK_RATIO_K = 6.0  # robust sigmas above the match's own baseline
 # It is a *relative* measure, so it does not care about the recording level.
 #
 # The default sits at the bottom of that gap rather than in the middle of it, and the reason is the camera's
-# position: it is on the sideline, so a whistle blown in the far half arrives far quieter than one blown five metres
+# position: it is on the sideline, so a whistle blown in the far half arrives far quieter than one blown five meters
 # away - the same blast can differ by 30x on distance alone. A stricter gate would drop exactly the far-half
 # whistles, which are the ones on the pitch being filmed. Better to report a few more and let the level in the note
-# tell the user which is which; raise it for a venue where the neighbours dominate.
+# tell the user which is which; raise it for a venue where the neighbors dominate.
 MIN_PROMINENCE = 50.0
 
 # Below this the recording is effectively silent and "prominence" would be a ratio against nothing.
@@ -54,7 +54,7 @@ _SILENCE_FLOOR = 1e-9
 # Loudness and tonality alone cannot separate a whistle from a coach's yell: a shouted vowel has strong harmonics up
 # in the whistle band, so it passes the prominence gate. But a shout is *voiced* - its energy is dominated by the
 # harmonics of the speaker's pitch (100-300 Hz) and their formants, all well below the whistle band - while a
-# whistle is a lone tone with almost nothing down there. Measured on synthesised shouts (f0 120/190/300 Hz, formants
+# whistle is a lone tone with almost nothing down there. Measured on synthesized shouts (f0 120/190/300 Hz, formants
 # in the band) that all cleared the prominence gate: 53-67% of their energy sat below 1.2 kHz, against 0% for a pure
 # tone. On the real footage the loudest blasts (up to 11000x the match level) measure 0.0-0.4, while the candidates
 # that sound like yelling measure 0.7-0.9. So a candidate whose median energy share below the ceiling is at least
@@ -82,7 +82,7 @@ VOICE_SHARE_MAX = 0.5
 # threshold sits in that wide gap rather than on the 1.9-2.0 knife edge two of the candidates sit on: the cost of
 # keeping a candidate that turns out to be a call is one review click, and the cost of dropping a real whistle is
 # a stoppage nobody ever sees. The three the gate does not catch are pure high tones with nothing below them, which
-# is what a distant whistle on a neighbouring pitch also looks like: one microphone cannot tell those apart, and
+# is what a distant whistle on a neighboring pitch also looks like: one microphone cannot tell those apart, and
 # they are the reviewer's call.
 LOW_GAIN_MAX = 3.0
 LOW_GAIN_BAND_HZ = (150.0, 1500.0)
@@ -249,7 +249,7 @@ def detect_whistles(
     range below it (so a coach's yell is not reported as a whistle); and the blast must not drag the region *below*
     the band up with it, which is what a shout or a bird of prey's call does and a lone tone does not
     (:data:`LOW_GAIN_MAX` - the gate a user's own true/false labels produced). Without the loudness gate this
-    reported 191 candidates in five minutes - mostly whistles from neighbouring pitches and shouts - because a
+    reported 191 candidates in five minutes - mostly whistles from neighboring pitches and shouts - because a
     tonal blip from 30 m away looks exactly like a referee's whistle, only quieter. ``min_prominence`` is that
     gate, in multiples of the match's own median band level; ``max_voice_share`` and ``max_low_gain`` are the two
     "is it a voice or a call" gates, and ``None`` switches either off.
@@ -263,7 +263,7 @@ def detect_whistles(
     frames = np.lib.stride_tricks.sliding_window_view(samples, WINDOW)[::HOP]
     # The transform is the whole cost here - a full game is over half a million windows - so it runs in blocks.
     # That is what a progress bar can report on, and it also stops the windowed copy of the signal from
-    # materialising in one go (2.5 GB on a full game). The numbers are those of the single-call version.
+    # materializing in one go (2.5 GB on a full game). The numbers are those of the single-call version.
     spectra = np.empty((frames.shape[0], WINDOW // 2 + 1), dtype=np.float32)
     for start_row in range(0, frames.shape[0], FFT_BLOCK):
         block = frames[start_row : start_row + FFT_BLOCK]
@@ -383,7 +383,7 @@ def whistles_to_events(whistles: list[Whistle], *, video: str | Path = "") -> li
 
 @dataclass
 class EventLog:
-    """All events for a match, human and audio-derived, kept in one place and serialisable."""
+    """All events for a match, human and audio-derived, kept in one place and serializable."""
 
     events: list[Event] = field(default_factory=list)
 

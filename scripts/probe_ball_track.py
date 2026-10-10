@@ -7,7 +7,7 @@ of play, including the moments the ball leaves the picture?
 
 It writes:
 
-* ``track.json`` - one record per frame (source time, state, normalised position);
+* ``track.json`` - one record per frame (source time, state, normalized position);
 * ``mark_*.jpg`` - every few seconds, the frame with the recorded position drawn (green tracking, amber coasting,
   red out-of-view), so the trail can be checked against what is actually on screen;
 * a ``sheet.jpg`` contact sheet of those marks, for a quick look.
@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from soccer_analytics.analysis.ball import BallTrack, blank_overlays  # noqa: E402
 from soccer_analytics.analysis.stage_a import load_segment  # noqa: E402
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader  # noqa: E402
+from soccer_analytics.ingest.source import open_reader  # noqa: E402
 
 def default_game() -> str:
     """The video to probe unless ``--video`` says otherwise.
@@ -65,7 +65,7 @@ WINDOW_IMGSZ = 1280
 FULL_IMGSZ = 2560
 MARK_EVERY_SECONDS = 3.0  # wall-clock gap between the marked stills
 
-COLOURS = {"tracking": (80, 220, 80), "coasting": (60, 190, 240), "out_of_view": (70, 70, 230), "lost": (150, 150, 150)}
+COLORS = {"tracking": (80, 220, 80), "coasting": (60, 190, 240), "out_of_view": (70, 70, 230), "lost": (150, 150, 150)}
 
 
 def detections_in(model, frame: np.ndarray, imgsz: int, origin: tuple[int, int], width: int, world: bool) -> list:
@@ -111,7 +111,7 @@ def main() -> None:
     t0 = time.perf_counter()
     scans = {"window": 0, "full": 0}
 
-    reader = FFmpegFrameReader(Path(args.video), fps=fps, width=3840, start_s=args.start_s, duration_s=args.duration_s)
+    reader = open_reader(args.video, fps=fps, width=3840, start_s=args.start_s, duration_s=args.duration_s)
     for count, (t, frame) in enumerate(reader.frames()):
         idx = int(round((t - float(segment.time[0])) * fps))
         step = segment.step[idx] if 0 <= idx < len(segment.step) else None
@@ -119,7 +119,7 @@ def main() -> None:
 
         predicted = track.predict(step)
         # The window scan carries the track while the ball is plausibly near its prediction: tracking, or one
-        # coasted frame (the prediction includes the learned velocity, so a pass stays around the window's centre;
+        # coasted frame (the prediction includes the learned velocity, so a pass stays around the window's center;
         # measured on the real game, a kicked ball moves ~0.1 frame-widths *per frame* at onset, which a 1600 px
         # window absorbs for a frame or two). Beyond that the ball could be anywhere - a kicked ball, a ball out of
         # frame - and only a full-frame scan can find it and re-learn the velocity; a periodic full scan is the
@@ -148,14 +148,14 @@ def main() -> None:
             if state["u"] is not None:
                 px = int(state["u"] * 1920)
                 py = int(state["v"] * 1920)
-                colour = COLOURS[state["status"]]
-                cv2.circle(small, (px, py), 40, colour, 3)
-                cv2.drawMarker(small, (px, py), colour, cv2.MARKER_CROSS, 40, 2)
+                color = COLORS[state["status"]]
+                cv2.circle(small, (px, py), 40, color, 3)
+                cv2.drawMarker(small, (px, py), color, cv2.MARKER_CROSS, 40, 2)
                 cv2.putText(small, f"{t:.1f}s {state['status']} {state['conf']:.2f}", (px + 46, py - 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, colour, 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2)
             else:
                 cv2.putText(small, f"{t:.1f}s {state['status']}", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
-                            COLOURS["lost"], 2)
+                            COLORS["lost"], 2)
             cv2.imwrite(str(out_dir / f"mark_{count:04d}.jpg"), small)
             marks.append(small)
 

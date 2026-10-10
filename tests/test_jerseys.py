@@ -1,4 +1,4 @@
-"""Jersey-number extraction: the crop maths and the per-track vote, without a model.
+"""Jersey-number extraction: the crop math and the per-track vote, without a model.
 
 OCR itself needs a GPU and downloaded weights, so what is tested here is everything that decides whether a reading
 exists and which number a track gets - including that a track with disagreeing readings stays unassigned.
@@ -37,7 +37,7 @@ def test_crop_torso_rejects_boxes_that_leave_nothing() -> None:
 def test_sanitize_digits_keeps_plausible_shirt_numbers() -> None:
     assert sanitize_digits("26") == "26"
     assert sanitize_digits(" 7 ") == "7"
-    assert sanitize_digits("07") == "7"  # leading zeros are OCR artefacts, not shirt numbers
+    assert sanitize_digits("07") == "7"  # leading zeros are OCR artifacts, not shirt numbers
     assert sanitize_digits("0") == ""
     assert sanitize_digits("123") == ""
     assert sanitize_digits("1a4") == "14"

@@ -14,7 +14,7 @@ Workflow, in the order it appears on screen:
    the review queue, the detectors' settings and the highlight reels sit directly under the pitch, so tagging
    happens while the game is on screen rather than in a section of its own further down the page.
 
-Every number on the page is either measured or explicitly labelled as a guess or a manual tag. Where a metric is
+Every number on the page is either measured or explicitly labeled as a guess or a manual tag. Where a metric is
 beyond what the footage (and the scans built on it) can honestly support, the page says so rather than inventing one.
 """
 
@@ -66,16 +66,17 @@ from soccer_analytics.analysis.library import (
     analysis_dir_for,
     discover_videos,
     segments_root_for,
+    upgrade_replay_payload,
     video_roots,
 )
-from soccer_analytics.analysis.kit import colour_hex, colour_name, suggest_team_name
+from soccer_analytics.analysis.kit import color_hex, color_name, suggest_team_name
 from soccer_analytics.analysis.jerseys import merge_numbers
 from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
 from soccer_analytics.analysis.stage_a import SegmentConfig, load_segment, read_status, resolve_window, segment_dir_for
 from soccer_analytics.geometry.gimbal_motion import segment_has_log, segment_pose_source
 from soccer_analytics.dashboard.pitch_clicks import (
     LANDMARK_HELP,
-    actual_centre,
+    actual_center,
     canvas_scale,
     clamp01,
     frame_change,
@@ -90,7 +91,7 @@ from soccer_analytics.dashboard.pitch_clicks import (
     parse_result,
     pitch_marking_polylines,
     pitch_overlay,
-    point_centre,
+    point_center,
     points_in_crop,
     projected_landmarks,
     repeated_labels_within_a_frame,
@@ -101,11 +102,11 @@ from soccer_analytics.dashboard.pitch_clicks import (
 from soccer_analytics.dashboard import timeline
 from soccer_analytics.dashboard.reports import (
     DEFAULT_TEAM_NAMES,
-    colours_were_recorded,
+    colors_were_recorded,
     is_default_team_name,
     momentum_on_window_clock,
     report_from_library,
-    team_colours,
+    team_colors,
     team_name,
 )
 from soccer_analytics.dashboard.replay import (
@@ -127,7 +128,8 @@ from soccer_analytics.geometry.pitch_calibration import (
     diagnose_fit,
     format_scale_note,
 )
-from soccer_analytics.ingest.ffmpeg_reader import grab_frame, probe_video
+from soccer_analytics.ingest.ffmpeg_reader import grab_frame
+from soccer_analytics.ingest.source import probe_source
 
 # Everything the tool computes for a match now lives beside the footage, in an ``analysis/<id>`` directory
 # (analysis.library builds the paths); the old data/matches root is still listed until migrated.
@@ -169,7 +171,7 @@ st.set_page_config(page_title="Match analysis", layout="wide")
 def _location_label(path: Path) -> str:
     """A short, readable name for where something lives: under a footage root when possible, else absolute.
 
-    Analyses live beside the footage now rather than in the repository, so "relative to the repo" is no longer
+    Analyzes live beside the footage now rather than in the repository, so "relative to the repo" is no longer
     the right display rule; the root's own name ("Xbot/2026-10-03/analysis/...") tells the user which disk and
     which match folder holds the directory, which is what they need to find it themselves.
     """
@@ -243,7 +245,7 @@ def landmark_clicker(
     overview: np.ndarray | None,
     features: list[dict],
     markers: list[tuple[float, float]],
-    centre: tuple[float, float],
+    center: tuple[float, float],
     zoom: float,
     box: tuple[int, int, int, int],
     frame_size: tuple[int, int],
@@ -272,7 +274,7 @@ def landmark_clicker(
     canvas = crop if scale == 1.0 else cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     frame_width, frame_height = frame_size
     x0, y0, _w, _h = box
-    placed_x, placed_y = actual_centre(box, frame_size)
+    placed_x, placed_y = actual_center(box, frame_size)
     result = ANNOTATION_COMPONENT(
         frame_data=_encode(canvas),
         # Only the still-frame fallback needs the whole frame as an image; with a proxy the video is the picture.
@@ -284,7 +286,7 @@ def landmark_clicker(
         mount_nonce=int(mount_nonce),
         # The whole-frame viewport is scrubbed and played in the browser, so Python cannot draw the pitch overlay
         # onto frames it never sees. Instead it sends sampled pitch->pixel homographies plus the markings in pitch
-        # metres, and the component projects the overlay itself for whatever frame is on screen - and re-derives it
+        # meters, and the component projects the overlay itself for whatever frame is on screen - and re-derives it
         # from the same arguments whenever the calibration changes, so a refit redraws immediately.
         overlay_homographies=list(overlay_homographies or []),
         overlay_polylines=list(overlay_polylines or []),
@@ -293,8 +295,8 @@ def landmark_clicker(
         marker_points=[[float(u), float(v)] for u, v in markers],
         width=int(canvas.shape[1]),
         height=int(canvas.shape[0]),
-        centre_x=float(centre[0]),
-        centre_y=float(centre[1]),
+        center_x=float(center[0]),
+        center_y=float(center[1]),
         zoom=float(zoom),
         actual_x=float(placed_x),
         actual_y=float(placed_y),
@@ -337,7 +339,7 @@ def _timeline_media_url(proxy: Path, coordinates: str) -> str:
 def _replay_media_url(path: Path) -> str:
     """Serve the replay JSON through the media endpoint, like the timeline proxy.
 
-    The replay is megabytes of per-frame points. Sending it through the component's *arguments* would serialise it
+    The replay is megabytes of per-frame points. Sending it through the component's *arguments* would serialize it
     onto the Streamlit websocket on every rerun, so the component is handed a URL and fetches it once. The file must
     be re-registered every run for the same reason as the proxy: Streamlit sweeps media a run did not mention.
     """
@@ -417,14 +419,14 @@ def _apply_quick_tags(
 ) -> None:
     """Store the tags the playback's own buttons sent, then redraw with the new markers on the strip.
 
-    The component's value is sticky: it comes back on every later run until the component sees an acknowledgement,
-    so only tags newer than the newest already stored are applied. The acknowledgement is written before the
+    The component's value is sticky: it comes back on every later run until the component sees an acknowledgment,
+    so only tags newer than the newest already stored are applied. The acknowledgment is written before the
     rerun, which is what clears the component's pending list and stops a tag being stored twice. A tag is stamped
     with the playback's own second when the button was pressed - not with the moment the round trip finishes - so
     tagging while watching lands on what was on screen.
 
     A page that reconnects after a server restart re-sends the component's sticky value, and the new session has
-    no acknowledgement to compare against - so the store is also idempotent: a press that is already on the
+    no acknowledgment to compare against - so the store is also idempotent: a press that is already on the
     timeline (same type, team, recording and second) is skipped rather than duplicated.
     """
     if not isinstance(tag_result, dict) or str(tag_result.get("action")) != "tag":
@@ -445,7 +447,7 @@ def _apply_quick_tags(
                 )
             )
         except (TypeError, ValueError):
-            continue  # a malformed tag is dropped, but its sequence still advances the acknowledgement
+            continue  # a malformed tag is dropped, but its sequence still advances the acknowledgment
     if newest <= int(st.session_state.get(ack_key, 0)):
         return  # nothing new: the sticky value was already applied on an earlier run
     st.session_state[ack_key] = newest
@@ -479,51 +481,51 @@ def _apply_quick_tags(
 
 
 def _team_name_editor(library: MatchLibrary, match_id: str, payload: dict) -> list[str]:
-    """Show each team's kit colour and let it be named; returns the names to use from here on.
+    """Show each team's kit color and let it be named; returns the names to use from here on.
 
     Everything the pipeline writes calls the teams 0 and 1 (the more red kit is 0), which nobody can picture. The
-    report carries the colour the clustering measured for each of them, so the swatch is the anchor: a person
+    report carries the color the clustering measured for each of them, so the swatch is the anchor: a person
     names "the red team", not "team 0", and from then on the table, the chart, the replay and the tags agree. The
-    measured colour also suggests the name itself ("Reds", "Dark blues"), which turns naming into a press and an
+    measured color also suggests the name itself ("Reds", "Dark blues"), which turns naming into a press and an
     edit rather than a blank field - and a team that already has a name keeps it, because the suggestion only ever
     fills a placeholder.
     """
     record = library.load(match_id)
     stored = list(record.team_names)[:2] + list(DEFAULT_TEAM_NAMES[len(record.team_names) :])
-    # A report written before the colours were recorded has no such field at all; one that has the field but no
+    # A report written before the colors were recorded has no such field at all; one that has the field but no
     # value is a match whose kits the clustering could not separate. The two need different advice.
     team_rows = list(payload.get("teams") or [])
-    colours_recorded = colours_were_recorded(team_rows)
-    colours = team_colours(team_rows)
-    suggestions = [suggest_team_name(rgb) if rgb is not None else "" for rgb in colours]
+    colors_recorded = colors_were_recorded(team_rows)
+    colors = team_colors(team_rows)
+    suggestions = [suggest_team_name(rgb) if rgb is not None else "" for rgb in colors]
 
     st.subheader("Teams")
     st.caption(
-        "The two teams are told apart by kit colour, and each keeps the same number every time this report is built. "
+        "The two teams are told apart by kit color, and each keeps the same number every time this report is built. "
         "Name them here - the table below, the momentum chart, the replay and the event tags then use the names."
     )
     for index, column in enumerate(st.columns(2)):
         with column:
-            rgb = colours[index]
+            rgb = colors[index]
             if rgb is not None:
                 st.color_picker(
-                    f"Team {index + 1} kit colour",
-                    value=colour_hex(rgb),
+                    f"Team {index + 1} kit color",
+                    value=color_hex(rgb),
                     disabled=True,
                     key=f"kit_swatch::{match_id}::{index}",
-                    help="Measured from the match footage: the average colour of the kit pixels of the players the clustering put in this team.",
+                    help="Measured from the match footage: the average color of the kit pixels of the players the clustering put in this team.",
                 )
-                looks = f"Looks {colour_name(rgb)} in the footage."
+                looks = f"Looks {color_name(rgb)} in the footage."
                 if suggestions[index] and is_default_team_name(stored[index]):
                     looks += f" A name for that might be **{suggestions[index]}**."
                 st.caption(looks)
-            elif not colours_recorded:
+            elif not colors_recorded:
                 st.caption(
-                    f"Team {index + 1}: this report was built before kit colours were recorded, so there is no "
+                    f"Team {index + 1}: this report was built before kit colors were recorded, so there is no "
                     "swatch or suggested name to show yet - build the report again below and they appear."
                 )
             else:
-                st.caption(f"Team {index + 1}: no kit colour recorded - the kits were not separable here.")
+                st.caption(f"Team {index + 1}: no kit color recorded - the kits were not separable here.")
 
     with st.form(f"team_names::{match_id}"):
         for index in (0, 1):
@@ -560,7 +562,7 @@ def _team_name_editor(library: MatchLibrary, match_id: str, payload: dict) -> li
 def _load_replay_cached(path: str, mtime_ns: int) -> dict:
     """Parse the replay once per file version; it is re-read on every rerun otherwise."""
     del mtime_ns
-    return json.loads(Path(path).read_text())
+    return upgrade_replay_payload(json.loads(Path(path).read_text()))
 
 
 BALL_STATUS_STALE_S = 300.0
@@ -593,7 +595,7 @@ def _ball_scan_alive(segment_dir: Path) -> bool:
 def _ball_track_for_replay(
     segment_dir: Path, calibration: PitchCalibration, q: np.ndarray, focal: np.ndarray
 ):  # noqa: ANN201 - (xy (F,2), measured (F,)) from project_ball_track, or None
-    """The segment's ball scan projected into pitch metres, or None when it has not been scanned.
+    """The segment's ball scan projected into pitch meters, or None when it has not been scanned.
 
     A partial scan is used as it stands: the replay draws the frames the scan has reached, and the scan's own
     status line says whether it is finished. A scan that lands after the report was built shows up on the next
@@ -655,7 +657,7 @@ def _build_report_and_replay(
             report.players,
             record.team_names,
             ball=ball,
-            team_colours=[metrics.kit_rgb for metrics in report.teams],
+            team_colors=[metrics.kit_rgb for metrics in report.teams],
             camera_xy=detections.camera_xy,
             roles=roles,
             attack=attack,
@@ -678,7 +680,7 @@ def _build_report_and_replay(
             "notes": report.notes,
             "pitch": [length_m, width_m],
             "detections_used": report.detections_used,
-            "frames_analysed": report.frames_analysed,
+            "frames_analyzed": report.frames_analyzed,
         }
         library.save_report(match_id, st.session_state["report"])
         library.save_replay(match_id, replay, boxes=track_boxes(report.players))
@@ -812,7 +814,7 @@ def _footage_moment(
     markers are, so the picker, the marker and the stream all agree on when the moment is.
 
     Returns ``(seek_to_s, seek_seq, index)``. ``seek_to_s`` is ``None`` when the selected moment lies outside the
-    analysed window (there is no second to jump to); ``seek_seq`` changes only when the button is pressed, and
+    analyzed window (there is no second to jump to); ``seek_seq`` changes only when the button is pressed, and
     the component acts on a changed sequence so an unrelated rerun never re-seeks. ``index`` is the selected
     event's position in the log - the review buttons under the pitch act on it - or ``None`` when there are no
     events at all.
@@ -850,7 +852,7 @@ def _footage_moment(
     event = event_log.events[index]
     moment = moment_for_event(event)
     # The moment on the strip's clock: its own recording time translated onto the game's and then onto the
-    # analysed window's - the same translation the strip's markers use, so a jump lands where the marker is.
+    # analyzed window's - the same translation the strip's markers use, so a jump lands where the marker is.
     on_game = (
         game_lib.game_time(game_record, moment.time_s, event.video)
         if game_record is not None and event.video
@@ -858,7 +860,7 @@ def _footage_moment(
     )
     strip_start = None if on_game is None else on_game - window_start
     strip_end = None if strip_start is None else strip_start + (moment.end_s - moment.start_s)
-    # The strip's clock runs 0..duration over the analysed window; a moment outside it has nothing to jump to.
+    # The strip's clock runs 0..duration over the analyzed window; a moment outside it has nothing to jump to.
     if strip_start is not None and (strip_end < 0 or strip_start > replay_duration_s):
         strip_start = strip_end = None
     seq_key = f"pitch_seek_seq::{match_id}"
@@ -872,14 +874,18 @@ def _footage_moment(
         ):
             st.session_state[seq_key] = int(st.session_state.get(seq_key, 0)) + 1
     if strip_start is None:
-        st.caption("This moment is outside the analysed window, so there is no second to jump to.")
+        st.caption("This moment is outside the analyzed window, so there is no second to jump to.")
     return strip_start, int(st.session_state.get(seq_key, 0)), index
 
 
 @st.cache_data(show_spinner=False)
 def probe_cached(video: str):  # noqa: ANN201 - VideoProbe, kept out of the import list of callers
-    """ffprobe once per video: the page re-renders on every gesture and every poll, and each probe is a process."""
-    return probe_video(video)
+    """ffprobe once per video: the page re-renders on every gesture and every poll, and each probe is a process.
+
+    A ``game.json`` manifest is probed through the clip-aware source: the size and rate come from the clips and
+    the duration from the manifest, which is the whole game - never the merged file that no longer exists.
+    """
+    return probe_source(video)
 
 
 def segment_fingerprint(segment_dir: Path, chunks: int) -> str:
@@ -994,12 +1000,12 @@ def _stage_a_status(segment_dir: Path, watch_key: str) -> None:
     previous = st.session_state.get(watch_key)
     st.session_state[watch_key] = state
     if status is None:
-        st.info("Not analysed yet.")
+        st.info("Not analyzed yet.")
     else:
         st.write(f"Stage A: **{state}**, {status.get('frames_done', 0)}/{status.get('total_frames', 0)} frames")
         if state == "running":
             fraction = status.get("frames_done", 0) / max(1, status.get("total_frames", 1))
-            detail = f"{status.get('fps', 0):.1f} analysed fps"
+            detail = f"{status.get('fps', 0):.1f} analyzed fps"
             eta = status.get("eta_s")
             if isinstance(eta, (int, float)) and eta > 0:
                 detail += f", about {_clock(float(eta))} to go"
@@ -1035,12 +1041,12 @@ def fit_from_clicks(
     segment,
     q: np.ndarray,
     focal: np.ndarray,
-    labelled: list[tuple[dict, str]],
+    labeled: list[tuple[dict, str]],
     land_table: dict[str, tuple[float, float]],
     length_m: float,
     width_m: float,
 ) -> PitchCalibration | None:
-    """Fit the calibration from the labelled clicks and save it; None when the fit failed.
+    """Fit the calibration from the labeled clicks and save it; None when the fit failed.
 
     Shared by the automatic refit and the manual button, so both do exactly the same thing: solve, store in the
     session, and write the calibration and its clicks to the match record. The caller reports the outcome - the
@@ -1049,8 +1055,8 @@ def fit_from_clicks(
     The rig's height is known (a fixed 4 m pole), so it is pinned rather than solved - one fewer degree of freedom
     for the clicks to pin down, which measurably tightens a four-click fit.
     """
-    landmarks = landmarks_from_points(labelled, land_table)
-    chain = {point["frame"]: (q[point["frame"]], float(focal[point["frame"]])) for point, _ in labelled}
+    landmarks = landmarks_from_points(labeled, land_table)
+    chain = {point["frame"]: (q[point["frame"]], float(focal[point["frame"]])) for point, _ in labeled}
     try:
         calibration = calibrate(
             landmarks, chain, segment.aspect, pose_source=segment_pose_source(segment), fixed_height_m=CAMERA_HEIGHT_M
@@ -1077,7 +1083,7 @@ def calibration_failure() -> str:
     return "Calibration failed - the clicks do not determine a camera. Check the labels."
 
 
-def fit_message(calibration: PitchCalibration, labelled: list[tuple[dict, str]]) -> str:
+def fit_message(calibration: PitchCalibration, labeled: list[tuple[dict, str]]) -> str:
     """What a successful fit says about itself: the RMS, and whether the drift got re-anchored."""
     message = f"Fit RMS error {calibration.rms_error_m:.2f} m."
     if calibration.drift is not None:
@@ -1085,7 +1091,7 @@ def fit_message(calibration: PitchCalibration, labelled: list[tuple[dict, str]])
             f" The chain is re-anchored at the {len(calibration.drift.frames)} clicked frame(s) - "
             "click landmarks later in the video to pin the drift there too."
         )
-    elif len({point["frame"] for point, _label in labelled}) > 1:
+    elif len({point["frame"] for point, _label in labeled}) > 1:
         message += (
             " No drift correction was fitted: it needs at least two moments with "
             f"{MIN_CLICKS_PER_ANCHOR} or more clicks each, and the moments without enough clicks "
@@ -1238,8 +1244,8 @@ def _load_replay_boxes_cached(path: str, mtime_ns: int) -> dict:
         return {}
 
 
-def _centred_clip_name(track_id: int, start_s: float, duration_s: float) -> str:
-    """A stable name for a centred clip, so re-cutting the same window reuses the file instead of re-encoding.
+def _centered_clip_name(track_id: int, start_s: float, duration_s: float) -> str:
+    """A stable name for a centered clip, so re-cutting the same window reuses the file instead of re-encoding.
 
     The framing command rate is part of the key: it *is* the pan's update rate (ffmpeg's ``sendcmd`` cannot
     interpolate), so a cached clip cut by a choppier planner must not be served after the planner is fixed -
@@ -1258,7 +1264,7 @@ def _appearance_thumbnail(
 ) -> Path | None:
     """One crop of an appearance, cut from the footage once and kept beside the match.
 
-    Seeing who an appearance is *is* the fastest way to recognise it - the point of the roster is typing a number
+    Seeing who an appearance is *is* the fastest way to recognize it - the point of the roster is typing a number
     against the right track, and a track id means nothing. One frame is decoded and its box cropped, which costs a
     single seek rather than a scan, and the JPEG is cached so looking again is free. Returns None when the frame
     cannot be read or the box has no size.
@@ -1273,7 +1279,7 @@ def _appearance_thumbnail(
     boxes = np.asarray(appearance.traj_box if appearance.traj_box is not None else np.zeros((0, 4)), dtype=np.float64)
     if len(times) == 0 or len(boxes) != len(times):
         return None
-    # The frame where the player is largest: a thumbnail exists to be recognised, and a big crop is recognisable.
+    # The frame where the player is largest: a thumbnail exists to be recognized, and a big crop is recognizable.
     heights = np.abs(boxes[:, 3] - boxes[:, 1])
     index = int(np.argmax(heights))
     frame = grab_frame(source, float(times[index]), width=960)
@@ -1300,7 +1306,7 @@ def identity_section(
     replay: dict,
     numbers: dict[int, dict],
 ) -> None:
-    """Unique players: group each person's appearances, and cut a clip centred on one of them.
+    """Unique players: group each person's appearances, and cut a clip centered on one of them.
 
     The grouping is exact and comes from what is *known* - the team plus the shirt number or name, typed in the
     roster or read by the shirt-number scan. It deliberately does not guess from appearance: measured on this
@@ -1326,7 +1332,7 @@ def identity_section(
     identities = identity_lib.identities_from_labels(appearances, numbers)
     team_names = library.load(match_id).team_names
     named = sum(1 for identity in identities if identity.grouped_by)
-    with st.expander("Unique players - and a clip centred on one of them", expanded=named > 0):
+    with st.expander("Unique players - and a clip centered on one of them", expanded=named > 0):
         # Numbers are attached to *tracks*, so a scan read against an older pitch fit describes tracks that may no
         # longer exist under those ids. Two checks say so - ids that have vanished from the report entirely, and a
         # scan saved before the calibration on disk - because "no numbers yet" and "numbers worn by the wrong
@@ -1403,7 +1409,7 @@ def identity_section(
         framed = chosen.traj_box is not None and len(chosen.traj_box) > 0
         if not framed:
             st.info(
-                "This report does not carry each player's position in the frame, so a centred clip cannot be cut "
+                "This report does not carry each player's position in the frame, so a centered clip cannot be cut "
                 "from it. Press **Build report** above and the appearances here will be clip-able."
             )
             return
@@ -1434,17 +1440,18 @@ def identity_section(
         with cut_col:
             st.write("")  # line the button up with the slider's caption
             cut = st.button(
-                "Cut the clip, centred on this player",
+                "Cut the clip, centered on this player",
                 key=f"identity_cut::{match_id}",
                 help=(
-                    "The clip is cut from the analysed video with a moving crop that follows this appearance, sized "
+                    "The clip is cut from the analyzed video with a moving crop that follows this appearance, sized "
                     "to the player's own height. Where the appearance has a gap of more than a couple of seconds "
                     "the clip stops rather than panning across a stretch nobody saw."
                 ),
             )
-        target = library.highlights_dir(match_id) / "centred" / _centred_clip_name(
-            chosen.track_id, chosen.first_t, duration
-        )
+        clip_name = _centered_clip_name(chosen.track_id, chosen.first_t, duration)
+        centered = library.highlights_dir(match_id) / "centered" / clip_name
+        legacy = library.highlights_dir(match_id) / "centred" / clip_name  # clips cut before the American spelling
+        target = centered if centered.exists() or not legacy.exists() else legacy
         if cut and not target.exists():
             bar = st.progress(0.0, text="Cutting the clip...")
             reporter = progress_reporter(bar, "Cutting the clip...")
@@ -1478,7 +1485,7 @@ def identity_section(
             covers = float(note.get("duration") or duration) if note.get("track") == chosen.track_id else duration
             st.caption(
                 f"`{target.name}` - {_clock(chosen.first_t)} to {_clock(chosen.first_t + covers)}, cropped to "
-                "follow this player, cut from the analysed video."
+                "follow this player, cut from the analyzed video."
                 + (
                     f" The clip stops there rather than following across a stretch nobody saw ({note['truncated']})."
                     if note.get("truncated")
@@ -1535,9 +1542,9 @@ def replay_section(
     # buckets; both are small, so they travel as component arguments and update without rebuilding the replay.
     #
     # The three things on the strip keep three different clocks, and all of them are brought onto the strip's own
-    # (0-based over the analysed window) here, in one place:
+    # (0-based over the analyzed window) here, in one place:
     # * an event's ``time_s`` is a time on the recording it was found in - the combined game for a detected event,
-    #   a single camera file for a whistle. The analysed window starts at ``segment.meta["start_s"]`` of *its own*
+    #   a single camera file for a whistle. The analyzed window starts at ``segment.meta["start_s"]`` of *its own*
     #   video, so a candidate from another recording is mapped through that file's own clock, or clipped off the
     #   strip when it does not lie inside the window at all.
     # * the momentum buckets are keyed by minutes of the *recording* (Stage B's own clock, the same one the
@@ -1554,7 +1561,7 @@ def replay_section(
     window_start = float(segment.meta.get("start_s", 0.0))
     strip_events: list[dict] = []
     for event in event_log.events:
-        # The strip's clock is the analysed window's own (0 at its first frame), so an event's time is translated
+        # The strip's clock is the analyzed window's own (0 at its first frame), so an event's time is translated
         # out of its recording's clock onto the game's and then onto the window's. One helper does the first step,
         # so the strip, the table and the half labels cannot disagree.
         on_game = (
@@ -1566,7 +1573,7 @@ def replay_section(
             continue  # found in a recording that is not part of this game
         strip_t = on_game - window_start
         if strip_t < -1.0 or strip_t > float(replay.get("duration_s", 0.0)) + 1.0:
-            continue  # a moment from another recording that is not part of this analysed window
+            continue  # a moment from another recording that is not part of this analyzed window
         strip_events.append({**event.to_json(), "time_s": round(max(0.0, strip_t), 3)})
     strip_half_minute = None
     if half_minute is not None:
@@ -1630,7 +1637,7 @@ def replay_section(
     has_ball = any(entry is not None for entry in (replay.get("ball") or []))
     excluded = int(replay.get("bystanders_excluded") or 0)
     st.caption(
-        "Press play or drag the timeline. Player markers wear each team's measured kit colour; the yellow dot is "
+        "Press play or drag the timeline. Player markers wear each team's measured kit color; the yellow dot is "
         "the camera aim - "
         + (
             "the ball proxy used when the ball scan has not found the ball. The white football is the ball the "
@@ -1950,15 +1957,15 @@ def events_section(
             {
                 **{key: value for key, value in event.to_json().items() if key != "video"},
                 "team": "unspecified" if event.team < 0 else team_name(event.team, team_names),
-                # Whether the act was an attack or a defence is the event type's own meaning - no game clock
+                # Whether the act was an attack or a defense is the event type's own meaning - no game clock
                 # needed, so the column is there for every archive.
                 "play": event_play(event.type),
             }
             for event in shown
         ]
         if game_marks_here is not None and game_record_here is not None:
-            # The half is a question about the game clock, so it comes from the marks, not from the analysed
-            # window: an event outside kick-off/full-time is labelled "-" rather than guessed at. Each event is
+            # The half is a question about the game clock, so it comes from the marks, not from the analyzed
+            # window: an event outside kick-off/full-time is labeled "-" rather than guessed at. Each event is
             # translated out of its own recording's clock first - a whistle candidate's seconds are seconds of a
             # single camera file, and 5 s of that clip is 30 minutes into the match.
             labels = game_lib.half_labels_for_events(game_record_here, shown)
@@ -1969,7 +1976,7 @@ def events_section(
             event_rows = [
                 {**row, "match clock": _match_clock_for(event) or "-"} for row, event in zip(event_rows, shown)
             ]
-            # Whether the act was an attack or a defence, and - for the attacks - which goal mouth the acting
+            # Whether the act was an attack or a defense, and - for the attacks - which goal mouth the acting
             # team was attacking then. The play is the event type's own meaning; the aim comes from the replay
             # payload's measured per-half directions, so the table, the arrows on the pitch and the detector
             # cannot disagree about who was going which way. A payload from before directions existed - or an
@@ -2185,7 +2192,7 @@ MATCH_SCOPED_STATE = (
     "calib_points",
     "calib_landmarks",
     "calib_next_pid",
-    "calib_centre",
+    "calib_center",
     "calib_zoom",
     "calib_reference",
     "calib_clicks_key",
@@ -2284,8 +2291,8 @@ with st.container(border=True):
             def _open_analysis_beside_video() -> None:
                 """A video that already has an analysis saved beside it opens that analysis automatically.
 
-                Only while no analysis is selected: with one open, changing the video means "analyse this footage
-                under the open match" (a match is usually created on a clip and then analysed on the combined game),
+                Only while no analysis is selected: with one open, changing the video means "analyze this footage
+                under the open match" (a match is usually created on a clip and then analyzed on the combined game),
                 and switching the selection out from under that would fight the user.
                 """
                 if match_id is not None:
@@ -2369,12 +2376,12 @@ show_flash("step1_flash")
 game_record = game_lib.find_for_video(chosen)
 game_window_selection: str | None = None
 
-with st.expander("Combine clips into one game video", expanded=game_record is None):
+with st.expander("Game clips (no merging needed)", expanded=game_record is None):
     st.caption(
-        "A game usually arrives as two or three camera files. Combining them is a plain stream copy - nothing is "
-        "re-encoded - and gives one continuous video. The combined file is written next to the first clip, because "
-        "it is as large as they are. If you have already merged them yourself, pick that one file on its own and "
-        "it is used as it stands: nothing is copied or re-encoded."
+        "A game usually arrives as two or three camera files. Pick them here and the game is ready in an "
+        "instant: the manifest records the clips and their order, and every reader - marking, analysis, frame "
+        "grabs - resolves the game clock to the right clip directly. Nothing is copied or re-encoded, and no "
+        "merged video is produced."
     )
     picked_clips = st.multiselect(
         "Clips (any order - the camera's own timestamps put them in playing order)",
@@ -2402,7 +2409,9 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
                 + " -> ".join(Path(clip.path).name for clip in planned_game.clips)
                 + f" - {total_minutes:.0f} min"
             )
-            st.caption(f"Will write `{expected_output}`")
+            st.caption(
+                f"The game metadata will live in `{_location_label(expected_dir)}`; no video file is written."
+            )
         if planned_game.problem:
             st.error(
                 f"These clips cannot be combined: {planned_game.problem}. A combination without a re-encode needs "
@@ -2419,13 +2428,12 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
                 subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 st.session_state["step1_flash"] = (
                     "success",
-                    "Combining the clips in the background (a couple of minutes for a full game). "
-                    "Refresh in a moment.",
+                    "Preparing the game (a manifest write - ready in an instant). Refresh in a moment.",
                 )
 
             build_state = game_lib.read_build_state(expected_dir)
             running = build_state.get("state") == "running"
-            label = "Use this game video" if len(planned_game.clips) == 1 else "Combine into one game video"
+            label = "Use this game video" if len(planned_game.clips) == 1 else "Use these clips as one game"
             st.button(
                 label,
                 disabled=running,
@@ -2440,64 +2448,37 @@ with st.expander("Combine clips into one game video", expanded=game_record is No
                 )
             elif build_state.get("state") == "error":
                 st.error(f"The build failed: {build_state.get('error')}")
-            elif expected_output.exists():
-                if len(planned_game.clips) == 1:
-                    st.success(
-                        f"Ready: `{expected_output.name}`. Pick it in the video list above, then mark the game "
-                        "clock below."
-                    )
-                else:
-                    st.success(
-                        f"Combined: `{expected_output.name}`. Pick it in the video list above, then mark the game "
-                        "clock below."
-                    )
+            elif (expected_dir / game_lib.MANIFEST_FILE).exists():
+                st.success(
+                    f"Game ready: {len(planned_game.clips)} clip(s), {total_minutes:.0f} min. Pick any of its "
+                    "clips in the video list above (the game is recognized from it), then mark the clock below."
+                )
 
 if game_record is not None:
     game_directory = game_lib.manifest_dir(game_record)
-    st.markdown(
-        f"**Game video** `{Path(game_record.output).name}` - {len(game_record.clips)} clip(s) joined, "
-        f"{game_record.duration_s / 60:.0f} min"
-    )
+    if len(game_record.clips) == 1:
+        source_label = f"`{Path(game_record.clips[0].path).name}`"
+    else:
+        source_label = f"{len(game_record.clips)} camera clips, read directly (nothing merged)"
+    st.markdown(f"**Game** {source_label} - {game_record.duration_s / 60:.0f} min")
     mark_problem = game_record.mark_problem()
     if mark_problem and not mark_problem.startswith("still to mark"):
         st.warning(f"The marks cannot be used yet: {mark_problem}.")
 
-    game_proxy = game_lib.proxy_path(game_directory)
     mark_port = configured_port()
     stream_ready = is_reachable(mark_port)
-    if stream_ready:
-        # The marking video is produced on demand by the footage stream - the same encoder machinery as the
-        # replay pane's video, with no overlays to draw. No proxy build step: the file lands at the old proxy
-        # path the first time it is asked for, and is served from there afterwards. The component composes the
-        # URL from the dashboard's own host and the stream port (a forwarded or LAN host, not localhost), the
-        # same way the replay pane does.
-        game_video_url = ""
-        mark_stream_args = {
-            "game_id": game_record.game_id,
-            "stream_port": mark_port,
-            "stream_base": configured_base(),
-        }
-    else:
-        # Offline fallback: a proxy that already exists (built before this change, or by an earlier request) is
-        # served through Streamlit's own media endpoint, so marking keeps working without the stream server.
-        game_video_url = _served_video_url(game_proxy, coordinates=f"game::{game_record.game_id}") or ""
-        mark_stream_args = {}
-    if not game_video_url and not stream_ready:
+    if not stream_ready:
         st.info(
-            "The marking video is prepared on demand by the footage stream. Start "
-            f"`scripts/run_match_stream.py --port {mark_port}` and it appears here - a couple of minutes the "
-            "first time, cached beside the game afterwards."
+            "The marking stream comes from the footage server: start "
+            f"`scripts/run_match_stream.py --port {mark_port}` and the clips appear here - frames are read "
+            "directly, so there is no proxy to build and nothing to wait for."
         )
     else:
-        if stream_ready and not game_proxy.exists():
-            st.caption(
-                "The marking video is being prepared on first use (a couple of minutes for a full game - it is "
-                "a keyframe-only encode, the same as the old proxy build); it is cached beside the game "
-                "afterwards."
-            )
         mark_result = GAME_TIMELINE_COMPONENT(
-            proxy_url=game_video_url,
-            **mark_stream_args,
+            game_id=game_record.game_id,
+            stream_port=mark_port,
+            stream_base=configured_base(),
+            duration_s=game_record.duration_s,
             marks={"start": game_record.start_s, "half": game_record.half_s, "end": game_record.end_s},
             key=f"game_marks::{game_record.game_id}",
             default=None,
@@ -2515,7 +2496,7 @@ if game_record is not None:
                     game_record.set_mark(which, at)
                     game_record.save(game_directory)
                     marks_seen[game_record.game_id] = sequence
-                    # The marks define the analysed window, so apply it now rather than waiting for the radio
+                    # The marks define the analyzed window, so apply it now rather than waiting for the radio
                     # to be touched: marking kick-off and full-time is exactly how the window is chosen.
                     if game_record.bounds() is not None:
                         selection = str(
@@ -2549,7 +2530,7 @@ if game_record is not None:
             st.session_state[f"length_s::{chosen}"] = float(window_end - window_start)
             st.session_state["step1_flash"] = (
                 "success",
-                f"Analysing {selection.lower()}: {_clock(window_start)} to {_clock(window_end)}.",
+                f"Analyzing {selection.lower()}: {_clock(window_start)} to {_clock(window_end)}.",
             )
 
         game_window_selection = st.radio(
@@ -2575,7 +2556,7 @@ span_col, length_col = st.columns(2)
 game_marks = game_record.bounds() if game_record is not None else None
 with span_col:
     # Keyed by video: the segment belongs to the footage, so one match's analysis window must not become the next
-    # one's. A leftover offset would silently analyse the wrong part of a different match.
+    # one's. A leftover offset would silently analyze the wrong part of a different match.
     start_s = st.number_input(
         "Start offset (s)",
         min_value=0.0,
@@ -2585,17 +2566,17 @@ with span_col:
     )
 with length_col:
     duration_s = st.number_input(
-        "Length to analyse (s)",
+        "Length to analyze (s)",
         min_value=0.0,
         value=0.0 if game_marks is None else float(game_marks[2] - game_marks[0]),
         step=30.0,
         key=f"length_s::{chosen}",
-        help="0 analyses from the offset to the end of the video; a marked game defaults to kick-off to full-time.",
+        help="0 analyzes from the offset to the end of the video; a marked game defaults to kick-off to full-time.",
     )
 
 window_start, window_end = resolve_window(start_s, duration_s, probe.duration_s)
 st.caption(
-    f"Analysing **{_clock(window_start)} to {_clock(window_end)}** "
+    f"Analyzing **{_clock(window_start)} to {_clock(window_end)}** "
     f"({window_end - window_start:.0f} s"
     + (", the entire video from the offset" if duration_s <= 0 else "")
     + ")."
@@ -2603,15 +2584,20 @@ st.caption(
 if game_marks is not None:
     st.caption(
         f"Game clock: kick-off {_clock(game_marks[0])}, half-time {_clock(game_marks[1])}, full-time "
-        f"{_clock(game_marks[2])}. Events and the report are labelled by half."
+        f"{_clock(game_marks[2])}. Events and the report are labeled by half."
     )
 
+# A game is analyzed from its manifest, not from any one clip: the picked clip only identifies the game here,
+# and the manifest carries the clip offsets the reader resolves. A plain video is analyzed as itself, as before.
+analysis_source = (
+    str(game_lib.manifest_dir(game_record) / game_lib.MANIFEST_FILE) if game_record is not None else chosen
+)
 # Each window of a marked game gets its own segment directory: the stored meta refuses a different window in the
-# same directory (correctly), and a separate directory is what lets the two halves be analysed without redoing
+# same directory (correctly), and a separate directory is what lets the two halves be analyzed without redoing
 # either - and resumed independently.
 segment_dir = segment_dir_for(
-    chosen,
-    segments_root_for(chosen),
+    analysis_source,
+    segments_root_for(analysis_source),
     window_label=(
         game_record.window_label(game_window_selection)
         if game_record is not None and game_window_selection
@@ -2640,30 +2626,36 @@ def _same_window(meta: dict) -> bool:
 
 window_conflict = existing_meta is not None and not _same_window(existing_meta)
 fps_conflict = existing_meta is not None and abs(float(existing_meta.get("fps", config.fps)) - config.fps) > 1e-6
+# Detection defaults to the source's own width now (the launch below passes no --width), and `analyze_segment`
+# refuses to resume results from another width into one directory - so a width mismatch supersedes like a window
+# or rate one. A meta without `detect_width` predates the full-resolution default: it was analyzed at 1920.
+stored_width = int(existing_meta.get("detect_width", 1920)) if existing_meta is not None else 0
+width_conflict = existing_meta is not None and stored_width != int(probe.width)
 
 info_col, run_col = st.columns([2, 1])
 with info_col:
-    if window_conflict or fps_conflict:
+    if window_conflict or fps_conflict or width_conflict:
         stored = (
             f"{_clock(float(existing_meta['start_s']))} to {_clock(float(existing_meta['end_s']))} "
-            f"at {float(existing_meta.get('fps', 5.0)):g} fps"
+            f"at {float(existing_meta.get('fps', 5.0)):g} fps, detected at {stored_width} px"
         )
         st.warning(
             f"This video already has results for **{stored}**. There is one output directory per video, and a "
-            "different window or analysis rate cannot be resumed into the same one - running again (this run: "
-            f"{_clock(window_start)} to {_clock(window_end)} at {config.fps:g} fps) will move the existing "
-            "results aside (renamed, not deleted)."
+            "different window, analysis rate or detection width cannot be resumed into the same one - running "
+            f"again (this run: {_clock(window_start)} to {_clock(window_end)} at {config.fps:g} fps, detecting "
+            f"at the source's own {int(probe.width)} px) will move the existing results aside (renamed, not "
+            "deleted)."
         )
     _stage_a_status(segment_dir, watch_key=f"stage_a_watch::{chosen}")
 with run_col:
     def _run_analysis() -> None:
         """Spawn the pass from the callback, which runs before the page is drawn again - one run, not two."""
         archived_note = ""
-        if existing_meta is not None and (not _same_window(existing_meta) or fps_conflict):
-            # `analyse_segment` refuses to mix windows or analysis rates in one output directory, so the old
-            # results move aside under a timestamped name. Renaming (rather than deleting) means putting the
-            # earlier analysis back is a rename away, which matters because re-analysis of the same footage is
-            # what created the conflict.
+        if existing_meta is not None and (not _same_window(existing_meta) or fps_conflict or width_conflict):
+            # `analyze_segment` refuses to mix windows, analysis rates or detection widths in one output
+            # directory, so the old results move aside under a timestamped name. Renaming (rather than deleting)
+            # means putting the earlier analysis back is a rename away, which matters because re-analysis of the
+            # same footage is what created the conflict.
             archived = segment_dir.with_name(f"{segment_dir.name}_superseded_{time.strftime('%Y%m%d_%H%M%S')}")
             segment_dir.rename(archived)
             archived_note = f" The previous results are at `{_location_label(archived)}`."
@@ -2672,7 +2664,9 @@ with run_col:
         if record_id is None:
             # Starting the pass starts the analysis, and the analysis lives with the footage: there is no
             # separate save step to forget, and no segment can end up orphaned in the repository.
-            record = library.create(chosen)
+            # A game's directory comes from its manifest's own output name (where the merge would have gone),
+            # which is exactly where the manifest already sits.
+            record = library.create(str(game_record.output) if game_record is not None else chosen)
             record_id = record.match_id
             st.session_state["archive_select_pending"] = record_id
             saved_note = (
@@ -2680,10 +2674,12 @@ with run_col:
             )
         # The match record keeps the segment list, which is what `summaries` and the rebuild scripts read.
         library.add_segment(record_id, segment_dir)
+        # No --width: the pass detects at the source's own width, the full-resolution default. A saved segment
+        # from the old 1920 default was superseded above, so the run cannot collide with it.
         command = [
             sys.executable,
             str(REPO_ROOT / "scripts" / "run_stage_a.py"),
-            "--video", chosen,
+            "--video", analysis_source,
             "--out", str(segment_dir),
             "--start", str(start_s),
             "--duration", str(duration_s),
@@ -2702,7 +2698,7 @@ with run_col:
 st.header("Step 2 - Register the pitch")
 st.caption(
     "Click pitch landmarks on a frame. Four are enough; the further apart they are, the better the fit. The table "
-    "below reports the error for each click, because landmarks on the far side of the pitch carry metres of "
+    "below reports the error for each click, because landmarks on the far side of the pitch carry meters of "
     "uncertainty."
 )
 
@@ -2776,7 +2772,7 @@ if segment is not None:
         st.session_state["calib_next_pid"] = len(restored or [])
         st.session_state["calib_restored_count"] = len(restored or [])
         st.session_state["calib_seeded"] = []
-        st.session_state["calib_centre"] = (0.5, 0.5)
+        st.session_state["calib_center"] = (0.5, 0.5)
         st.session_state["calib_zoom"] = DEFAULT_ZOOM
         st.session_state["calib_reference"] = int(restored[0]["frame"]) if restored else 0
         st.session_state.pop("calibration", None)
@@ -2790,7 +2786,7 @@ if segment is not None:
             """
 The camera moves, so the app has to work out *where the camera was* before it can say where a player is. It does
 that from **landmarks**: fixed markings on the pitch whose real position you already know, because the laws of the
-game put them there. Halfway line, centre spot, corner flags, the goalposts, the penalty spots, the centre
+game put them there. Halfway line, center spot, corner flags, the goalposts, the penalty spots, the center
 circle - those are the only things in the frame with a known real-world position, so the calibration is only ever
 as good as these clicks.
 
@@ -2814,20 +2810,20 @@ as good as these clicks.
 3. **Click the landmark on the magnified view.** A click opens the landmark list right where you clicked - pick
    which landmark it is and the click is committed at once; there is no Apply step. Zoom in far enough that
    the corner is unmistakable: at zoom 8 a screen pixel is a pixel of the 4K frame, whereas a full-frame view is
-   worth roughly a metre of ground error per pixel on the far side of the pitch.
+   worth roughly a meter of ground error per pixel on the far side of the pitch.
 4. **If a corner is not in shot, use the goalposts instead.** The near corner flags are often out of frame or lost
    against the grass, but the posts are easy to pick out, and the base of a post - where it meets the goal line -
    says as much about that end of the pitch as the flag does. Click **goal post left-near** / **goal post
    left-far** (or the `right` pair) in place of a corner you cannot see. The posts are 7.32 m apart, so the two of
    them together also fix the goal line's direction.
-5. **The penalty spots and centre circle are usually visible too.** The penalty spots and the four points where
-   the centre circle crosses the halfway and centre lines are standard markings at a range of distances from the
+5. **The penalty spots and center circle are usually visible too.** The penalty spots and the four points where
+   the center circle crosses the halfway and center lines are standard markings at a range of distances from the
    camera - exactly the spread the fit is short of when the near corners are out of shot. Click the ones you can
    see clearly. The boxes are deliberately not in the list: the six-yard box is small and lost against the
    netting, and an eighteen-yard corner is a bare junction of two lines with nothing to focus on - the posts carry
    that end of the pitch instead, and the penalty spots pin the box's depth.
 6. **What you cannot substitute is spread.** Four clicks that are all a long way off, or all along one line, leave
-   the fit with tens of metres of doubt - measured on a simulated match, four distant landmarks were out by more
+   the fit with tens of meters of doubt - measured on a simulated match, four distant landmarks were out by more
    than 50 m. Aim for landmarks at a *range* of distances from the camera: the halfway line where it meets the near
    touchline is a good near one, because a long white line is easy to pick out. Click as many as you can be sure
    of. **Six to eight spread across the frame is comfortable; four is the absolute minimum.**
@@ -2845,11 +2841,11 @@ other (this is the order in the dropdowns: `near-left`, `near-right`, then the t
 loop and the app can work out the rest.
 
 **Then check the yellow markings** the app draws back onto the frame. They are the whole pitch - touchlines, halfway
-line, both boxes, the centre circle, the penalty arcs and spots and the corner arcs - projected through your
+line, both boxes, the center circle, the penalty arcs and spots and the corner arcs - projected through your
 calibration. If they land on the real markings, the registration is good. If they are mirrored, or clearly in the
 wrong place, fix the labels and recalibrate - the per-landmark error table tells you which click to look at.
 
-Be honest with yourself about the far corners: at 40-90 m, four pixels of click noise is worth several metres of
+Be honest with yourself about the far corners: at 40-90 m, four pixels of click noise is worth several meters of
 ground error in the depth direction. If the far corner is a blurred smudge, leave it out and use the landmarks you
 are sure of.
 """
@@ -2879,9 +2875,9 @@ are sure of.
         st.session_state[gesture_key] = (gesture.mount, gesture.seq)
     if fresh and gesture.action == "navigate":
         # Landing the view where the gesture asked is idempotent, so the value being sticky costs nothing: on a
-        # later run it asks for the centre and zoom that are already stored.
-        if gesture.centre is not None:
-            st.session_state["calib_centre"] = gesture.centre
+        # later run it asks for the center and zoom that are already stored.
+        if gesture.center is not None:
+            st.session_state["calib_center"] = gesture.center
         if gesture.zoom is not None:
             st.session_state["calib_zoom"] = gesture.zoom
         moved_frame = frame_change(gesture.frame, st.session_state.get("calib_reference", 0), frame_count)
@@ -2925,9 +2921,9 @@ are sure of.
         st.error("Could not read that frame from the video.")
     else:
         height, width = full.shape[:2]
-        centre = st.session_state.get("calib_centre", (0.5, 0.5))
+        center = st.session_state.get("calib_center", (0.5, 0.5))
         zoom = float(st.session_state.get("calib_zoom", DEFAULT_ZOOM))
-        box = zoom_box(width, height, zoom, centre[0], centre[1])
+        box = zoom_box(width, height, zoom, center[0], center[1])
         x0, y0, crop_w, crop_h = box
         crop = full[y0 : y0 + crop_h, x0 : x0 + crop_w]
 
@@ -2942,7 +2938,7 @@ are sure of.
                 overview, calibration_for_view, view_q, view_focal, length_m, width_m, table=land_table
             )
         # The browser-side overlay: sampled homographies along the corrected chain plus the markings in pitch
-        # metres, so the component can draw the pitch on whatever frame the timeline is showing - scrubbed or
+        # meters, so the component can draw the pitch on whatever frame the timeline is showing - scrubbed or
         # playing - without a round trip per frame. Recomputed from the current calibration on every run, so a
         # refit redraws the overlay immediately.
         browser_overlay = (
@@ -3060,7 +3056,7 @@ are sure of.
             overview,
             features,
             frame_points(stored, reference) + [(seed["u"], seed["v"]) for seed in seeds_here],
-            centre,
+            center,
             zoom,
             box,
             (width, height),
@@ -3075,12 +3071,12 @@ are sure of.
         )
 
     # The saved clicks and their labels: the one thing worth keeping behind a toggle, because the list is
-    # long once a match is calibrated and it is only needed when a click has to be checked or re-labelled.
+    # long once a match is calibrated and it is only needed when a click has to be checked or re-labeled.
     # The calibrate button itself stays outside: it is the step's main action, and hiding it behind a toggle
     # meant the page read as "nothing to do here" until the expander was opened.
     stored = st.session_state.get("calib_points", [])
     ordered = order_clicks(stored)
-    labelled: list[tuple[dict, str]] = []
+    labeled: list[tuple[dict, str]] = []
     display_duplicates: list[str] = []
 
     # Callbacks run before the next run's body, so the list below is already rebuilt without the click. Doing the
@@ -3092,7 +3088,7 @@ are sure of.
         ]
 
     def _goto_click(point: dict, frame_size: tuple[int, int]) -> None:
-        """Show the frame a stored landmark was clicked on, centred on the click itself.
+        """Show the frame a stored landmark was clicked on, centered on the click itself.
 
         The click list is the way back to a landmark. After a dozen clicks on scattered frames, finding one again
         by scrubbing is guesswork - and the point of going back is to check the click against the marking, which
@@ -3101,10 +3097,10 @@ are sure of.
 
         The jump nonce retires the component's key: the viewport then lands on the frame the way it does on first
         mount (the same mechanism a click uses). Without it a jump to the frame already loaded would move the
-        centre but leave the scrub bar where the user had left it - the whole-frame view would be somewhere else.
+        center but leave the scrub bar where the user had left it - the whole-frame view would be somewhere else.
         """
         st.session_state["calib_reference"] = int(np.clip(point["frame"], 0, max(0, frame_count - 1)))
-        st.session_state["calib_centre"] = point_centre(point["u"], point["v"], frame_size)
+        st.session_state["calib_center"] = point_center(point["u"], point["v"], frame_size)
         st.session_state["calib_selected_pid"] = point["pid"]
         st.session_state["calib_jump_nonce"] = int(st.session_state.get("calib_jump_nonce", 0)) + 1
 
@@ -3140,11 +3136,11 @@ are sure of.
             note = " (brought back from the saved calibration)" if restored == len(ordered) else ""
             st.write(f"**{len(ordered)} landmark click(s)**{note} - tell the app which is which:")
 
-            labelled: list[tuple[dict, str]] = []
+            labeled: list[tuple[dict, str]] = []
             for index, point in enumerate(ordered):
                 point_col, label_col, drop_col = st.columns([1, 3, 1])
                 with point_col:
-                    # Pressing the frame brings that landmark up in the crop - its own frame, centred on the click, so
+                    # Pressing the frame brings that landmark up in the crop - its own frame, centered on the click, so
                     # the marking can be checked against what was clicked without hunting for the frame again.
                     st.button(
                         f"frame {point['frame']}",
@@ -3152,7 +3148,7 @@ are sure of.
                         type="primary" if point["pid"] == st.session_state.get("calib_selected_pid") else "secondary",
                         on_click=_goto_click,
                         args=(point, (width, height)),
-                        help="Load this landmark's own frame into the magnified view, centred on where it was clicked.",
+                        help="Load this landmark's own frame into the magnified view, centered on where it was clicked.",
                     )
                 with label_col:
                     # The landmark is chosen at the click, in the popover that appears where it was made - so the
@@ -3182,7 +3178,7 @@ are sure of.
                         )
                 with drop_col:
                     st.button("Remove", key=f"drop_{point['pid']}", on_click=_drop_click, args=(point["pid"],))
-                labelled.append((point, label))
+                labeled.append((point, label))
                 # Always describe the landmark that is actually selected: it is the moment the user picks a
                 # non-default landmark that they most need to check what it means.
                 st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;{LANDMARK_HELP[label]}")
@@ -3192,14 +3188,14 @@ are sure of.
             # click tagged with exactly that name on the same frame then matches it. Only one of the pair carries
             # a tag, so the drop above cannot see the collision - warn here instead, naming what to re-tag. The
             # fit proceeds either way: the residual table is the honest judge of what the clash costs.
-            display_duplicates = repeated_labels_within_a_frame((point["frame"], label) for point, label in labelled)
+            display_duplicates = repeated_labels_within_a_frame((point["frame"], label) for point, label in labeled)
 
             # A session with clicks on more than one moment is asking for the drift correction, and that only works if
             # each moment carries enough clicks to identify its own correction. Say which frame currently registers the
             # pose and which moments are too thin to anchor anything, rather than leaving it to the fit diagnostics.
-            frames_with_clicks = sorted({point["frame"] for point, _label in labelled})
+            frames_with_clicks = sorted({point["frame"] for point, _label in labeled})
             if len(frames_with_clicks) > 1:
-                counts = {frame: sum(1 for point, _l in labelled if point["frame"] == frame) for frame in frames_with_clicks}
+                counts = {frame: sum(1 for point, _l in labeled if point["frame"] == frame) for frame in frames_with_clicks}
                 registered = min(frames_with_clicks, key=lambda frame: (-counts[frame], frame))
                 if counts[registered] >= MIN_REFERENCE_CLICKS:
                     st.caption(
@@ -3222,8 +3218,8 @@ are sure of.
                         "there."
                     )
 
-            if len(labelled) < 4:
-                st.info(f"Click at least four landmarks - {4 - len(labelled)} to go.")
+            if len(labeled) < 4:
+                st.info(f"Click at least four landmarks - {4 - len(labeled)} to go.")
         else:
             st.info(
                 "No landmarks clicked yet. Aim with the whole-frame view, then click a landmark on the magnified "
@@ -3242,11 +3238,11 @@ are sure of.
     # The calibration refits itself whenever the clicks change - a click, a re-label or a removal is a new
     # measurement, and the fit is seconds, so there is nothing to wait for. The button stays for the two cases the
     # automatic pass cannot see: a refit against a changed camera-motion source, and "just fit it again".
-    if len(labelled) >= 4:
-        signature = [(point["frame"], point["pid"], label) for point, label in labelled]
+    if len(labeled) >= 4:
+        signature = [(point["frame"], point["pid"], label) for point, label in labeled]
         if st.session_state.get("calib_fit_signature") != signature:
             st.session_state["calib_fit_signature"] = signature
-            calibration = fit_from_clicks(library, match_id, segment, q, focal, labelled, land_table, length_m, width_m)
+            calibration = fit_from_clicks(library, match_id, segment, q, focal, labeled, land_table, length_m, width_m)
             if calibration is None:
                 st.session_state.pop("calib_fit_signature", None)  # let the next change retry
                 st.error(calibration_failure())
@@ -3258,16 +3254,16 @@ are sure of.
         if st.button(
             "Calibrate from these landmarks",
             type="primary",
-            disabled=len(labelled) < 4,
-            help="Refit the calibration from the clicks as they are labelled right now. The fit also runs "
+            disabled=len(labeled) < 4,
+            help="Refit the calibration from the clicks as they are labeled right now. The fit also runs "
                  "automatically whenever the clicks change; this is here for a refit against a changed camera "
                  "motion, or when you just want to run it again.",
         ):
-            calibration = fit_from_clicks(library, match_id, segment, q, focal, labelled, land_table, length_m, width_m)
+            calibration = fit_from_clicks(library, match_id, segment, q, focal, labeled, land_table, length_m, width_m)
             if calibration is None:
                 st.error(calibration_failure())
             else:
-                st.success(fit_message(calibration, labelled))
+                st.success(fit_message(calibration, labeled))
     with clear_col:
         st.button("Clear all clicks", on_click=_clear_clicks)
 
@@ -3368,19 +3364,19 @@ are sure of.
                 # against another window (a different segment of the same video, say) cannot describe this one, and
                 # indexing this segment's clock with its frames is how the page used to crash here.
                 st.warning(
-                    f"This match's calibration carries drift anchors up to frame {last}, but the analysed window "
+                    f"This match's calibration carries drift anchors up to frame {last}, but the analyzed window "
                     f"holds {times.size} frames - it was solved on a different segment. Re-click the landmarks on "
                     "this one (Step 2) to fit a correction that covers it."
                 )
             else:
-                analysed_s = float(times[-1] - times[0])
+                analyzed_s = float(times[-1] - times[0])
                 covered_s = float(times[last] - times[first])
                 line = (
                     f"**Drift correction** is fitted: the chain is re-anchored at the {len(anchors)} clicked "
-                    f"frame(s), from {_clock(times[first])} to {_clock(times[last])} of the analysed window "
-                    f"({_clock(covered_s)} of {_clock(analysed_s)})."
+                    f"frame(s), from {_clock(times[first])} to {_clock(times[last])} of the analyzed window "
+                    f"({_clock(covered_s)} of {_clock(analyzed_s)})."
                 )
-                if covered_s < 0.6 * analysed_s:
+                if covered_s < 0.6 * analyzed_s:
                     line += (
                         " Between anchors it is interpolated, but outside them it is held flat - so the projection "
                         "can still slide away from the markings in the parts of the video with no clicks. Clicking "
@@ -3462,12 +3458,12 @@ else:
     payload = st.session_state.get("report") or report_from_library(library, match_id)
     if payload:
         metric_columns = st.columns(4)
-        metric_columns[0].metric("Frames analysed", payload["frames_analysed"])
+        metric_columns[0].metric("Frames analyzed", payload["frames_analyzed"])
         metric_columns[1].metric("Player detections used", payload["detections_used"])
         metric_columns[2].metric("Players tracked", len(payload["players"]))
         metric_columns[3].metric("Tracks with a team", sum(1 for p in payload["players"] if p["team"] >= 0))
         team_names = _team_name_editor(library, match_id, payload)
-        # The table says the name rather than the index, and leaves out the kit colour: it is shown as a swatch just
+        # The table says the name rather than the index, and leaves out the kit color: it is shown as a swatch just
         # above, where it can actually be seen.
         team_rows = [
             {
@@ -3491,7 +3487,7 @@ st.header("Archive contents")
 rows = library.summaries()
 if rows:
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-    pick = st.selectbox("Show artefacts for", [row["match_id"] for row in rows])
+    pick = st.selectbox("Show artifacts for", [row["match_id"] for row in rows])
     st.dataframe(pd.DataFrame(library.artifacts(pick)), hide_index=True, width="stretch")
 else:
     st.info("No matches archived yet.")

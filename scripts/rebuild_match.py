@@ -1,16 +1,16 @@
 """Rebuild one match's report and replay from its segment, headlessly.
 
 The dashboard's "Build report" button runs exactly this pipeline; this script is the same work as its own process,
-for the cases the button cannot serve: a rebuild after the analysis code changed (the artefacts on disk were
+for the cases the button cannot serve: a rebuild after the analysis code changed (the artifacts on disk were
 produced by an older build and no longer describe what the code does), a machine that runs headless, or a repair
-after a stale Streamlit process wrote artefacts from out-of-date modules.
+after a stale Streamlit process wrote artifacts from out-of-date modules.
 
 What it does, in the order the pipeline runs:
 
 1. loads the segment and its saved calibration,
 2. rebuilds the camera chain (``segment_poses`` - the gimbal log supplies the orientation where there is one),
 3. projects the detections to the pitch, runs the tracker, the stitcher and the kit clustering (``build_report``),
-4. rebuilds the replay payload - player boxes included, which is what the centred clips and any annotated view
+4. rebuilds the replay payload - player boxes included, which is what the centered clips and any annotated view
    follow - and re-projects the segment's ball scan (``ball_track.json``) into it,
 5. saves both beside the match (``report.json``, ``replay.json``) atomically.
 
@@ -43,7 +43,7 @@ BALL_TRACK_FILE = "ball_track.json"
 
 
 def _ball_for_replay(segment_dir: Path, calibration, q, focal):
-    """The segment's ball scan projected into pitch metres, or None when it has not been scanned."""
+    """The segment's ball scan projected into pitch meters, or None when it has not been scanned."""
     try:
         payload = json.loads((segment_dir / BALL_TRACK_FILE).read_text())
     except (OSError, json.JSONDecodeError):
@@ -102,7 +102,7 @@ def main() -> int:
         report.players,
         record.team_names,
         ball=_ball_for_replay(segment_dir, calibration, q, focal),
-        team_colours=[metrics.kit_rgb for metrics in report.teams],
+        team_colors=[metrics.kit_rgb for metrics in report.teams],
         camera_xy=detections.camera_xy,
         roles=roles,
         attack=attack,
@@ -130,7 +130,7 @@ def main() -> int:
             "notes": report.notes,
             "pitch": [record.pitch_length_m, record.pitch_width_m],
             "detections_used": report.detections_used,
-            "frames_analysed": report.frames_analysed,
+            "frames_analyzed": report.frames_analyzed,
         },
     )
     library.save_replay(args.match, replay, boxes=track_boxes(report.players))

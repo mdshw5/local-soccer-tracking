@@ -46,7 +46,7 @@ _FIN = re.compile(
 # the hardware has a position it also carries the ball's image x (``Ballx``) and the control output (``OutX``).
 # ``TSz`` is absent on some frames, so it is optional.
 _BALL_SIZE = re.compile(r"^BallSz(\d+)(?: TSz(\d+))?(?: StaX(-?\d+) Ballx(\d+) OutX(\d+))?( BallFail)?$")
-# Hardware ball track: the ball's velocity in the image and its offset from the frame centre. The index after T is
+# Hardware ball track: the ball's velocity in the image and its offset from the frame center. The index after T is
 # the track id (T0, T1, ...).
 _BALL_TRACK = re.compile(r"^T(\d+) RB(\d+) xv(-?\d+) yv(-?\d+) xm(-?\d+) ym(-?\d+)$")
 # Hardware ball box: the tracked box, its offset, which side of the frame it is on, and its image x. The velocity
@@ -59,7 +59,7 @@ _AFILTER = re.compile(r"^AFilterP(\d+) mot(\d+) Deque(\d+)((?:\(V(-?\d+),x(-?\d+
 _DEQUE_ENTRY = re.compile(r"\(V(-?\d+),x(-?\d+)\)")
 # Fast-motion counter and the crowd's image x.
 _FAST = re.compile(r"^Fast(\d+) Crowdx(\d+)$")
-# The gimbal hit a pan limit and auto-centred; not needed for the pose but kept so the parser is complete.
+# The gimbal hit a pan limit and auto-centered; not needed for the pose but kept so the parser is complete.
 _BOUNDARY = re.compile(r"^boundary(\d+) [LR]X(\d+) autoCenterX(\d+)$")
 _AUTO_CENTER = re.compile(r"^autoCenterX(\d+)$")
 # Header lines: SDK version, the sport/config line, and the start/restart markers.
@@ -93,7 +93,7 @@ class GimbalFrame:
     deque: tuple[tuple[float, float], ...] = ()
     fast: int | None = None
     crowd_x: float | None = None
-    # Hardware ball track (T0): image velocity and offset from the frame centre.
+    # Hardware ball track (T0): image velocity and offset from the frame center.
     ball_track_id: int | None = None
     ball_xv: float | None = None
     ball_yv: float | None = None
@@ -158,7 +158,7 @@ class GimbalLog:
     frames: list[GimbalFrame] = field(default_factory=list)
     sdk: str = ""
     config: str = ""
-    unknown_lines: int = 0  # lines the parser did not recognise; a non-zero count is a format change to look at
+    unknown_lines: int = 0  # lines the parser did not recognize; a non-zero count is a format change to look at
 
     def by_frame(self) -> dict[int, GimbalFrame]:
         return {record.frame: record for record in self.frames}
@@ -181,7 +181,7 @@ def parse_gimbal_log(text: str, *, path: str = "") -> GimbalLog:
     """Parse one log file's text into frames, merging each frame's motion and FIN records.
 
     The parser is line-oriented and tolerant: a record whose content lines are split across timestamps (which is
-    how the camera writes them) is merged by frame number, and any line it does not recognise is counted rather
+    how the camera writes them) is merged by frame number, and any line it does not recognize is counted rather
     than raised on, so a firmware that adds a field does not break the whole log.
 
     The camera occasionally splits a content line mid-token across two lines (a logging race), so a line that does
@@ -206,7 +206,7 @@ def parse_gimbal_log(text: str, *, path: str = "") -> GimbalLog:
         return records[order[-1]] if order else None
 
     def consume(line: str) -> bool:
-        """Handle one content line; returns whether it was recognised."""
+        """Handle one content line; returns whether it was recognized."""
         motion = _MOTION.match(line)
         if motion:
             record = frame_record(int(motion.group(1)))
@@ -304,7 +304,7 @@ def parse_gimbal_log(text: str, *, path: str = "") -> GimbalLog:
                 log.unknown_lines += 1  # a held fragment that never completed
                 pending = ""
             continue
-        # Not recognised on its own: it may be the first half of a line the camera split mid-token. Hold it and
+        # Not recognized on its own: it may be the first half of a line the camera split mid-token. Hold it and
         # retry joined to the next line - with and without a separator, because the split sometimes lands on a
         # space and consumes it. A genuinely unknown line is counted once it is too long to be a prefix.
         if pending:

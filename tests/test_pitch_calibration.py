@@ -49,7 +49,7 @@ def _project(pitch_xy: np.ndarray, q: np.ndarray) -> np.ndarray:
     return uv, front
 
 
-# Standard 11-a-side landmarks (metres), origin at the near-left corner flag; pitch 100 x 64.
+# Standard 11-a-side landmarks (meters), origin at the near-left corner flag; pitch 100 x 64.
 LANDMARKS_XY = {
     "corner_a": (0.0, 0.0),
     "corner_b": (100.0, 0.0),
@@ -57,7 +57,7 @@ LANDMARKS_XY = {
     "corner_d": (0.0, 64.0),
     "halfway_near": (50.0, 0.0),
     "halfway_far": (50.0, 64.0),
-    "centre": (50.0, 32.0),
+    "center": (50.0, 32.0),
     "box_a": (16.5, 13.8),
     "box_b": (16.5, 50.2),
     "box_c": (83.5, 13.8),
@@ -210,7 +210,7 @@ def test_goal_posts_stand_in_for_corners_that_are_never_in_frame() -> None:
     Measured over the seeds below (4 px of click noise), this set is right to within ~2.5 m every time. It is the
     set the landmark instructions point at, so it is worth holding to that.
     """
-    names = ["corner_c", "corner_d", "goal_post_a", "goal_post_b", "halfway_far", "centre"]
+    names = ["corner_c", "corner_d", "goal_post_a", "goal_post_b", "halfway_far", "center"]
     errors = []
     for seed in range(1, 5):
         landmarks, chain = _clicks({0: 0.0, 1: 35.0, 2: -35.0}, noise_px=4.0, seed=seed, names=names)
@@ -224,7 +224,7 @@ def test_a_wrong_camera_is_never_reported_with_a_small_rms() -> None:
     """A wrong camera must never come back looking confident.
 
     Four landmarks that are all far away are genuinely not enough - with 4 px of click noise the answer can be tens
-    of metres out. What must never happen is that such an answer comes back with neither a large rms nor a
+    of meters out. What must never happen is that such an answer comes back with neither a large rms nor a
     diagnostic: the deceptive solutions here are caught by the bound-pinned parameters or the near-singular residual
     Jacobian (the clicks barely constrain the camera), which ``suspect_fit_reason`` names for the UI.
     """
@@ -315,7 +315,7 @@ def test_a_lone_click_cannot_anchor_a_correction() -> None:
     """One click at its own moment gets no knot: two equations against four unknowns would be a private opinion.
 
     The whole-game archive is what taught this - single-click anchors were free in the two directions the click
-    cannot see, and one walked 21 deg off its neighbours with the residual still small enough to look fine. The
+    cannot see, and one walked 21 deg off its neighbors with the residual still small enough to look fine. The
     rule now: a moment clicked once is *judged* against the registration (its residual is reported, so the user
     knows to add a landmark there) but cannot move the correction.
     """
@@ -370,7 +370,7 @@ def test_wrong_pitch_size_shows_up_in_the_camera_height_not_the_residual() -> No
 def test_landmarks_project_back_onto_the_pixel_they_were_clicked_at() -> None:
     """The fit check draws landmarks the user never clicked, so the two ends of the pipeline must agree.
 
-    A click is normalised by frame width (what the solver consumes); the projection hands back pixels. Round-tripping
+    A click is normalized by frame width (what the solver consumes); the projection hands back pixels. Round-tripping
     a landmark through both is what catches those two conventions drifting apart.
     """
     from soccer_analytics.dashboard.pitch_clicks import landmark_table, project_landmarks

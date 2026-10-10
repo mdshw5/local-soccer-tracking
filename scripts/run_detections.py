@@ -6,7 +6,7 @@ This is what the dashboard's "Build report + run all detections" button starts o
 2. the whistle scan (skipped when an earlier scan already finished on this video),
 3. the shirt-number scan (skipped when an earlier scan already finished),
 4. the event detectors over the ball and player tracks (through ``analysis.detect_run``),
-5. and a report + replay rebuild so the saved artefacts carry everything the scans found.
+5. and a report + replay rebuild so the saved artifacts carry everything the scans found.
 
 Each stage checks the previous run's own status first, so re-running after a failure never redoes finished work -
 which matters because the ball scan is around an hour on a full game even though it checkpoints. Progress (and any
@@ -134,8 +134,8 @@ def _run_mirrored(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--match", required=True, help="match id (the name of its analysis directory)")
-    parser.add_argument("--video", default="", help="the recording the scans read (default: the analysed segment's)")
-    parser.add_argument("--segment", default="", help="the analysed segment (default: the match's first one)")
+    parser.add_argument("--video", default="", help="the recording the scans read (default: the analyzed segment's)")
+    parser.add_argument("--segment", default="", help="the analyzed segment (default: the match's first one)")
     parser.add_argument("--strictness", type=float, default=MIN_PROMINENCE)
     parser.add_argument("--keep-voices", action="store_true", help="same as run_audio_scan.py's flag")
     args = parser.parse_args()
@@ -151,7 +151,7 @@ def main() -> int:
     )
     status = Status(library.path(args.match) / STATUS_FILE)
     if segment_dir is None or not segment_dir.exists():
-        status.fail("No analysed segment for this match - run Step 1 (the heavy pass) first.")
+        status.fail("No analyzed segment for this match - run Step 1 (the heavy pass) first.")
         return 1
     segment_meta = _read_json(segment_dir / "meta.json")
     video = args.video or str(segment_meta.get("video") or "")
@@ -271,7 +271,7 @@ def main() -> int:
         f"Events: {result['detected']} candidate(s), {result['added']} new, {result['dropped']} dropped.",
     )
 
-    # --- 5. rebuild the report + replay so the artefacts carry everything ------------------------------------
+    # --- 5. rebuild the report + replay so the artifacts carry everything ------------------------------------
     status.update(force=True, stage="rebuild", message="Rebuilding the report and the replay...")
     code = _run_mirrored(
         [sys.executable, str(REPO_ROOT / "scripts" / "rebuild_match.py"), "--match", args.match, "--segment", str(segment_dir)],

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import numpy as np
 
-# Boxes kept per appearance for cutting a centred clip. The crop follows the player at the video's own rate; a
+# Boxes kept per appearance for cutting a centered clip. The crop follows the player at the video's own rate; a
 # shorter trajectory would cut the corners off a run, and 240 points cover 48 s at the analysis rate, longer than
 # the clip the page cuts by default.
 MAX_TRAJECTORY = 240
@@ -35,8 +35,8 @@ MAX_TRAJECTORY = 240
 class Appearance:
     """One tracked player, once: when they were seen and where they were in the frame.
 
-    ``traj_t`` are source seconds and ``traj_box`` the matching ``(x1, y1, x2, y2)`` rectangles normalised by frame
-    width - the player's own boxes, which is what the centred cut needs. Everything else is summary.
+    ``traj_t`` are source seconds and ``traj_box`` the matching ``(x1, y1, x2, y2)`` rectangles normalized by frame
+    width - the player's own boxes, which is what the centered cut needs. Everything else is summary.
     """
 
     __slots__ = ("track_id", "team", "first_t", "last_t", "first_frame", "last_frame", "traj_t", "traj_box")
@@ -105,7 +105,7 @@ class Identity:
         self.members = tuple(int(v) for v in members)
         self.first_t = float(first_t)
         self.last_t = float(last_t)
-        # How the appearances were recognised as one person: "number", "name", or "" for a single appearance.
+        # How the appearances were recognized as one person: "number", "name", or "" for a single appearance.
         self.grouped_by = grouped_by
         self.label = label
 
@@ -159,7 +159,7 @@ def identities_from_labels(
         if entry.get("number"):
             label = f"#{entry['number']}" + (f" {entry['name']}" if entry.get("name") else "")
         elif entry.get("name"):
-            # The user's own text, from the first appearance of the group: a name is not a field to normalise.
+            # The user's own text, from the first appearance of the group: a name is not a field to normalize.
             label = str(entry["name"])
         else:
             label = f"track {track_ids[0]}"
@@ -223,7 +223,7 @@ def appearances_from_players(
     the picture - and would otherwise make the payload the browser fetches tens of megabytes larger.
 
     The cut needs source seconds on the segment's video, which is ``start_s + frame / fps``. ``frames_per_second``
-    is the rate the payload was produced at (the analysis rate); ``start_s`` is where the analysed window begins in
+    is the rate the payload was produced at (the analysis rate); ``start_s`` is where the analyzed window begins in
     the video the clip will be cut from. Getting this wrong is the bug the shirt-number scan already paid for once:
     a frame index is not a time until it is divided by the rate and shifted by the window's start.
     """

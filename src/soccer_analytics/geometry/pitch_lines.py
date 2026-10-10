@@ -40,7 +40,7 @@ from soccer_analytics.geometry.pitch_calibration import PitchCalibration, pitch_
 LINE_STRIDE = 50
 MAX_PAN_DEG_PER_FRAME = 0.5
 
-# Search geometry, in normalised pixels (the convention of the clicks and the projection; v is normalised by
+# Search geometry, in normalized pixels (the convention of the clicks and the projection; v is normalized by
 # the frame *width*, like every u/v in this codebase).
 SEARCH_HALF_WIDTH = 0.012  # scan this far either side of the predicted line
 MAX_PERP_ERROR = 0.006  # a detection further than this from the prediction is not the same line
@@ -75,7 +75,7 @@ class LineObservation:
 def pitch_marking_lines(length_m: float, width_m: float) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """The straight markings as pitch-space segments: touchlines, halfway line, goal lines, penalty and goal boxes.
 
-    The centre circle and the arcs are left out - they curve, and the detector's straight-line scan does not
+    The center circle and the arcs are left out - they curve, and the detector's straight-line scan does not
     apply. The straight markings are also the ones a partial view most often shows as long, unambiguous strokes.
     """
     L, W = length_m, width_m
@@ -126,11 +126,11 @@ def _grab_sampled_frames(segment, frames: list[int], width: int = 960) -> dict[i
     for a whole game and serves every sampled frame. The reader starts at 0.0 and steps 1/fps, which is exactly
     the analysis clock, so reader frame ``i`` is analysis frame ``i``.
     """
-    from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader
+    from soccer_analytics.ingest.source import open_reader
 
     wanted = set(frames)
     out: dict[int, np.ndarray] = {}
-    reader = FFmpegFrameReader(segment.meta["video"], fps=float(segment.meta["fps"]), width=width)
+    reader = open_reader(segment.meta["video"], fps=float(segment.meta["fps"]), width=width)
     for index, (_t, frame) in enumerate(reader.frames()):
         if index in wanted:
             out[index] = frame
@@ -199,7 +199,7 @@ def _scan_for_line(
 ) -> LineObservation | None:
     """Scan one projected marking for its white stroke; returns an observation or None.
 
-    ``pa``/``pb`` are the predicted endpoints in normalised pixels; the scan works in image pixels of ``image``
+    ``pa``/``pb`` are the predicted endpoints in normalized pixels; the scan works in image pixels of ``image``
     (which may be a different width than 1920, so everything is scaled by the image's own width).
     """
     h, w = image.shape[:2]
@@ -227,16 +227,16 @@ def _scan_for_line(
         pts = base[None, :] + ss[:, None] * normal[None, :]
         xs = np.clip(pts[:, 0].astype(int), 0, w - 1)
         ys = np.clip(pts[:, 1].astype(int), 0, h - 1)
-        grey = image[ys, xs].astype(np.float64).mean(axis=1)
-        context = grey[np.abs(ss) >= half - band]
+        gray = image[ys, xs].astype(np.float64).mean(axis=1)
+        context = gray[np.abs(ss) >= half - band]
         if len(context) < 4:
             continue
         level = float(np.median(context))
-        white = grey > level + WHITE_MARGIN
+        white = gray > level + WHITE_MARGIN
         if not white.any():
             continue
         offsets.append(float(ss[white].mean()))
-        contrast_sum += float(grey[white].mean() - level)
+        contrast_sum += float(gray[white].mean() - level)
     if len(offsets) < MIN_STATIONS or len(offsets) / len(ts) < MIN_WHITE_FRACTION:
         return None
     offsets_arr = np.asarray(offsets)
@@ -308,7 +308,7 @@ def refine_with_lines(
     chain = {int(i): (q[i], float(focal[i])) for i in range(len(q))}
     # Screen the observations against the base pose. The scan's own MAX_PERP_ERROR is the tolerance *at
     # detection time*; by fit time the base pose has drifted, so the honest screen is a generous multiple of
-    # it (measured: the real game's observations sit at a median of 0.009 and a p90 of 0.13 normalised px
+    # it (measured: the real game's observations sit at a median of 0.009 and a p90 of 0.13 normalized px
     # against the base pose - the drift this fit exists to correct). A hard cap kills the gross misdetections;
     # a per-anchor median screen then drops frames whose observations disagree with each other, which a
     # single-click-style screen cannot see.

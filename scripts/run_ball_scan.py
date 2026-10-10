@@ -39,7 +39,7 @@ import numpy as np  # noqa: E402
 
 from soccer_analytics.analysis.ball import BallTrack, blank_overlays  # noqa: E402
 from soccer_analytics.analysis.stage_a import load_segment  # noqa: E402
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader  # noqa: E402
+from soccer_analytics.ingest.source import open_reader  # noqa: E402
 
 RESULT_FILE = "ball_track.json"
 STATUS_FILE = "ball_scan.json"
@@ -82,7 +82,7 @@ class Status:
 
 
 def make_detector(width: int):  # noqa: ANN201 - closure around the two models
-    """The production detector: COCO's ball class plus an open-vocabulary model, returning frame-normalised boxes.
+    """The production detector: COCO's ball class plus an open-vocabulary model, returning frame-normalized boxes.
 
     Both are run because they fail differently - the COCO model is conservative and misses the smallest balls, the
     open-vocabulary one is over-eager but catches what COCO drops - and the agreement between them on the real game
@@ -174,7 +174,7 @@ def _scan_track(
 ) -> dict:
     """Track the ball across one segment, checkpointing as it goes; returns the result payload.
 
-    ``detector(image, imgsz, origin)`` returns ``(conf, u, v, w, h)`` detections in frame-normalised coordinates
+    ``detector(image, imgsz, origin)`` returns ``(conf, u, v, w, h)`` detections in frame-normalized coordinates
     (injected for tests; the default builds the two-model detector). ``steps`` is the segment's per-frame camera
     step, the prediction input. A payload on disk that is not ``complete`` is resumed from, both the records and
     the tracker's state - the state matters as much as the records: resuming with a fresh tracker would re-learn
@@ -237,8 +237,10 @@ def _scan_track(
         return payload
 
     window_px = min(WINDOW_PX, width)
-    reader = FFmpegFrameReader(
-        Path(video), fps=fps, width=width, start_s=start_s + resume_at / fps, duration_s=(total_frames - resume_at) / fps
+    # ``video`` is the segment's own source path - a game.json manifest for a never-merged game, in which case
+    # the reader chains the clips and every timestamp below stays on the game clock (see ingest/source.py).
+    reader = open_reader(
+        video, fps=fps, width=width, start_s=start_s + resume_at / fps, duration_s=(total_frames - resume_at) / fps
     )
     started = time.monotonic()
     processed = 0

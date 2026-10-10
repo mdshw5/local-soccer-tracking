@@ -7,7 +7,7 @@ on one machine. The archive now sits with the recording instead::
         16-28-37.784.MP4          the original clips, untouched
         game_16-28-37.784.mp4     the combined game, also untouched (a stream copy of the clips)
         analysis/
-            2026-10-03_game_16-28-37.784/        one directory per analysed video, named by recording date + file
+            2026-10-03_game_16-28-37.784/        one directory per analyzed video, named by recording date + file
                 match.json        this index (sources, segments, format, team names)
                 events.json, report.json, replay.json, calibration.json, highlights/, identities/ ...
                 segments/         the Stage A results (and the ball scan's) for this match's windows
@@ -34,11 +34,47 @@ from soccer_analytics.analysis.events import EventLog
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-ANALYSIS_DIRNAME = "analysis"  # the folder each analysed video's match directory lives in
+ANALYSIS_DIRNAME = "analysis"  # the folder each analyzed video's match directory lives in
 SEGMENTS_DIRNAME = "segments"  # Stage A results, inside the match directory
+GAME_MANIFEST_FILENAME = "game.json"  # a game's clip manifest; the manifest itself is the analyzed source
 LEGACY_MATCHES_ROOT = REPO_ROOT / "data" / "matches"  # where archives lived before the move beside the footage
 MATCHES_ROOT = LEGACY_MATCHES_ROOT  # kept for callers that still name the old root
 DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Archives written before the project switched to American spellings keep their old keys and landmark labels.
+# They are mapped on load so an existing match directory keeps working unchanged.
+_LEGACY_REPLAY_KEYS = {"team_colours": "team_colors"}
+_LEGACY_REPORT_KEYS = {"frames_analysed": "frames_analyzed"}
+_LEGACY_LANDMARK_LABELS = {
+    "centre spot": "center spot",
+    "centre circle near": "center circle near",
+    "centre circle far": "center circle far",
+    "centre circle left": "center circle left",
+    "centre circle right": "center circle right",
+}
+
+
+def upgrade_legacy_keys(payload: dict, legacy: dict[str, str]) -> dict:
+    """Rename keys spelled the British way; a current key wins if both are present."""
+    for old, new in legacy.items():
+        if old in payload and new not in payload:
+            payload[new] = payload.pop(old)
+    return payload
+
+
+def upgrade_replay_payload(payload: dict) -> dict:
+    """Map a replay payload from before the American spelling switch onto the current keys."""
+    return upgrade_legacy_keys(payload, _LEGACY_REPLAY_KEYS)
+
+
+def upgrade_report_payload(payload: dict) -> dict:
+    """Map a report payload from before the American spelling switch onto the current keys."""
+    return upgrade_legacy_keys(payload, _LEGACY_REPORT_KEYS)
+
+
+def upgrade_landmark_label(label: str | None) -> str | None:
+    """Map a landmark label from before the American spelling switch onto its current name."""
+    return None if label is None else _LEGACY_LANDMARK_LABELS.get(label, label)
 
 
 def video_roots() -> list[Path]:
@@ -57,8 +93,8 @@ def video_roots() -> list[Path]:
 def discover_videos(roots: list[Path] | None = None) -> list[Path]:
     """Video files under the footage roots, newest first, so the most recent match is the default.
 
-    Anything under an ``analysis`` directory is excluded: the reels, preview clips and centred clips the tool
-    itself writes are MP4s too, and listing an analysis's own output back as footage to analyse is nonsense.
+    Anything under an ``analysis`` directory is excluded: the reels, preview clips and centered clips the tool
+    itself writes are MP4s too, and listing an analysis's own output back as footage to analyze is nonsense.
     """
     found: list[Path] = []
     for root in roots if roots is not None else video_roots():
@@ -82,8 +118,8 @@ def analysis_id_for(video: str | Path) -> str:
     """The analysis directory's name for one video: the recording's date, then the file's own name.
 
     The date comes from the footage directory's name when it is a ``YYYY-MM-DD`` folder (how the camera share is
-    organised), else from the file's timestamp - so ids sort chronologically by when the match was *played*, not
-    by when someone got round to analysing it, and two teams' matches never share an id by accident.
+    organized), else from the file's timestamp - so ids sort chronologically by when the match was *played*, not
+    by when someone got round to analyzing it, and two teams' matches never share an id by accident.
     """
     video = Path(video)
     if DATE_DIR_RE.match(video.parent.name):
@@ -114,8 +150,15 @@ def analysis_dir_for(video: str | Path) -> Path:
 
 
 def segments_root_for(video: str | Path) -> Path:
-    """Where Stage A output for this footage goes: with the rest of its analysis, not in the repository."""
-    return analysis_dir_for(video) / SEGMENTS_DIRNAME
+    """Where Stage A output for this footage goes: with the rest of its analysis, not in the repository.
+
+    A ``game.json`` manifest is itself the analyzed source (the clips are never merged), and it already lives in
+    its analysis directory - the segments belong in a ``segments/`` folder right beside it.
+    """
+    path = Path(video)
+    if path.name == GAME_MANIFEST_FILENAME:
+        return path.parent / SEGMENTS_DIRNAME
+    return analysis_dir_for(path) / SEGMENTS_DIRNAME
 
 
 def match_id_from_path(path: str | Path) -> str:
@@ -186,7 +229,7 @@ class MatchLibrary:
 
     ``MatchLibrary()`` finds every analysis: the self-contained ``analysis/<id>`` directories beside the footage,
     and - until migrated - the old ``data/matches`` archives. ``MatchLibrary(root)`` keeps the old single-root
-    behaviour for tests and scripts that point at one directory explicitly.
+    behavior for tests and scripts that point at one directory explicitly.
     """
 
     def __init__(self, root: str | Path | None = None):
@@ -232,7 +275,7 @@ class MatchLibrary:
         return sorted(self._index_map())
 
     def match_for_video(self, video: str | Path) -> str | None:
-        """The id of the analysis saved beside this video, or ``None`` when it has not been analysed yet."""
+        """The id of the analysis saved beside this video, or ``None`` when it has not been analyzed yet."""
         directory = analysis_dir_for(video)
         return directory.name if (directory / "match.json").exists() else None
 
@@ -310,7 +353,7 @@ class MatchLibrary:
             )
         return rows
 
-    # --- artefacts -------------------------------------------------------------------------------------------
+    # --- artifacts -------------------------------------------------------------------------------------------
     def save_calibration(self, match_id: str, calibration: PitchCalibration) -> Path:
         path = self.path(match_id) / "calibration.json"
         _atomic_write(path, calibration.to_json())
@@ -344,7 +387,11 @@ class MatchLibrary:
         path = self.path(match_id) / "clicks.json"
         if not path.exists():
             return []
-        return json.loads(path.read_text()).get("clicks", [])
+        clicks = json.loads(path.read_text()).get("clicks", [])
+        for click in clicks:  # labels from before the American spelling switch
+            if click.get("label"):
+                click["label"] = upgrade_landmark_label(click["label"])
+        return clicks
 
     def save_report(self, match_id: str, payload: dict) -> Path:
         path = self.path(match_id) / "report.json"
@@ -353,14 +400,14 @@ class MatchLibrary:
 
     def load_report(self, match_id: str) -> dict | None:
         path = self.path(match_id) / "report.json"
-        return json.loads(path.read_text()) if path.exists() else None
+        return upgrade_report_payload(json.loads(path.read_text())) if path.exists() else None
 
     def save_replay(self, match_id: str, payload: dict, boxes: dict | None = None) -> Path:
         """Per-frame track data for the animated pitch view (fetched by the browser as a media file).
 
         ``boxes`` - each track's own image boxes, ``{track_id: (N, 4)}`` - are written beside it as an ``npz``
         instead of inside the payload: the browser never draws them, and a whole game's worth is tens of megabytes
-        of JSON that every view of the match would download. The centred-clip cutter reads them from here.
+        of JSON that every view of the match would download. The centered-clip cutter reads them from here.
         """
         path = self.path(match_id) / "replay.json"
         _atomic_write(path, payload)
@@ -378,7 +425,7 @@ class MatchLibrary:
 
     def load_replay(self, match_id: str) -> dict | None:
         path = self.path(match_id) / "replay.json"
-        return json.loads(path.read_text()) if path.exists() else None
+        return upgrade_replay_payload(json.loads(path.read_text())) if path.exists() else None
 
     def save_jerseys(self, match_id: str, payload: dict) -> Path:
         """The background scanner's raw readings and per-track suggestions."""
@@ -414,7 +461,7 @@ class MatchLibrary:
         return json.loads(path.read_text()) if path.exists() else {}
 
     def identities_dir(self, match_id: str) -> Path:
-        """Where a still of each appearance is kept, so recognising who a track is costs one seek and no scan."""
+        """Where a still of each appearance is kept, so recognizing who a track is costs one seek and no scan."""
         path = self.path(match_id) / "identities"
         path.mkdir(parents=True, exist_ok=True)
         return path

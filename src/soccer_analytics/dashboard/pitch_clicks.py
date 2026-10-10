@@ -1,13 +1,13 @@
 """Pitch-landmark clicking: where to click, and how a click on a zoomed crop maps back to the frame.
 
-This is deliberately kept out of the Streamlit page. The coordinate maths is the part of landmark registration that
+This is deliberately kept out of the Streamlit page. The coordinate math is the part of landmark registration that
 is easy to get subtly wrong (and impossible to unit-test inside a Streamlit script), so it lives here as pure
 functions and the page only wires it to the component.
 
 Three coordinate systems meet here, and mixing them up is silent rather than loud:
 
 * **native pixels** - the frame as decoded, e.g. 3840x2160. `zoom_box` and the click crops work in these.
-* **frame-normalised** - ``u = x / frame_width`` and ``v = y / frame_width``. Note ``v`` is divided by the *width*,
+* **frame-normalized** - ``u = x / frame_width`` and ``v = y / frame_width``. Note ``v`` is divided by the *width*,
   not the height: that is the convention the camera model and the solver use, and it is not the same as the fraction
   of the frame you see on screen.
 * **canvas pixels** - what the browser component reports, after the crop has been shrunk to at most `CLICK_MAX_WIDTH`.
@@ -30,9 +30,9 @@ from soccer_analytics.geometry.pitch_calibration import Landmark, PitchCalibrati
 
 CLICK_MAX_WIDTH = 1600  # canvas pixels sent to the browser; small crops go at native size, which gives the accuracy
 
-# Standard pitch markings (metres), the same for every format. Kept in one place so the clickable landmarks and the
+# Standard pitch markings (meters), the same for every format. Kept in one place so the clickable landmarks and the
 # outline drawn back onto the frame cannot drift apart.
-GOAL_WIDTH_M = 7.32  # between the posts, so each post stands 3.66 m either side of the goal centre
+GOAL_WIDTH_M = 7.32  # between the posts, so each post stands 3.66 m either side of the goal center
 GOAL_BOX_DEPTH_M = 5.5
 # The goal area (six-yard box) is 5.5 m out from *each goalpost*, and the posts are 7.32 m apart, so its half-width
 # is 3.66 + 5.5 = 9.16 m - not 5.5 m. Using 5.5 drew a goal box narrower than the real one.
@@ -40,7 +40,7 @@ GOAL_BOX_HALF_WIDTH_M = 9.16
 PENALTY_BOX_DEPTH_M = 16.5
 PENALTY_BOX_HALF_WIDTH_M = 20.16
 PENALTY_SPOT_DISTANCE_M = 11.0
-CENTRE_CIRCLE_RADIUS_M = 9.15
+CENTER_CIRCLE_RADIUS_M = 9.15
 
 
 def landmark_table(length_m: float, width_m: float) -> dict[str, tuple[float, float]]:
@@ -48,19 +48,19 @@ def landmark_table(length_m: float, width_m: float) -> dict[str, tuple[float, fl
 
     Corners first because they spread the fit across the pitch, then the goalposts - which matter because the near
     corners are often out of frame, and a post is a far easier thing to pick out than a corner flag. The halfway
-    line and centre spot then pin the middle down.
+    line and center spot then pin the middle down.
 
     The rest are the markings that are *usually* visible and add spread where the corners cannot: the penalty
-    spots, and the four cardinals of the centre circle. They are the same standard markings for every format, so
+    spots, and the four cardinals of the center circle. They are the same standard markings for every format, so
     the same list works once the dimensions are known - and because they sit at a range of distances from the
     camera they are exactly the near landmarks the fit is short of when the near corners are out of shot. The
-    centre circle is drawn from the halfway line, so a click on any of them is a measurement of the pitch, not of
+    center circle is drawn from the halfway line, so a click on any of them is a measurement of the pitch, not of
     the camera.
 
     The boxes are deliberately *not* clickable. The goal box (six-yard box) is the hardest marking on the pitch to
     place accurately - the box is small, its lines are lost against the netting and the goal frame - and the
     penalty box corners are little better: the corner is a bare junction of two lines with nothing to focus on, so
-    a click a metre out is a metre of error in the fit. The posts carry that end of the pitch instead, and the
+    a click a meter out is a meter of error in the fit. The posts carry that end of the pitch instead, and the
     penalty spots pin the box's depth.
     """
     half_length = length_m / 2
@@ -71,8 +71,8 @@ def landmark_table(length_m: float, width_m: float) -> dict[str, tuple[float, fl
         "corner near-right": (length_m, 0.0),
         "corner far-right": (length_m, width_m),
         "corner far-left": (0.0, width_m),
-        # The posts, not the goal centre: the base of a post is a hard, high-contrast edge that can be clicked to a
-        # pixel, whereas the middle of the goal mouth is a judgement call between two posts - and the posts are what
+        # The posts, not the goal center: the base of a post is a hard, high-contrast edge that can be clicked to a
+        # pixel, whereas the middle of the goal mouth is a judgment call between two posts - and the posts are what
         # the goal box is measured from, so they are the more useful pair.
         "goal post left-near": (0.0, half_width - half_goal),
         "goal post left-far": (0.0, half_width + half_goal),
@@ -80,15 +80,15 @@ def landmark_table(length_m: float, width_m: float) -> dict[str, tuple[float, fl
         "goal post right-far": (length_m, half_width + half_goal),
         "halfway near": (half_length, 0.0),
         "halfway far": (half_length, width_m),
-        "centre spot": (half_length, half_width),
-        # Penalty spots: 11 m out from the goal line, on the goal centre line.
+        "center spot": (half_length, half_width),
+        # Penalty spots: 11 m out from the goal line, on the goal center line.
         "penalty spot left": (PENALTY_SPOT_DISTANCE_M, half_width),
         "penalty spot right": (length_m - PENALTY_SPOT_DISTANCE_M, half_width),
-        # Centre circle cardinals: 9.15 m from the centre spot, on the halfway line and the centre line.
-        "centre circle near": (half_length, half_width - CENTRE_CIRCLE_RADIUS_M),
-        "centre circle far": (half_length, half_width + CENTRE_CIRCLE_RADIUS_M),
-        "centre circle left": (half_length - CENTRE_CIRCLE_RADIUS_M, half_width),
-        "centre circle right": (half_length + CENTRE_CIRCLE_RADIUS_M, half_width),
+        # Center circle cardinals: 9.15 m from the center spot, on the halfway line and the center line.
+        "center circle near": (half_length, half_width - CENTER_CIRCLE_RADIUS_M),
+        "center circle far": (half_length, half_width + CENTER_CIRCLE_RADIUS_M),
+        "center circle left": (half_length - CENTER_CIRCLE_RADIUS_M, half_width),
+        "center circle right": (half_length + CENTER_CIRCLE_RADIUS_M, half_width),
     }
 
 
@@ -116,13 +116,13 @@ LANDMARK_HELP: dict[str, str] = {
     ),
     "halfway near": "Where the halfway line meets the near touchline.",
     "halfway far": "Where the halfway line meets the far touchline.",
-    "centre spot": "The centre spot (or the centre of the centre circle).",
-    "penalty spot left": "The penalty spot at the left-hand end - 11 m out from the goal line, on the goal centre line.",
-    "penalty spot right": "The penalty spot at the right-hand end - 11 m out from the goal line, on the goal centre line.",
-    "centre circle near": "Where the centre circle crosses the centre line, on the near side of the halfway line.",
-    "centre circle far": "Where the centre circle crosses the centre line, on the far side of the halfway line.",
-    "centre circle left": "Where the centre circle crosses the halfway line, on the left-hand side of the centre spot.",
-    "centre circle right": "Where the centre circle crosses the halfway line, on the right-hand side of the centre spot.",
+    "center spot": "The center spot (or the center of the center circle).",
+    "penalty spot left": "The penalty spot at the left-hand end - 11 m out from the goal line, on the goal center line.",
+    "penalty spot right": "The penalty spot at the right-hand end - 11 m out from the goal line, on the goal center line.",
+    "center circle near": "Where the center circle crosses the center line, on the near side of the halfway line.",
+    "center circle far": "Where the center circle crosses the center line, on the far side of the halfway line.",
+    "center circle left": "Where the center circle crosses the halfway line, on the left-hand side of the center spot.",
+    "center circle right": "Where the center circle crosses the halfway line, on the right-hand side of the center spot.",
 }
 
 
@@ -131,24 +131,24 @@ def pitch_landmark_order(length_m: float, width_m: float) -> list[str]:
     return list(landmark_table(length_m, width_m))
 
 
-def zoom_box(width: int, height: int, zoom: float, centre_x: float, centre_y: float) -> tuple[int, int, int, int]:
+def zoom_box(width: int, height: int, zoom: float, center_x: float, center_y: float) -> tuple[int, int, int, int]:
     """The native-pixel crop the clicker shows: ``(x0, y0, w, h)``, always inside the frame.
 
     Zooming matters more than it sounds. A full 4K frame shown at 1600 px means one screen pixel is ~2.4 native
-    pixels, and on the far side of the pitch that is roughly a metre of ground error per pixel. At zoom 8 a screen
+    pixels, and on the far side of the pitch that is roughly a meter of ground error per pixel. At zoom 8 a screen
     pixel is a native pixel, so the click is as good as the user's eye.
     """
     w = max(64, int(round(width / zoom)))
     h = max(64, int(round(w * height / width)))
-    x0 = int(round(centre_x * width - w / 2))
-    y0 = int(round(centre_y * height - h / 2))
+    x0 = int(round(center_x * width - w / 2))
+    y0 = int(round(center_y * height - h / 2))
     return max(0, min(width - w, x0)), max(0, min(height - h, y0)), w, h
 
 
-def actual_centre(box: tuple[int, int, int, int], frame_size: tuple[int, int]) -> tuple[float, float]:
+def actual_center(box: tuple[int, int, int, int], frame_size: tuple[int, int]) -> tuple[float, float]:
     """Where the crop really ended up, as fractions of frame width and height.
 
-    This is the same as the requested centre unless the crop was clamped at a frame edge, and the difference is what
+    This is the same as the requested center unless the crop was clamped at a frame edge, and the difference is what
     the indicator in the component reports back to the user.
     """
     x0, y0, w, h = box
@@ -161,10 +161,10 @@ def clamp01(value: float) -> float:
     return float(min(1.0, max(0.0, value)))
 
 
-def point_centre(u: float, v: float, frame_size: tuple[int, int]) -> tuple[float, float]:
-    """Where a stored landmark click sits for the view's centre: x by width, y by height.
+def point_center(u: float, v: float, frame_size: tuple[int, int]) -> tuple[float, float]:
+    """Where a stored landmark click sits for the view's center: x by width, y by height.
 
-    A click's ``v`` is normalised by the frame *width* (the solver's convention), while the view's centre is the
+    A click's ``v`` is normalized by the frame *width* (the solver's convention), while the view's center is the
     fraction of the frame you see across and down. The vertical term is therefore converted exactly once, here -
     which is what makes "jump to this landmark" land on it instead of a fraction of an aspect ratio away.
     """
@@ -184,7 +184,7 @@ def canvas_scale(crop_width: int) -> float:
 def frame_to_canvas(
     u: float, v: float, scale: float, box: tuple[int, int, int, int], frame_width: int
 ) -> tuple[float, float]:
-    """Frame-normalised position -> canvas pixels of the current crop."""
+    """Frame-normalized position -> canvas pixels of the current crop."""
     x0, y0, _w, _h = box
     return (u * frame_width - x0) * scale, (v * frame_width - y0) * scale
 
@@ -192,13 +192,13 @@ def frame_to_canvas(
 def canvas_to_frame(
     x: float, y: float, scale: float, box: tuple[int, int, int, int], frame_width: int
 ) -> tuple[float, float]:
-    """Canvas pixels of the current crop -> frame-normalised position (both axes by width, as the solver expects)."""
+    """Canvas pixels of the current crop -> frame-normalized position (both axes by width, as the solver expects)."""
     x0, y0, _w, _h = box
     return (x0 + x / scale) / frame_width, (y0 + y / scale) / frame_width
 
 
 def inside_crop(u: float, v: float, box: tuple[int, int, int, int], scale: float, frame_width: int) -> bool:
-    """Whether a frame-normalised position falls inside the current crop (so a marker there is draggable)."""
+    """Whether a frame-normalized position falls inside the current crop (so a marker there is draggable)."""
     x, y = frame_to_canvas(u, v, scale, box, frame_width)
     _x0, _y0, w, h = box
     return 0 <= x <= w * scale and 0 <= y <= h * scale
@@ -298,12 +298,12 @@ def points_in_crop(
 
 
 def landmarks_from_points(
-    labelled: list[tuple[dict, str]], table: dict[str, tuple[float, float]]
+    labeled: list[tuple[dict, str]], table: dict[str, tuple[float, float]]
 ) -> list[Landmark]:
-    """Turn labelled clicks into solver landmarks, each carrying the frame it was clicked on."""
+    """Turn labeled clicks into solver landmarks, each carrying the frame it was clicked on."""
     return [
         Landmark(point["frame"], point["u"], point["v"], table[label][0], table[label][1], label)
-        for point, label in labelled
+        for point, label in labeled
     ]
 
 
@@ -324,7 +324,7 @@ def projected_landmarks(
     q: np.ndarray,
     focal: float,
 ) -> list[dict]:
-    """Where the calibration puts the named landmarks on this frame, as frame-normalised ``(u, v)``.
+    """Where the calibration puts the named landmarks on this frame, as frame-normalized ``(u, v)``.
 
     These are the *predicted* positions - where the current fit believes each marking is. Their whole use is the
     re-anchoring workflow: place them as markers, drag each onto the real marking, and the drags measure exactly
@@ -386,7 +386,7 @@ class ClickResult:
     """
 
     points: list[tuple[float, float, str]] = field(default_factory=list)
-    centre: tuple[float, float] | None = None
+    center: tuple[float, float] | None = None
     zoom: float | None = None
     action: str = ""
     frame: int | None = None
@@ -426,15 +426,15 @@ def parse_result(value: object) -> ClickResult:
         if len(point) == 2:
             label = feature.get("label")
             points.append((float(point[0]), float(point[1]), str(label) if label else ""))
-    centre = None
-    if isinstance(value.get("centre_x"), (int, float)) and isinstance(value.get("centre_y"), (int, float)):
-        centre = (clamp01(value["centre_x"]), clamp01(value["centre_y"]))
+    center = None
+    if isinstance(value.get("center_x"), (int, float)) and isinstance(value.get("center_y"), (int, float)):
+        center = (clamp01(value["center_x"]), clamp01(value["center_y"]))
     zoom = float(value["zoom"]) if isinstance(value.get("zoom"), (int, float)) else None
     frame = int(value["frame"]) if isinstance(value.get("frame"), (int, float)) else None
     seq = int(value["seq"]) if isinstance(value.get("seq"), (int, float)) else 0
     mount = int(value["mount"]) if isinstance(value.get("mount"), (int, float)) else 0
     return ClickResult(
-        points=points, centre=centre, zoom=zoom, action=str(value.get("action") or ""), frame=frame,
+        points=points, center=center, zoom=zoom, action=str(value.get("action") or ""), frame=frame,
         seq=seq, mount=mount,
     )
 
@@ -444,7 +444,7 @@ def repeated_labels_within_a_frame(pairs: Iterable[tuple[int, str]]) -> list[str
 
     Clicking one landmark again on a *different* frame is how the chain gets re-anchored across a long video, so it
     is not a duplicate and must not be blocked. Two clicks of one landmark on one picture, though, claim two
-    different pitch positions for a single image point: whichever is wrong would drag the fit towards itself.
+    different pitch positions for a single image point: whichever is wrong would drag the fit toward itself.
     """
     counts: dict[tuple[int, str], int] = {}
     for frame, label in pairs:
@@ -501,7 +501,7 @@ def project_landmarks(
 
 
 def pitch_marking_polylines(length_m: float, width_m: float, *, arc_points: int = 48) -> list[np.ndarray]:
-    """The pitch markings as polylines in pitch metres, for drawing the outline back onto a frame.
+    """The pitch markings as polylines in pitch meters, for drawing the outline back onto a frame.
 
     Everything is a polyline - circles and arcs are sampled - so the caller only has to project points and draw
     segments. That is what keeps the overlay honest under the perspective projection, where a circle on the ground is
@@ -537,20 +537,20 @@ def pitch_marking_polylines(length_m: float, width_m: float, *, arc_points: int 
                 ]
             )
         )
-    # Centre circle.
+    # Center circle.
     angles = np.linspace(0.0, 2.0 * np.pi, arc_points)
     lines.append(
         np.column_stack(
-            [half_length + CENTRE_CIRCLE_RADIUS_M * np.cos(angles), half_width + CENTRE_CIRCLE_RADIUS_M * np.sin(angles)]
+            [half_length + CENTER_CIRCLE_RADIUS_M * np.cos(angles), half_width + CENTER_CIRCLE_RADIUS_M * np.sin(angles)]
         )
     )
     # Penalty arcs: the part of the 9.15 m circle around each penalty spot that lies outside the penalty box.
-    theta = np.arccos((PENALTY_BOX_DEPTH_M - PENALTY_SPOT_DISTANCE_M) / CENTRE_CIRCLE_RADIUS_M)
+    theta = np.arccos((PENALTY_BOX_DEPTH_M - PENALTY_SPOT_DISTANCE_M) / CENTER_CIRCLE_RADIUS_M)
     for spot_x, facing in ((PENALTY_SPOT_DISTANCE_M, 0.0), (length_m - PENALTY_SPOT_DISTANCE_M, np.pi)):
         arc = np.linspace(facing - theta, facing + theta, arc_points)
         lines.append(
             np.column_stack(
-                [spot_x + CENTRE_CIRCLE_RADIUS_M * np.cos(arc), half_width + CENTRE_CIRCLE_RADIUS_M * np.sin(arc)]
+                [spot_x + CENTER_CIRCLE_RADIUS_M * np.cos(arc), half_width + CENTER_CIRCLE_RADIUS_M * np.sin(arc)]
             )
         )
     # Corner arcs (1 m radius).
@@ -578,12 +578,12 @@ def overlay_homographies(
 
     The whole-frame viewport is scrubbed and played *in the browser*, so Python never sees most of the frames the
     overlay has to be drawn on. Instead Python samples the corrected chain at ``samples`` frames and, for each,
-    fits the homography that maps pitch metres to frame-normalised pixels through the calibration at that moment.
+    fits the homography that maps pitch meters to frame-normalized pixels through the calibration at that moment.
     The browser picks the two samples bracketing the frame it is showing and interpolates the coefficients - the
     chain is smooth on this spacing, so the interpolation error is far below a pixel.
 
     Each entry is ``{"frame": int, "h": [9 floats]}`` with ``h`` row-major, mapping ``(x_m, y_m, 1)`` to
-    ``(u, v, 1)`` in frame-normalised pixels (u by width, v by width - the convention everywhere here).
+    ``(u, v, 1)`` in frame-normalized pixels (u by width, v by width - the convention everywhere here).
     """
     if frame_count <= 0 or len(q) == 0:
         return []
@@ -630,11 +630,11 @@ def pitch_overlay(
     width_m: float,
     table: dict[str, tuple[float, float]] | None = None,
 ) -> np.ndarray:
-    """Draw the pitch markings back into the frame - the check that the landmarks were labelled the right way round.
+    """Draw the pitch markings back into the frame - the check that the landmarks were labeled the right way round.
 
     Without this the user has no way to tell a good registration from a mirrored one: the numbers alone look
     plausible either way. The whole set of standard markings is drawn - touchlines, halfway line, both boxes, the
-    centre circle, the penalty arcs and spots and the corner arcs - so a fit can be checked against the markings
+    center circle, the penalty arcs and spots and the corner arcs - so a fit can be checked against the markings
     that are actually visible rather than only the outline. Pass ``table`` to mark each named landmark as well, which
     shows the corners that were never clicked where the fit puts them.
     """
@@ -663,6 +663,6 @@ def pitch_overlay(
             spot = (int(round(x)), int(round(y)))
             cv2.drawMarker(drawn, spot, (255, 0, 255), cv2.MARKER_CROSS, 14, 3)
             # Outlined text so the labels stay readable over grass as well as over the pitch markings.
-            for colour, thickness in (((0, 0, 0), 4), ((255, 255, 255), 1)):
-                cv2.putText(drawn, name, (spot[0] + 10, spot[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, thickness)
+            for color, thickness in (((0, 0, 0), 4), ((255, 255, 255), 1)):
+                cv2.putText(drawn, name, (spot[0] + 10, spot[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, thickness)
     return drawn

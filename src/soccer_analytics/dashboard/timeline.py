@@ -1,13 +1,13 @@
 """A scrubbable video timeline for choosing the frame to place landmarks on.
 
-Step 2 originally offered a plain ``st.slider`` over the analysed frame index, and it felt wrong for two reasons:
+Step 2 originally offered a plain ``st.slider`` over the analyzed frame index, and it felt wrong for two reasons:
 
 * every notch of the slider is a full Streamlit rerun, so dragging re-ran the whole page - and re-read a frame from
   the 4K source with ffmpeg - many times a second, and
-* the slider showed no picture, so you could not see what you were scrubbing towards.
+* the slider showed no picture, so you could not see what you were scrubbing toward.
 
 A real timeline needs the picture to live in the browser, because a round trip per pixel is far too slow. So this
-module builds a small, fast-to-seek H.264 proxy of *just the analysed segment* (cached beside the segment results);
+module builds a small, fast-to-seek H.264 proxy of *just the analyzed segment* (cached beside the segment results);
 the landmark viewport plays it, so scrubbing and aiming happen on the same picture and the drag never leaves the
 browser. Scrubbing reports nothing to Python at all - the magnified crop is only re-read when the user aims at a
 point, which is what keeps the drag smooth.
@@ -25,15 +25,17 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import numpy as np
 
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegError, probe_video, run_ffmpeg_with_progress
+from soccer_analytics.ingest.ffmpeg_reader import FFmpegError, run_ffmpeg_with_progress
+from soccer_analytics.ingest.source import as_source, concat_copies, probe_source, window_segments
 
 PROXY_WIDTH = 960  # wide enough to pick out pitch markings while scrubbing, small enough to seek instantly
-PROXY_FPS = 30.0  # twice the 15 fps analysis rate, so a scrub never skips an analysed frame
+PROXY_FPS = 30.0  # twice the 15 fps analysis rate, so a scrub never skips an analyzed frame
 PROXY_FILE = "proxy.mp4"
 PROXY_DIR = "scrubber"  # sits under the segment directory, so it invalidates when the segment is rebuilt
 BUILD_STATE_FILE = "scrubber_build.json"
@@ -78,14 +80,14 @@ def proxy_is_ready(segment_dir: str | Path) -> bool:
 
 
 def frame_time(times: np.ndarray | list[float], index: int) -> float:
-    """Source seconds of an analysed frame index, clamped to the segment."""
+    """Source seconds of an analyzed frame index, clamped to the segment."""
     if len(times) == 0:
         raise ValueError("no frames in segment")
     return float(np.asarray(times)[int(np.clip(index, 0, len(times) - 1))])
 
 
 def nearest_frame_index(times: np.ndarray | list[float], t_source: float) -> int:
-    """Index of the analysed frame closest in source time to ``t_source``, clamped into range."""
+    """Index of the analyzed frame closest in source time to ``t_source``, clamped into range."""
     if len(times) == 0:
         return 0
     return int(np.clip(int(np.abs(np.asarray(times) - float(t_source)).argmin()), 0, len(times) - 1))
@@ -155,45 +157,78 @@ def build_proxy(
     for a finished one. ``on_progress(fraction)`` follows the encode. Raises :class:`FFmpegError` if neither the GPU
     nor the software encoder works.
 
+    ``video_path`` may be a ``game.json`` manifest (a never-merged game): a window crossing a clip join is then
+    proxied clip by clip - each an ordinary seek inside its own clip, never the concat demuxer - and the pieces
+    joined by stream copy, which is exact because they were all encoded with the same size and rate.
+
     ``skip_frame`` is passed to the decoder; :func:`proxy_skip_frame` decides it from the window length. It trades
     temporal smoothness (one picture per second on this footage) for speed, and nothing else: the frame that is
     finally clicked is still read from the source at full resolution.
     """
-    video_path = Path(video_path)
-    probe = probe_video(video_path)
+    resolved = as_source(video_path)
+    probe = probe_source(resolved)
     out_width = _even(width)
     out_height = _even(out_width * probe.height / probe.width)
     out_path = proxy_path(segment_dir)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_name(out_path.name + ".tmp.mp4")
     gop = max(1, int(round(fps)))
+    pieces = window_segments(resolved, start_s, duration_s)
+    if not pieces:
+        raise FFmpegError(f"nothing to proxy in {video_path} at {float(start_s):.1f}s")
+    total = sum(piece.duration_s for piece in pieces) or max(1e-6, float(duration_s))
 
-    last_error = ""
-    for use_gpu in ([True, False] if prefer_gpu else [False]):
+    def encode_piece(piece, destination: Path, progress) -> None:
+        last_error = ""
+        for use_gpu in ([True, False] if prefer_gpu else [False]):
+            if destination.exists():
+                destination.unlink()
+            command = proxy_command(
+                piece.path,
+                destination,
+                start_s=piece.start_s,
+                duration_s=piece.duration_s,
+                width=out_width,
+                height=out_height,
+                fps=fps,
+                gop=gop,
+                skip_frame=skip_frame,
+                use_gpu=use_gpu,
+            )
+            returncode, output = run_ffmpeg_with_progress(command, piece.duration_s, progress)
+            if returncode == 0 and destination.exists() and destination.stat().st_size > 0:
+                return
+            last_error = output or f"ffmpeg exited with {returncode}"
+        if destination.exists():
+            destination.unlink()
+        raise FFmpegError(f"could not build a timeline proxy for {piece.path}: {last_error}")
+
+    try:
+        if len(pieces) == 1:
+            piece = pieces[0]
+            encode_piece(piece, tmp_path, on_progress)
+        else:
+            with tempfile.TemporaryDirectory(prefix="proxy_pieces_") as tmp:
+                parts: list[Path] = []
+                done = 0.0
+                for index, piece in enumerate(pieces):
+                    part = Path(tmp) / f"piece_{index}.mp4"
+
+                    def piece_progress(fraction, base=done, span=piece.duration_s) -> None:
+                        if on_progress is not None:
+                            on_progress(min(0.99, (base + span * float(fraction)) / total))
+
+                    encode_piece(piece, part, piece_progress)
+                    done += piece.duration_s
+                    parts.append(part)
+                concat_copies(parts, tmp_path)
+        os.replace(tmp_path, out_path)
+        if on_progress is not None:
+            on_progress(1.0)
+        return out_path
+    finally:
         if tmp_path.exists():
             tmp_path.unlink()
-        command = proxy_command(
-            video_path,
-            tmp_path,
-            start_s=start_s,
-            duration_s=duration_s,
-            width=out_width,
-            height=out_height,
-            fps=fps,
-            gop=gop,
-            skip_frame=skip_frame,
-            use_gpu=use_gpu,
-        )
-        returncode, output = run_ffmpeg_with_progress(command, duration_s, on_progress)
-        if returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
-            os.replace(tmp_path, out_path)
-            if on_progress is not None:
-                on_progress(1.0)
-            return out_path
-        last_error = output or f"ffmpeg exited with {returncode}"
-    if tmp_path.exists():
-        tmp_path.unlink()
-    raise FFmpegError(f"could not build a timeline proxy for {video_path}: {last_error}")
 
 
 # --------------------------------------------------------------------------------------------------------------

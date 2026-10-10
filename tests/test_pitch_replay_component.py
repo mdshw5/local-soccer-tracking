@@ -48,7 +48,7 @@ def test_the_tag_bar_offers_every_event_type_on_the_playback_second() -> None:
     assert "state.time" in send_tag, "the tag must be stamped with the playback's own second"
     assert "Math.min(state.data.duration_s" in send_tag, "a tag before a payload has loaded must not be sent"
     assert "pendingTags" in send_tag, "unacknowledged presses must ride along with the next one"
-    assert "args.ack_tag_seq" in html, "the acknowledgement is what clears a stored press"
+    assert "args.ack_tag_seq" in html, "the acknowledgment is what clears a stored press"
     assert "state.pendingTags = state.pendingTags.filter" in html
 
 
@@ -86,21 +86,21 @@ def test_the_scanned_ball_layer_exists_and_distinguishes_forecasts() -> None:
     """
     html = COMPONENT.read_text()
     assert "state.data.ball" in html
-    assert "BALL_COLOUR" in html
+    assert "BALL_COLOR" in html
     assert "ball[2]" in html, "the per-frame measured flag must drive the drawing"
     assert "drawSoccerBall" in html, "the ball must read as a football, not another filled circle"
 
 
-def test_the_markers_wear_the_measured_kit_colour() -> None:
-    """The kit colour is measured data, so the component takes it from the payload - palette only as fallback.
+def test_the_markers_wear_the_measured_kit_color() -> None:
+    """The kit color is measured data, so the component takes it from the payload - palette only as fallback.
 
-    The number inside a marker also has to stay readable *on* that colour: a fixed white number disappears on a
-    white kit, which is why the text colour is chosen from the marker's own colour rather than hard-coded.
+    The number inside a marker also has to stay readable *on* that color: a fixed white number disappears on a
+    white kit, which is why the text color is chosen from the marker's own color rather than hard-coded.
     """
     html = COMPONENT.read_text()
-    assert "state.data.team_colours" in html, "markers must read the measured kit colours from the payload"
-    assert "TEAM_COLOURS[team]" in html, "the fixed palette must remain as the fallback"
-    assert "markerTextColour" in html, "the number colour must follow the kit colour, not be assumed white"
+    assert "state.data.team_colors" in html, "markers must read the measured kit colors from the payload"
+    assert "TEAM_COLORS[team]" in html, "the fixed palette must remain as the fallback"
+    assert "markerTextColor" in html, "the number color must follow the kit color, not be assumed white"
 
 
 def test_the_camera_direction_line_is_drawn_from_the_camera_position() -> None:
@@ -111,22 +111,22 @@ def test_the_camera_direction_line_is_drawn_from_the_camera_position() -> None:
     """
     html = COMPONENT.read_text()
     assert "state.data.camera" in html, "the line is drawn from the camera position in the payload"
-    assert "CAMERA_COLOUR" in html
+    assert "CAMERA_COLOR" in html
     assert "viewBounds" in html, "the view must expand to include the camera position"
     assert "cam[0] - MARGIN_M" in html and "cam[1] - MARGIN_M" in html
 
 
-def test_roles_are_colour_coded_and_named_in_the_legend() -> None:
-    """Referee and goalkeepers wear fixed-colour rings; the legend names the colours, not the markers.
+def test_roles_are_color_coded_and_named_in_the_legend() -> None:
+    """Referee and goalkeepers wear fixed-color rings; the legend names the colors, not the markers.
 
     The kit descriptor is not trusted for this: measured on the real game one keeper's kit read "red" while
-    being orange to the eye. Role identity rides the payload's ``role`` field and a colour the maths cannot
-    muddy - and the user asked for colour coding, not text labels.
+    being orange to the eye. Role identity rides the payload's ``role`` field and a color the math cannot
+    muddy - and the user asked for color coding, not text labels.
     """
     html = COMPONENT.read_text()
-    assert "ROLE_COLOURS" in html and "referee:" in html and "goalkeeper:" in html
+    assert "ROLE_COLORS" in html and "referee:" in html and "goalkeeper:" in html
     assert "player.role" in html, "the marker ring must read the role the payload carries"
-    assert "referee (ring)" in html and "goalkeeper (ring)" in html, "the legend must name the ring colours"
+    assert "referee (ring)" in html and "goalkeeper (ring)" in html, "the legend must name the ring colors"
 
 
 def test_attack_arrows_carry_each_teams_direction_and_swap_at_half_time() -> None:
@@ -150,7 +150,7 @@ def test_the_timeline_strip_draws_momentum_and_events() -> None:
     assert "args.events" in html, "events travel as a component argument"
     assert "args.momentum" in html, "momentum travels as a component argument"
     assert "drawTimeline" in html
-    assert "eventColour" in html, "each event type has its own colour"
+    assert "eventColor" in html, "each event type has its own color"
     assert "event.source === 'manual'" in html, "a manual tag must be drawn differently from a detected one"
     assert "timeline.addEventListener('click'" in html, "clicking the strip must seek the replay"
 
@@ -175,7 +175,7 @@ def test_the_arrows_step_between_timeline_events_instead_of_frames() -> None:
 def test_timeline_markers_name_their_event_on_hover() -> None:
     """The strip is a canvas, so hovering needs a hit test in the drawing's own coordinates and a fixed-position
     popover (which the canvas cannot clip): the event's type, its second, the team, whether it was tagged or
-    detected and any note - the glance the marker colours alone cannot give. The arrows flash the same popover
+    detected and any note - the glance the marker colors alone cannot give. The arrows flash the same popover
     for the event they land on."""
     html = COMPONENT.read_text()
     assert 'id="tl-popover"' in html and "#tl-popover {" in html
@@ -224,6 +224,21 @@ def test_the_pitch_and_the_footage_stream_sit_side_by_side() -> None:
         "the tag bar is stacked under the animation, not beside it"
     )
     assert "pitchPane.clientWidth" in html, "the pitch must measure its own pane, not the page"
+
+
+def test_the_footage_can_take_the_whole_page_and_give_it_back() -> None:
+    """The split is the working layout, but watching the match itself wants the footage alone. One button toggles
+    between them client-side (a round trip would make the jump a page rerun): the pitch column steps aside and the
+    same click brings it back. A paused pane refetches its still at the new width; a running stream keeps playing
+    and is re-asked at the new width on its next restart."""
+    html = COMPONENT.read_text()
+    assert 'id="wide"' in html, "the toggle sits in the controls"
+    wide_css = html.split("body.wide #pitch-pane {", 1)[1].split("}", 1)[0]
+    assert "display: none" in wide_css, "full width means the pitch column steps aside"
+    handler = html.split("wideBtn.addEventListener", 1)[1].split("resyncFootageBtn", 1)[0]
+    assert "classList.toggle('wide'" in handler, "one click toggles both ways"
+    assert "scheduleStill()" in handler, "a paused pane's still should match the new width"
+    assert "setFrameHeight" in handler, "the iframe height must follow the layout change"
 
 
 def test_playback_holds_until_the_streams_first_frame_but_never_forever() -> None:
@@ -281,7 +296,7 @@ def test_a_stream_that_falls_behind_is_restarted_not_left_to_drift() -> None:
     assert "FOOTAGE_DRIFT_TOLERANCE_S" in html, "a restart costs an encode: only correct a visible divergence"
     assert "FOOTAGE_MIN_RESTART_INTERVAL_MS" in html, "and never restart more often than this"
     assert "function restartFootage" in html
-    assert "footageVideo.currentTime" in html, "the drift is measured off the video's own clock, not modelled"
+    assert "footageVideo.currentTime" in html, "the drift is measured off the video's own clock, not modeled"
 
 
 def test_the_footage_sync_can_be_turned_off() -> None:
@@ -452,7 +467,7 @@ def test_the_panes_clock_comes_from_the_video_itself() -> None:
     check compares the animation's clock against a measurement - the stream's zero is the strip second it was
     asked for, and its clock starts when the first *frame* arrives, not when the request was made."""
     html = COMPONENT.read_text()
-    assert "footageVideo.currentTime * state.footageRate" in html, "the display position is measured, not modelled"
+    assert "footageVideo.currentTime * state.footageRate" in html, "the display position is measured, not modeled"
     assert "state.footageOpenStrip = state.time" in html, "the stream's zero is the strip second it was asked for"
     opener = html.split("function openFootage", 1)[1].split("function restartFootage", 1)[0]
     assert "state.footageAwaitingFirstFrame = true" in opener, "the wait begins with the request"

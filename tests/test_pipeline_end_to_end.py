@@ -47,9 +47,9 @@ def test_stage_b_report_matches_the_simulated_match(played_match) -> None:
         detections, pitch_length_m=PITCH_LENGTH, pitch_width_m=PITCH_WIDTH, match_frames=len(segment.time)
     )
 
-    assert report.frames_analysed == len(segment.time)
+    assert report.frames_analyzed == len(segment.time)
     assert report.detections_used > 0
-    assert len(report.teams) == 2, "the two kit colours should surface as two teams"
+    assert len(report.teams) == 2, "the two kit colors should surface as two teams"
     assert report.teams[0].possession_share + report.teams[1].possession_share <= 1.0 + 1e-6
 
     tracked = [player for player in report.players if len(player.frame) >= 8]
@@ -106,7 +106,7 @@ def test_report_survives_the_archive_and_feeds_the_highlights(tmp_path: Path) ->
             "momentum": report.momentum,
             "notes": report.notes,
             "pitch": [PITCH_LENGTH, PITCH_WIDTH],
-            "frames_analysed": report.frames_analysed,
+            "frames_analyzed": report.frames_analyzed,
             "detections_used": report.detections_used,
         },
     )

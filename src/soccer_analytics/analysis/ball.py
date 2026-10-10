@@ -46,13 +46,13 @@ def blank_overlays(frame: np.ndarray) -> np.ndarray:
     frame[int(h * STAMP_REGION[1]) :, : int(w * STAMP_REGION[0])] = 0
     return frame
 
-# All coordinates are normalised by the frame width (the convention the rest of the pipeline uses, where a click's
-# v is also divided by the width). At 4K one normalised unit is 3840 px; the comments give the 4K equivalents.
+# All coordinates are normalized by the frame width (the convention the rest of the pipeline uses, where a click's
+# v is also divided by the width). At 4K one normalized unit is 3840 px; the comments give the 4K equivalents.
 MIN_SIZE = 0.003  # ~12 px across; smaller is grass texture, a line speck, or detector noise
 MAX_SIZE = 0.06  # ~230 px; larger is a player, a bib, a bottle - something the detector latched onto
 
 # Frame-count windows are derived from seconds at the tracker's own rate (see BallTrack.__post_init__), so the
-# tracker behaves the same at 5, 15 or any other analysis rate. Spatial gates stay in normalised units: a higher
+# tracker behaves the same at 5, 15 or any other analysis rate. Spatial gates stay in normalized units: a higher
 # rate shrinks the per-frame displacement, so the same gate tightens naturally in time.
 GATE = 0.045  # ~170 px; how far from the prediction a detection may sit and still be the same ball
 COAST_SECONDS = 2.4  # longer without a detection and the track is better declared lost
@@ -67,7 +67,7 @@ MARGIN = 0.02  # ~77 px; the band outside the frame within which a prediction st
 VELOCITY_GAIN = 0.5  # EMA gain per frame at the reference rate; scaled by rate to keep the same time constant
 VELOCITY_GAIN_REFERENCE_FPS = 5.0  # the rate every window in this section was tuned at
 SPEED_GATE = 0.35  # extra gate per unit of speed: a fast ball's next position is genuinely uncertain by more
-MAX_SPEED_PER_S = 1.0  # normalised units/second (~3800 px/s at 4K) - faster than any pass, so cap, don't trust it
+MAX_SPEED_PER_S = 1.0  # normalized units/second (~3800 px/s at 4K) - faster than any pass, so cap, don't trust it
 REENTRY_VELOCITY_SECONDS = 1.6  # a re-entry within this long is a moving ball, not a fresh sighting
 MAX_COAST = round(COAST_SECONDS * VELOCITY_GAIN_REFERENCE_FPS)  # 12 frames at the reference rate (tests import it)
 
@@ -148,7 +148,7 @@ class BallTrack:
     def update(self, detections, step: np.ndarray | None = None, full_frame: bool = False) -> dict:
         """Fold one frame's detections in; returns the state after this frame.
 
-        ``detections`` are ``(conf, u, v, w, h)`` in normalised coordinates. ``full_frame`` says they came from a
+        ``detections`` are ``(conf, u, v, w, h)`` in normalized coordinates. ``full_frame`` says they came from a
         scan of the whole picture (so a detection far from the prediction may be a *re-entry*), rather than from a
         window around the prediction (where distance is evidence against, not for).
         """

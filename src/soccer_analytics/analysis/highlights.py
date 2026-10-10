@@ -20,6 +20,7 @@ from pathlib import Path
 
 from soccer_analytics.analysis.events import VERDICT_FALSE, Event
 from soccer_analytics.ingest.ffmpeg_reader import run_ffmpeg_with_progress
+from soccer_analytics.ingest.source import ClipSource, as_source, concat_copies, window_segments
 
 TIER_SECONDS = {"clip": 24.0, "goals": 90.0, "match": 300.0}
 MIN_CLIP_S = 15.0
@@ -182,12 +183,12 @@ def build_moments(
         swing = abs(float(bucket["team_0"]) - 0.5)
         if swing < 0.25:
             continue
-        centre = float(minute) * 60.0 + 30.0
+        center = float(minute) * 60.0 + 30.0
         moments.append(
             Moment(
-                time_s=centre,
-                start_s=max(0.0, centre - LEAD_S),
-                end_s=centre + TAIL_S,
+                time_s=center,
+                start_s=max(0.0, center - LEAD_S),
+                end_s=center + TAIL_S,
                 weight=MOMENTUM_WEIGHT * swing * 2.0,
                 reason=f"momentum swing ({(bucket['team_0']):.0%} action share)",
             )
@@ -272,7 +273,7 @@ def _encode_clip(
     video_filter: str | None = None,
     progress=None,
 ) -> Path:
-    """Re-encode one moment window to a normalised H.264 MP4, trying each encoder until one works.
+    """Re-encode one moment window to a normalized H.264 MP4, trying each encoder until one works.
 
     Cutting with ``-ss``/``-t`` and re-encoding (rather than stream-copying) is what makes the cut land exactly on
     the moment instead of the nearest keyframe. The frames are scaled and the rate fixed so parts can be joined and
@@ -287,7 +288,7 @@ def _encode_clip(
     second, so a whole window costs ten decodes rather than six hundred.
 
     ``video_filter`` replaces the default scale-and-rate filter outright. The one caller that needs it is the
-    player-centred cut, whose filter is a 'sendcmd'-driven moving crop rather than a fixed scale - everything else
+    player-centered cut, whose filter is a 'sendcmd'-driven moving crop rather than a fixed scale - everything else
     about the encode (encoder fallbacks, audio codec, progress) stays the same.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -299,6 +300,54 @@ def _encode_clip(
     # ``clip_start_s``/``clip_end_s`` (set by :func:`moment_on_source`) are the seconds to cut.
     cut_start = moment.clip_start_s if moment.clip_start_s is not None else moment.start_s
     cut_end = moment.clip_end_s if moment.clip_end_s is not None else moment.end_s
+    # A never-merged game's source is its manifest: the seconds are game seconds, and a window that crosses a
+    # clip join cannot be cut by one ffmpeg seek. Each clip's slice is encoded by the ordinary routine - a seek
+    # inside its own clip - and the pieces are joined by stream copy, all with the same size and rate. The
+    # player-centered cut (`video_filter`, a sendcmd schedule against one continuous run of frames) cannot be
+    # replayed piecewise and says so instead of cutting something mis-framed; its windows are seconds long
+    # against half-hour clips, so meeting a join is the rare case.
+    resolved = as_source(source)
+    if isinstance(resolved, ClipSource):
+        pieces = window_segments(resolved, cut_start, duration_s)
+        if not pieces:
+            raise RuntimeError(f"the moment at {cut_start:.1f}s lies outside the recording")
+        if len(pieces) > 1:
+            if video_filter is not None:
+                raise ValueError("this clip crosses a clip join; the player-centered cut needs one recording")
+            with tempfile.TemporaryDirectory(prefix="highlight_pieces_") as tmp:
+                parts: list[Path] = []
+                total = sum(piece.duration_s for piece in pieces) or duration_s
+                done = 0.0
+                for index, piece in enumerate(pieces):
+                    # Same container as the finished file: an audio-only preview's piece is a real mp3, not an
+                    # mp3 stream wearing an .mp4 name, so the final copy-join picks the right muxer first time.
+                    part = Path(tmp) / f"piece_{index}{output_path.suffix}"
+
+                    def piece_progress(fraction, base=done, span=piece.duration_s) -> None:
+                        if progress is not None:
+                            progress(min(1.0, (base + span * float(fraction)) / total))
+
+                    _encode_clip(
+                        Path(piece.path),
+                        replace(moment, clip_start_s=piece.start_s, clip_end_s=piece.end_s),
+                        part,
+                        duration_s=piece.duration_s,
+                        width=width,
+                        use_gpu=use_gpu,
+                        audio_codecs=audio_codecs,
+                        fps=fps,
+                        audio_only=audio_only,
+                        skip_frame=skip_frame,
+                        progress=piece_progress,
+                    )
+                    done += piece.duration_s
+                    parts.append(part)
+                concat_copies(parts, output_path)
+                if progress is not None:
+                    progress(1.0)
+                return output_path
+        source = Path(pieces[0].path)
+        cut_start = pieces[0].start_s
     for codec, gpu in attempts:
         if output_path.exists():
             output_path.unlink()
@@ -343,9 +392,9 @@ def export_player_clip(
     use_gpu: bool = True,
     progress=None,
 ):  # noqa: ANN201 - (Path, FramingPlan)
-    """Cut a window out of ``source`` that stays centred on one player, cropping rather than following the ball.
+    """Cut a window out of ``source`` that stays centered on one player, cropping rather than following the ball.
 
-    ``times`` and ``boxes`` are the player's own observations: source seconds and width-normalised
+    ``times`` and ``boxes`` are the player's own observations: source seconds and width-normalized
     ``(x1, y1, x2, y2)`` rectangles (exactly what the replay payload's ``boxes`` are). The crop is sized from the
     player's median height, moved by ffmpeg's ``sendcmd`` once per source frame, and clamped to the frame - see
     ``analysis.framing`` for why the trajectory is smoothed, why the command rate is the pan's update rate, and
@@ -355,7 +404,7 @@ def export_player_clip(
     it (the dashboard probes every video once) should pass it rather than pay for another ffprobe.
 
     Returns ``(path, plan)``: the plan carries the window the clip *actually* covers, which is shorter than the
-    requested one when the appearance ends or has a gap in it - the caller can then say so instead of labelling a
+    requested one when the appearance ends or has a gap in it - the caller can then say so instead of labeling a
     short clip with the length that was asked for. Raises ``ValueError`` when the track cannot be framed (no
     observations) and the ``RuntimeError`` from the encoder when ffmpeg fails - the page reports both rather than
     showing a broken clip.
@@ -364,9 +413,9 @@ def export_player_clip(
 
     source = Path(source)
     if source_size is None:
-        from soccer_analytics.ingest.ffmpeg_reader import probe_video
+        from soccer_analytics.ingest.source import probe_source
 
-        probe = probe_video(source)
+        probe = probe_source(source)
         source_size = (int(probe.width), int(probe.height))
     plan = plan_framing(
         times, boxes,
@@ -379,7 +428,7 @@ def export_player_clip(
         raise ValueError("this appearance has no observations to frame")
     moment = Moment(
         time_s=float(start_s), start_s=float(start_s), end_s=float(start_s) + plan.duration_s,
-        weight=0.0, reason="player-centred clip",
+        weight=0.0, reason="player-centered clip",
     )
     # The schedule goes to ffmpeg by *file*, not inline: at frame rate a minute-long clip's command list is
     # larger than the 128 KiB Linux allows in a single argument, and the whole encode would die on it. The file
@@ -418,7 +467,7 @@ def export_reel(
     """Cuts the reel's moments out of ``source`` and joins them into one file.
 
     Each moment is re-encoded (not stream-copied) so the cut lands exactly where intended instead of at the nearest
-    keyframe, and every part is normalised to the same size/rate before concatenation. ``progress`` covers the
+    keyframe, and every part is normalized to the same size/rate before concatenation. ``progress`` covers the
     whole reel: the clips dominate, the join is the final few percent.
 
     ``clip_offsets`` maps a recording's path to where it starts inside ``source`` (from the game manifest). A moment
@@ -474,7 +523,7 @@ def preview_clip_name(moment: Moment, mode: str = "full") -> str:
     The name is a hash of the window, what it shows and the *mode*, so the same tag reuses its cached clip (no
     re-encode on every rerun) while editing the tag - its time, type or note - produces a new file rather than a
     stale one. The mode is part of it because switching between a full-size clip and the sound alone is a different
-    artefact, not a different look at the same one, and a cached file must never be served for the wrong kind.
+    artifact, not a different look at the same one, and a cached file must never be served for the wrong kind.
     """
     if mode not in PREVIEW_SETTINGS:
         raise ValueError(f"unknown preview mode {mode!r}; expected one of {tuple(PREVIEW_SETTINGS)}")

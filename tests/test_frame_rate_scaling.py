@@ -2,7 +2,7 @@
 
 Stage A now runs at 15 fps by default (both 60 and 30 fps sources divide by it), while older segments were built
 at 5 fps - and most synthetic fixtures in this suite still are. These tests pin the two invariants that makes
-safe: the same wall-clock behaviour at any rate, and the tuned 5 fps behaviour unchanged at the reference rate.
+safe: the same wall-clock behavior at any rate, and the tuned 5 fps behavior unchanged at the reference rate.
 """
 
 from __future__ import annotations

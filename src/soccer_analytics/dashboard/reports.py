@@ -24,7 +24,7 @@ def team_name(team: int, names: Sequence[str] | None = None) -> str:
     Teams are numbered 0/1 by the kit clustering - the more red kit is 0 - and that numbering is what the metrics,
     the events and the replay store. The names live on the match record, so every view of a match says the same
     thing. A name is worth having because "team 0" is not something anybody can picture: the report carries each
-    team's kit colour, and the name is given against that colour.
+    team's kit color, and the name is given against that color.
     """
     if team < 0:
         return "referee/other"
@@ -33,25 +33,25 @@ def team_name(team: int, names: Sequence[str] | None = None) -> str:
     return DEFAULT_TEAM_NAMES[team] if team < len(DEFAULT_TEAM_NAMES) else f"Team {team + 1}"
 
 
-def team_colours(team_rows: Sequence[dict]) -> list[tuple[int, int, int] | None]:
-    """Each team's measured kit colour, in team order (0 then 1), ``None`` where there is none to show.
+def team_colors(team_rows: Sequence[dict]) -> list[tuple[int, int, int] | None]:
+    """Each team's measured kit color, in team order (0 then 1), ``None`` where there is none to show.
 
-    The clustering decides which kit is which colour, and the report keeps it so a team can be *named* - the swatch
+    The clustering decides which kit is which color, and the report keeps it so a team can be *named* - the swatch
     and the suggested name both come from here. Reading it is defensive on purpose: an older report simply has no
     such field, and a report whose kits could not be separated has the field empty.
     """
     by_index = {int(row.get("team", -1)): row for row in team_rows}
-    colours: list[tuple[int, int, int] | None] = []
+    colors: list[tuple[int, int, int] | None] = []
     for index in (0, 1):
         rgb = by_index.get(index, {}).get("kit_rgb")
-        colours.append(tuple(int(c) for c in rgb) if isinstance(rgb, (list, tuple)) and len(rgb) == 3 else None)
-    return colours
+        colors.append(tuple(int(c) for c in rgb) if isinstance(rgb, (list, tuple)) and len(rgb) == 3 else None)
+    return colors
 
 
-def colours_were_recorded(team_rows: Sequence[dict]) -> bool:
-    """Whether this report was built by a version that records kit colours at all.
+def colors_were_recorded(team_rows: Sequence[dict]) -> bool:
+    """Whether this report was built by a version that records kit colors at all.
 
-    It tells the two empty cases apart: a report from before the colours existed (rebuild it and they appear) from
+    It tells the two empty cases apart: a report from before the colors existed (rebuild it and they appear) from
     one whose kits the clustering could not separate (rebuilding will not help).
     """
     return any("kit_rgb" in row for row in team_rows)
@@ -79,7 +79,7 @@ def report_from_library(library: MatchLibrary, match_id: str | None) -> dict | N
 
 
 def momentum_on_window_clock(momentum: Mapping[int, dict] | None, window_start_s: float) -> dict[float, dict]:
-    """Re-key Stage B's momentum buckets from the recording's minutes onto the analysed window's clock.
+    """Re-key Stage B's momentum buckets from the recording's minutes onto the analyzed window's clock.
 
     Stage B keys its buckets by the minute of the recording - the clock its events and the highlight clips use.
     Everything on the timeline strip is drawn on the window's own clock, where the window's first frame is 0.

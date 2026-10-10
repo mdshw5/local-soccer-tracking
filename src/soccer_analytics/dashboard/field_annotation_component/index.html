@@ -260,10 +260,10 @@
       let overviewDataSrc = ''; // so an unchanged still is not re-decoded on every rerun
       let args = {};
       let lastActual = {x: 0.5, y: 0.5};
-      // The view is described entirely by where it is centred (fractions of frame width and height) and how far in
+      // The view is described entirely by where it is centered (fractions of frame width and height) and how far in
       // it is zoomed. Everything the user does - clicking or scrolling the overview, pressing the zoom buttons, or
       // scrubbing the timeline - only changes these, and Python is told about it afterwards.
-      let centre = {x: 0.5, y: 0.5};
+      let center = {x: 0.5, y: 0.5};
       let zoom = 8;
       let navigating = false;
       let panning = false;
@@ -281,9 +281,9 @@
       let cropFrame = 0; // the frame the magnified crop was actually rendered from
       let seekPending = false;
       // The pitch overlay, drawn by the browser: sampled pitch->pixel homographies along the chain plus the
-      // markings in pitch metres. Python recomputes both whenever the calibration changes, so a refit redraws.
+      // markings in pitch meters. Python recomputes both whenever the calibration changes, so a refit redraws.
       let overlaySamples = []; // [{frame, h: [9]}] sorted by frame
-      let overlayPolylines = []; // [[x, y], ...] per marking, in pitch metres
+      let overlayPolylines = []; // [[x, y], ...] per marking, in pitch meters
 
       function clamp(value, low, high) {
         if (high < low) return (low + high) / 2;
@@ -301,14 +301,14 @@
          actually reachable depends on the crop being held at a frame edge, which Python works out and reports back
          in `actual_*` - guessing it here would mean claiming "held" for perfectly reachable positions. */
       function updateHint() {
-        const requested = `zoom <b>${zoom.toFixed(1)}x</b>, centred on <b>${(centre.x * 100).toFixed(0)}%</b>, <b>${(
-          centre.y * 100
+        const requested = `zoom <b>${zoom.toFixed(1)}x</b>, centered on <b>${(center.x * 100).toFixed(0)}%</b>, <b>${(
+          center.y * 100
         ).toFixed(0)}%</b> of the frame`;
         if (navigating) {
           hint.innerHTML = requested;
           return;
         }
-        const held = Math.abs(centre.x - lastActual.x) > 0.002 || Math.abs(centre.y - lastActual.y) > 0.002;
+        const held = Math.abs(center.x - lastActual.x) > 0.002 || Math.abs(center.y - lastActual.y) > 0.002;
         hint.innerHTML = held
           ? `${requested} (held at ${(lastActual.x * 100).toFixed(0)}%, ${(lastActual.y * 100).toFixed(0)}% by the frame edge)`
           : requested;
@@ -319,16 +319,16 @@
         target.height = height;
       }
 
-      /* Where the crop would sit if the centre were applied right now, in native frame pixels. Mirrors the clamping
+      /* Where the crop would sit if the center were applied right now, in native frame pixels. Mirrors the clamping
          in `zoom_box` on the Python side so the box drawn here is the box that will actually be used. */
       function cropBox() {
         const frameWidth = args.frame_width || canvas.width;
         const frameHeight = args.frame_height || canvas.height;
         const cropW = frameWidth / zoom;
         const cropH = frameHeight / zoom;
-        const centreX = clamp(centre.x * frameWidth, cropW / 2, frameWidth - cropW / 2);
-        const centreY = clamp(centre.y * frameHeight, cropH / 2, frameHeight - cropH / 2);
-        return {x: centreX - cropW / 2, y: centreY - cropH / 2, w: cropW, h: cropH};
+        const centerX = clamp(center.x * frameWidth, cropW / 2, frameWidth - cropW / 2);
+        const centerY = clamp(center.y * frameHeight, cropH / 2, frameHeight - cropH / 2);
+        return {x: centerX - cropW / 2, y: centerY - cropH / 2, w: cropW, h: cropH};
       }
 
       /* Whether the picture on screen really is the frame the crop - and so the markers - belong to.
@@ -386,7 +386,7 @@
         const frameWidth = args.frame_width || overview.width;
         const frameHeight = args.frame_height || overview.height;
         const toX = overview.width / frameWidth;
-        // v is normalised by the frame *width* (the solver's convention), and the canvas maps frame pixels onto
+        // v is normalized by the frame *width* (the solver's convention), and the canvas maps frame pixels onto
         // itself by (canvas/frame) ratios: x by width, y by height. Dividing by the width here squashed the
         // geometry to 9/16 of its height - the pitch was drawn hovering far above the field.
         const toY = overview.height / frameHeight;
@@ -759,8 +759,8 @@
         Streamlit.setComponentValue({
           polygon: savedPolygon,
           features: savedFeatures,
-          centre_x: centre.x,
-          centre_y: centre.y,
+          center_x: center.x,
+          center_y: center.y,
           zoom: zoom,
           action: action,
           frame: currentFrame(),
@@ -780,9 +780,9 @@
         if (!rect.width || !rect.height) return null;
         const ox = (event.clientX - rect.left) * (overview.width / rect.width);
         const oy = (event.clientY - rect.top) * (overview.height / rect.height);
-        // Note the two conventions, which are deliberately different: the centre is a fraction of the frame *width*
+        // Note the two conventions, which are deliberately different: the center is a fraction of the frame *width*
         // across and a fraction of its *height* down (what `zoom_box` on the Python side expects). A landmark's `v`,
-        // by contrast, is normalised by width. Mixing them up shifts the view vertically by the aspect ratio, which
+        // by contrast, is normalized by width. Mixing them up shifts the view vertically by the aspect ratio, which
         // looks plausible until you compare it with the frame.
         return {
           u: clamp01(ox / overview.width),
@@ -814,8 +814,8 @@
           const point = overviewPoint(event);
           if (!point) return;
           // Zooming keeps the point under the pointer: whatever you scroll over is what you end up looking at.
-          centre.x = point.u;
-          centre.y = point.v;
+          center.x = point.u;
+          center.y = point.v;
           const factor = event.deltaY < 0 ? WHEEL_STEP : 1 / WHEEL_STEP;
           zoom = clamp(zoom * factor, ZOOM_MIN, ZOOM_MAX);
           applyGesture();
@@ -829,7 +829,7 @@
         if (!point) return;
         panning = true;
         movedPx = 0;
-        panStart = {u: point.u, v: point.v, px: point.px, py: point.py, centre: {x: centre.x, y: centre.y}};
+        panStart = {u: point.u, v: point.v, px: point.px, py: point.py, center: {x: center.x, y: center.y}};
         overview.setPointerCapture(event.pointerId);
       });
 
@@ -838,9 +838,9 @@
         const point = overviewPoint(event);
         if (!point) return;
         movedPx = Math.max(movedPx, Math.hypot(point.px - panStart.px, point.py - panStart.py));
-        // Panning drags the frame with the pointer, so the centre moves the other way.
-        centre.x = clamp01(panStart.centre.x + (panStart.u - point.u));
-        centre.y = clamp01(panStart.centre.y + (panStart.v - point.v));
+        // Panning drags the frame with the pointer, so the center moves the other way.
+        center.x = clamp01(panStart.center.x + (panStart.u - point.u));
+        center.y = clamp01(panStart.center.y + (panStart.v - point.v));
         applyGesture();
       });
 
@@ -851,8 +851,8 @@
           // A click, not a drag: aim the view straight at the point that was clicked.
           const point = overviewPoint(event);
           if (point) {
-            centre.x = point.u;
-            centre.y = point.v;
+            center.x = point.u;
+            center.y = point.v;
           }
           applyGesture();
         }
@@ -1083,16 +1083,16 @@
         if (typeof args.zoom === 'number') {
           zoom = clamp(args.zoom, ZOOM_MIN, ZOOM_MAX);
         }
-        if (typeof args.centre_x === 'number') {
-          centre.x = args.centre_x;
+        if (typeof args.center_x === 'number') {
+          center.x = args.center_x;
         }
-        if (typeof args.centre_y === 'number') {
-          centre.y = args.centre_y;
+        if (typeof args.center_y === 'number') {
+          center.y = args.center_y;
         }
         // Where the crop actually ended up, which differs from the request when it is held at a frame edge.
         lastActual = {
-          x: typeof args.actual_x === 'number' ? args.actual_x : centre.x,
-          y: typeof args.actual_y === 'number' ? args.actual_y : centre.y,
+          x: typeof args.actual_x === 'number' ? args.actual_x : center.x,
+          y: typeof args.actual_y === 'number' ? args.actual_y : center.y,
         };
         setCanvasSize(canvas, args.width || 1280, args.height || 720);
         currentPoints = [];

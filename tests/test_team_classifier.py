@@ -1,4 +1,4 @@
-"""Tests for grass-aware jersey colour features and robust team clustering.
+"""Tests for grass-aware jersey color features and robust team clustering.
 
 The grass masking and the clustering guards are ported from
 whisdev/soccer-video-detection-ai-agent.
@@ -12,9 +12,9 @@ import numpy as np
 from soccer_analytics.tracking.team_classifier import (
     UNASSIGNED_TEAM,
     TeamClassifier,
-    grass_colour,
+    grass_color,
     grass_hue_window,
-    kit_colour_histogram,
+    kit_color_histogram,
 )
 
 GRASS_BGR = (0, 180, 0)  # OpenCV hue ~60 — pitch green
@@ -38,7 +38,7 @@ def _pitch_with_player(
     kit: tuple[int, int, int],
     bbox: tuple[int, int, int, int] = (20, 20, 100, 100),
 ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
-    """A green pitch with a kit-coloured patch in the lower half of the player's torso."""
+    """A green pitch with a kit-colored patch in the lower half of the player's torso."""
     frame = _solid(120, 120, GRASS_BGR)
     x1, y1, x2, y2 = bbox
     torso_mid = y1 + int((y2 - y1) * 0.35)
@@ -50,10 +50,10 @@ def test_grass_hue_window_is_none_without_green():
     assert grass_hue_window(_solid(20, 20, RED_BGR)) is None
 
 
-def test_grass_colour_averages_only_green_pixels():
+def test_grass_color_averages_only_green_pixels():
     frame = _solid(20, 20, RED_BGR)
     frame[:5, :] = GRASS_BGR
-    assert tuple(round(channel) for channel in grass_colour(frame)) == GRASS_BGR
+    assert tuple(round(channel) for channel in grass_color(frame)) == GRASS_BGR
 
     window = grass_hue_window(frame)
     assert window is not None
@@ -76,7 +76,7 @@ def test_grass_window_covers_both_shaded_and_sunlit_grass():
 
 
 def test_grass_window_never_shrinks_below_the_fixed_band():
-    """A frame whose grass is one tight hue mode keeps exactly the old behaviour (mean hue +- 10)."""
+    """A frame whose grass is one tight hue mode keeps exactly the old behavior (mean hue +- 10)."""
     frame = _grass(45, 40, 40)
     window = grass_hue_window(frame)
     assert window is not None
@@ -89,8 +89,8 @@ def test_kit_histogram_masks_out_grass_pixels():
     grass_window = grass_hue_window(_solid(8, 8, GRASS_BGR))
     assert grass_window is not None
 
-    masked = kit_colour_histogram(crop, grass_window)
-    jersey_only = kit_colour_histogram(_solid(20, 20, RED_BGR))
+    masked = kit_color_histogram(crop, grass_window)
+    jersey_only = kit_color_histogram(_solid(20, 20, RED_BGR))
     assert np.allclose(masked, jersey_only, atol=1e-6)
 
 
@@ -99,7 +99,7 @@ def test_kit_histogram_keeps_all_pixels_when_the_crop_is_all_grass():
     grass_window = grass_hue_window(crop)
     assert grass_window is not None
     # Nothing survives the grass mask, so the unmasked crop is used instead.
-    assert kit_colour_histogram(crop, grass_window).sum() == kit_colour_histogram(crop).sum()
+    assert kit_color_histogram(crop, grass_window).sum() == kit_color_histogram(crop).sum()
 
 
 def test_team_classifier_separates_kits_seen_against_grass():

@@ -1,7 +1,7 @@
 """Drift correction: keeping a long video's projection on the markings, not just near the clicks.
 
 The failure this exists for is measured, not hypothetical: the motion chain is accurate near the frames the user
-clicked and slides metres off the markings by the end of a game. These tests build that situation on the simulated
+clicked and slides meters off the markings by the end of a game. These tests build that situation on the simulated
 match (a known per-step error accumulating along the chain), then check that fitting the smooth correction to
 clicks spread over the video puts the projection back on the pitch - and that it never makes a good fit worse.
 """
@@ -36,10 +36,10 @@ def _analysis_chain(segment) -> tuple[np.ndarray, np.ndarray]:
 def _drifted(segment, truth, per_step_rad: float):
     """The same segment with a small *rotation* error baked into every step - how a real chain drifts.
 
-    A constant per-step rotation error is the classic shape of accumulated error (a rotation centre that is not the
-    lens centre, unmodelled distortion): negligible for a second, metres of ground error by the end of a game. The
+    A constant per-step rotation error is the classic shape of accumulated error (a rotation center that is not the
+    lens center, unmodeled distortion): negligible for a second, meters of ground error by the end of a game. The
     drifted steps are integrated exactly as the analysis pass integrates the real ones, so the test's chain is the
-    kind of chain the dashboard actually loads - not an idealised one.
+    kind of chain the dashboard actually loads - not an idealized one.
     """
     from dataclasses import replace
 
@@ -113,7 +113,7 @@ def _median_pixel_error(calibration: PitchCalibration, q: np.ndarray, focal: np.
 
 @pytest.fixture(scope="module")
 def drifted_match():
-    """A 2-minute simulated match whose chain accumulates ~1.2 deg of pointing drift - metres of ground error."""
+    """A 2-minute simulated match whose chain accumulates ~1.2 deg of pointing drift - meters of ground error."""
     segment, truth = simulate_match(frames=600, seed=17)
     bad = _drifted(segment, truth, per_step_rad=5.0e-5)
     q, focal = segment_poses(bad)
@@ -219,7 +219,7 @@ def test_the_correction_holds_the_projection_across_the_whole_video(drifted_matc
     assert np.percentile(after, 90) < np.percentile(before, 90), "even the bad frames have to improve"
     for frame in ANCHORS:
         # A knot is four degrees of freedom against the clicks on it, not a per-frame calibration: this fixture's
-        # anchors end up within ~25 px at 1920, which is a fraction of a metre of ground error at these ranges -
+        # anchors end up within ~25 px at 1920, which is a fraction of a meter of ground error at these ranges -
         # against 47-78 px for the fit it replaced. A per-anchor homography (what per-frame calibrations solve
         # for) would take the rest; that is noted in the module rather than pretended away here.
         assert _median_pixel_error(corrected, q, focal, frame, truth) < 30.0, "an anchor must land on its clicks"

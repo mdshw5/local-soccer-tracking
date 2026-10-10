@@ -12,7 +12,7 @@ kit-color fallback path — the OSNet path needs weights we don't ship):
   * estimate the pitch's grass color per frame and mask grass pixels out of
     each player crop, so the jersey — not the pitch behind it — drives the
     color feature;
-  * aggregate samples per track and L2-normalise before clustering;
+  * aggregate samples per track and L2-normalize before clustering;
   * refuse to invent a split when the two clusters are near-identical;
   * order clusters deterministically so team ids are stable across clips.
 
@@ -41,7 +41,7 @@ MIN_VALUE = 40
 GRASS_HUE_PADDING = 10
 
 
-def grass_colour(frame: np.ndarray) -> tuple[float, float, float]:
+def grass_color(frame: np.ndarray) -> tuple[float, float, float]:
     """Mean BGR of the green (pitch) pixels; (0, 0, 0) when the frame has none."""
     if frame is None or frame.size == 0:
         return (0.0, 0.0, 0.0)
@@ -64,7 +64,7 @@ def _grass_mask(hsv: np.ndarray) -> np.ndarray:
 def grass_hue_window(frame: np.ndarray) -> tuple[int, int] | None:
     """Hue band that covers the frame's measured grass, or None when the frame has no grass.
 
-    Centred on the mean grass colour +- ``GRASS_HUE_PADDING``, then widened to the 2nd..98th percentile of the
+    Centered on the mean grass color +- ``GRASS_HUE_PADDING``, then widened to the 2nd..98th percentile of the
     grass pixels' hues - never narrower than the fixed band, and never outside the coarse green window. The
     widening is the point, and it was measured on the real whole game: grass has two hue modes (shaded ~34,
     sunlit ~60+), the mean sits in the gap between them, and a fixed +-10 band around it covered as little as
@@ -78,11 +78,11 @@ def grass_hue_window(frame: np.ndarray) -> tuple[int, int] | None:
     if not np.any(mask):
         return None
     mean = cv2.mean(frame, mask=mask)
-    centre = int(cv2.cvtColor(np.uint8([[list(mean[:3])]]), cv2.COLOR_BGR2HSV)[0, 0, 0])
+    center = int(cv2.cvtColor(np.uint8([[list(mean[:3])]]), cv2.COLOR_BGR2HSV)[0, 0, 0])
     hues = hsv[:, :, 0][mask > 0]
     p2, p98 = (int(value) for value in np.percentile(hues, [2, 98]))
-    lo = min(centre - GRASS_HUE_PADDING, p2)
-    hi = max(centre + GRASS_HUE_PADDING, p98)
+    lo = min(center - GRASS_HUE_PADDING, p2)
+    hi = max(center + GRASS_HUE_PADDING, p98)
     return (max(0, lo), min(179, hi))
 
 
@@ -101,12 +101,12 @@ def torso_crop(frame: np.ndarray, bbox: tuple[float, float, float, float]) -> np
     return crop if crop.size > 0 else None
 
 
-def kit_colour_histogram(
+def kit_color_histogram(
     crop: np.ndarray,
     grass_hues: tuple[int, int] | None = None,
     bins: int = 16,
 ) -> np.ndarray:
-    """Normalised HSV histogram of a crop with grass pixels masked out.
+    """Normalized HSV histogram of a crop with grass pixels masked out.
 
     `grass_hues` comes from `grass_hue_window` on the full frame; pass None for
     crops with no pitch visible (nothing is masked then).
@@ -153,7 +153,7 @@ class TeamClassifier:
         crop = torso_crop(frame, bbox)
         if crop is None:
             return
-        hist = kit_colour_histogram(crop, grass_hue_window(frame))
+        hist = kit_color_histogram(crop, grass_hue_window(frame))
         self._samples.setdefault(track_id, []).append(hist)
 
     def fit(self) -> None:

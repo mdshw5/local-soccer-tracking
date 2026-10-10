@@ -24,7 +24,7 @@ def test_predict_follows_the_step_homography() -> None:
     u, v = track.predict(shift)
     assert u == pytest.approx(0.51)
     assert v == pytest.approx(0.23)
-    # a projective step is dehomogenised, not read as if w were 1
+    # a projective step is dehomogenized, not read as if w were 1
     projective = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.2, 0.0, 1.0]])
     u, v = track.predict(projective)
     assert u == pytest.approx(0.5 / 1.1)

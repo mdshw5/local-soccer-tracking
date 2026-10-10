@@ -1,7 +1,7 @@
 """Refreshing the stored kit descriptors must not disturb anything else in the segment.
 
 The refresh exists because the kit descriptor depends only on a frame and a stored box - so a change to the grass
-mask can be applied to an analysed segment without redoing detection or camera motion. That claim is the whole
+mask can be applied to an analyzed segment without redoing detection or camera motion. That claim is the whole
 justification for the script, and it is falsifiable: if the rewrite perturbed the poses, the steps, the boxes or
 the confidences, the segment would silently stop matching the report built from it. So these tests pin that the
 only array that changes is ``det_kit`` - and that the refresh is idempotent, which is what makes it safe to re-run
@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import pytest
 
-from soccer_analytics.analysis.stage_a import SegmentConfig, analyse_segment, load_segment
+from soccer_analytics.analysis.stage_a import SegmentConfig, analyze_segment, load_segment
 from soccer_analytics.ingest.video_reader import VideoWriter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -88,9 +88,9 @@ def panning_video(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def analysed(tmp_path_factory, panning_video: Path) -> Path:
+def analyzed(tmp_path_factory, panning_video: Path) -> Path:
     out = tmp_path_factory.mktemp("segment")
-    analyse_segment(
+    analyze_segment(
         panning_video, out, config=SegmentConfig(fps=5.0, motion_width=320, detect_width=640, chunk_frames=15,
                                                   device="cpu"), model=_FakeModel(),
     )
@@ -113,14 +113,14 @@ def _copy_segment(source: Path, destination: Path) -> Path:
     return destination
 
 
-def test_the_refresh_changes_only_the_kit_descriptors(analysed: Path) -> None:
+def test_the_refresh_changes_only_the_kit_descriptors(analyzed: Path) -> None:
     """Everything the report was built from - poses, steps, focals, boxes, confidences - must come through as it was."""
     module = _script()
-    before = _snapshot(analysed)
+    before = _snapshot(analyzed)
 
-    status = module.refresh(analysed)
+    status = module.refresh(analyzed)
 
-    after = _snapshot(analysed)
+    after = _snapshot(analyzed)
     assert set(before) == set(after)
     for key in before:
         if key == "det_kit":
@@ -130,7 +130,7 @@ def test_the_refresh_changes_only_the_kit_descriptors(analysed: Path) -> None:
     assert status["chunks_done"] == status["total_chunks"] > 0
 
 
-def test_refreshing_twice_changes_nothing(analysed: Path) -> None:
+def test_refreshing_twice_changes_nothing(analyzed: Path) -> None:
     """Idempotence is what makes the script safe to re-run: a second pass has nothing left to correct.
 
     Without this, every run would report a fresh pile of "changed" descriptors and the number would say nothing
@@ -138,17 +138,17 @@ def test_refreshing_twice_changes_nothing(analysed: Path) -> None:
     which is what the resume count is for.
     """
     module = _script()
-    module.refresh(analysed)
-    first = _snapshot(analysed)["det_kit"]
+    module.refresh(analyzed)
+    first = _snapshot(analyzed)["det_kit"]
 
-    status = module.refresh(analysed)
+    status = module.refresh(analyzed)
 
-    assert np.array_equal(first, _snapshot(analysed)["det_kit"])
+    assert np.array_equal(first, _snapshot(analyzed)["det_kit"])
     assert status["descriptors_changed"] == 0, "a second pass over already-refreshed data changed something"
     assert status["chunks_done"] == status["total_chunks"], "a resumed run must still account for every chunk"
 
 
-def test_an_interrupted_run_resumes_instead_of_repeating(analysed: Path, tmp_path: Path) -> None:
+def test_an_interrupted_run_resumes_instead_of_repeating(analyzed: Path, tmp_path: Path) -> None:
     """A run that died at chunk N must not spend its minutes again on chunks 0..N-1.
 
     This is the reason the status file records a chunk count: the refresh takes ~25 minutes on a whole game, and a
@@ -156,7 +156,7 @@ def test_an_interrupted_run_resumes_instead_of_repeating(analysed: Path, tmp_pat
     whole run again.
     """
     module = _script()
-    fresh = _copy_segment(analysed, tmp_path / "resumed")
+    fresh = _copy_segment(analyzed, tmp_path / "resumed")
 
     module.refresh(fresh, limit_chunks=1)  # a partial run: chunk 0 only
 
@@ -168,12 +168,12 @@ def test_an_interrupted_run_resumes_instead_of_repeating(analysed: Path, tmp_pat
     assert 0 <= status["descriptors_changed"] <= status["chunks_done"] * len(_snapshot(fresh)["det_frame"])
 
 
-def test_the_status_file_says_what_happened_and_where(analysed: Path) -> None:
+def test_the_status_file_says_what_happened_and_where(analyzed: Path) -> None:
     """The dashboard reads this file, so the run must leave a state, a count and the chunk total behind."""
     module = _script()
-    module.refresh(analysed)
+    module.refresh(analyzed)
 
-    status = json.loads((analysed / module.STATUS_FILE).read_text())
+    status = json.loads((analyzed / module.STATUS_FILE).read_text())
 
     assert status["state"] == "done"
     assert status["chunks_done"] == status["total_chunks"]
@@ -185,30 +185,30 @@ def test_the_status_file_says_what_happened_and_where(analysed: Path) -> None:
     assert "error" not in status, "a finished run must not still carry the error of an earlier failed one"
 
 
-def test_a_partial_run_says_so_rather_than_claiming_the_whole_segment(analysed: Path) -> None:
+def test_a_partial_run_says_so_rather_than_claiming_the_whole_segment(analyzed: Path) -> None:
     """``--limit-chunks`` exists for smoke tests, so a limited run must not report itself as finished."""
     module = _script()
-    module.refresh(analysed)
+    module.refresh(analyzed)
 
-    status = module.refresh(analysed, limit_chunks=1)
+    status = module.refresh(analyzed, limit_chunks=1)
 
     assert status["state"] == "partial"
     assert status["chunks_done"] == 1 < status["total_chunks"]
 
 
-def test_the_segment_still_loads_after_a_refresh(analysed: Path) -> None:
+def test_the_segment_still_loads_after_a_refresh(analyzed: Path) -> None:
     """The guard that matters downstream: a rewritten chunk must still be a loadable segment."""
     module = _script()
-    module.refresh(analysed)
+    module.refresh(analyzed)
 
-    data = load_segment(analysed)
+    data = load_segment(analyzed)
 
     assert len(data.det_frame) > 0
     assert data.det_kit.shape[1] == 12
     assert np.all(data.det_kit[:, 0] >= 0.0), "kit_fraction is a fraction and must stay within 0..1"
 
 
-def test_the_chunk_times_are_read_as_absolute_source_times(analysed: Path, monkeypatch, tmp_path: Path) -> None:
+def test_the_chunk_times_are_read_as_absolute_source_times(analyzed: Path, monkeypatch, tmp_path: Path) -> None:
     """The reader must be pointed at ``times[0]`` itself, not at ``start_s + times[0]``.
 
     ``times[]`` already carries the analysis window's offset, so adding ``start_s`` again asks for a time past the
@@ -217,7 +217,7 @@ def test_the_chunk_times_are_read_as_absolute_source_times(analysed: Path, monke
     invisible in a test whose video starts at zero - hence this one, which asserts the seek argument itself.
     """
     module = _script()
-    fresh = _copy_segment(analysed, tmp_path / "absolute")
+    fresh = _copy_segment(analyzed, tmp_path / "absolute")
     seeks: list[float] = []
 
     class _RecordingReader:
@@ -227,7 +227,7 @@ def test_the_chunk_times_are_read_as_absolute_source_times(analysed: Path, monke
         def frames(self):
             return iter(())
 
-    monkeypatch.setattr(module, "FFmpegFrameReader", _RecordingReader)
+    monkeypatch.setattr(module, "open_reader", _RecordingReader)
     monkeypatch.setattr(module, "_done_chunks", lambda *args, **kwargs: 0)  # force every chunk to be visited
 
     with pytest.raises(RuntimeError, match="refusing to write a partial chunk"):
@@ -255,7 +255,38 @@ def test_the_done_count_is_only_trusted_for_the_same_descriptor_code(tmp_path: P
     assert module._done_chunks(tmp_path / "missing.json", 10, "aaaa") == 0
 
 
-def test_a_status_from_older_code_forces_the_chunks_to_be_re_read(analysed: Path) -> None:
+def test_the_chunk_is_decoded_at_the_analysis_width(analyzed: Path, monkeypatch, tmp_path: Path) -> None:
+    """The descriptor must be recomputed from the frame scale Stage A used (``detect_width``).
+
+    Decoding the source width instead was both slower - ~1.5x on the real game (46 vs 31 ms/frame on the same
+    window) - and inconsistent: a descriptor computed from the 4K frame is not the descriptor the pipeline
+    produces from the 1920 one, so a refreshed segment would drift from an unrefreshed one. The fixture video is
+    320 wide and was analyzed at a detect width of 640, so the two widths are trivially distinguishable here.
+    """
+    module = _script()
+    fresh = _copy_segment(analyzed, tmp_path / "width")
+    widths: list[int] = []
+    real_reader = module.open_reader
+
+    class _RecordingReader:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            widths.append(int(kwargs["width"]))
+            self._reader = real_reader(*args, **kwargs)
+
+        def frames(self):
+            return self._reader.frames()
+
+    monkeypatch.setattr(module, "open_reader", _RecordingReader)
+    monkeypatch.setattr(module, "_done_chunks", lambda *args, **kwargs: 0)  # force the chunk to be read
+
+    module.refresh(fresh, limit_chunks=1)
+
+    meta = json.loads((fresh / "meta.json").read_text())
+    assert int(meta["detect_width"]) != int(meta["width"]), "the fixture must distinguish the two widths"
+    assert widths == [int(meta["detect_width"])], "the reader must decode at the analysis width Stage A used"
+
+
+def test_a_status_from_older_code_forces_the_chunks_to_be_re_read(analyzed: Path) -> None:
     """The whole point of the fingerprint, end to end: stale descriptors on disk must be recomputed, not skipped.
 
     Measured on the real 2026-10-03 game: the previous refresh said "done" while every stored descriptor had
@@ -263,24 +294,24 @@ def test_a_status_from_older_code_forces_the_chunks_to_be_re_read(analysed: Path
     blanked, the status claims they are fresh, and only the mismatching hash can reveal otherwise.
     """
     module = _script()
-    module.refresh(analysed)
-    chunk = sorted(analysed.glob("chunk_*.npz"))[0]
+    module.refresh(analyzed)
+    chunk = sorted(analyzed.glob("chunk_*.npz"))[0]
     with np.load(chunk) as data:
         rows = {key: data[key] for key in data.files}
-    # A descriptor no current code would write: a mid-grey "kit" on boxes whose crops are too small to read.
+    # A descriptor no current code would write: a mid-gray "kit" on boxes whose crops are too small to read.
     rows["det_kit"] = np.full_like(rows["det_kit"], 0.5)
     np.savez_compressed(chunk, **rows)
-    status_path = analysed / module.STATUS_FILE
+    status_path = analyzed / module.STATUS_FILE
     status = json.loads(status_path.read_text())
     status["kit_code_hash"] = "not-the-current-code"
     status_path.write_text(json.dumps(status))
 
-    result = module.refresh(analysed, limit_chunks=1)
+    result = module.refresh(analyzed, limit_chunks=1)
 
     assert result["descriptors_changed"] > 0, "a stale status must not skip the re-read"
 
 
-def test_a_previous_runs_error_is_cleared_by_the_run_that_succeeds(analysed: Path, tmp_path: Path) -> None:
+def test_a_previous_runs_error_is_cleared_by_the_run_that_succeeds(analyzed: Path, tmp_path: Path) -> None:
     """A finished status must not still carry a failure's message.
 
     The status file is merged key by key, so a stale ``error`` survives a successful re-run unless it is explicitly
@@ -288,7 +319,7 @@ def test_a_previous_runs_error_is_cleared_by_the_run_that_succeeds(analysed: Pat
     how to resolve. Written here by hand because provoking the real failure costs a decode.
     """
     module = _script()
-    fresh = _copy_segment(analysed, tmp_path / "stale-error")
+    fresh = _copy_segment(analyzed, tmp_path / "stale-error")
     (fresh / module.STATUS_FILE).write_text(
         json.dumps({"state": "error", "chunks_done": 1, "error": "RuntimeError: an earlier run failed"})
     )
@@ -299,18 +330,18 @@ def test_a_previous_runs_error_is_cleared_by_the_run_that_succeeds(analysed: Pat
     assert "error" not in status, f"the earlier failure is still in the status: {status}"
 
 
-def test_a_decode_shortfall_is_an_error_not_a_silent_zeroed_chunk(analysed: Path, tmp_path, monkeypatch) -> None:
+def test_a_decode_shortfall_is_an_error_not_a_silent_zeroed_chunk(analyzed: Path, tmp_path, monkeypatch) -> None:
     """A reader that returns fewer frames than the chunk holds must fail loudly, leaving the chunk untouched.
 
     The alternative - writing the descriptors it did compute and zeroing the rest - would quietly replace real kit
-    colours with "no kit" for the missing frames, and the report would show it as a colour that was measured. It
+    colors with "no kit" for the missing frames, and the report would show it as a color that was measured. It
     also has to surface as ``state="error"`` in the status file rather than escaping as a ``SystemExit``, which
     would leave the page showing a run that is still going.
     """
     module = _script()
     # Its own copy: the resume logic trusts the previous run's chunk count, and the other tests have already
     # finished the shared segment, so a chunk would be skipped and the shortfall never reached.
-    fresh = _copy_segment(analysed, tmp_path / "short")
+    fresh = _copy_segment(analyzed, tmp_path / "short")
     before = _snapshot(fresh)["det_kit"]
 
     class _ShortReader:
@@ -321,7 +352,7 @@ def test_a_decode_shortfall_is_an_error_not_a_silent_zeroed_chunk(analysed: Path
             for index in range(3):  # far fewer than the chunk holds
                 yield float(index), np.zeros((8, 8, 3), dtype=np.uint8)
 
-    monkeypatch.setattr(module, "FFmpegFrameReader", _ShortReader)
+    monkeypatch.setattr(module, "open_reader", _ShortReader)
 
     with pytest.raises(RuntimeError, match="refusing to write a partial chunk"):
         module.refresh(fresh)

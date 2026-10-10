@@ -1,21 +1,21 @@
-"""The game as one continuous video, and the match's own clock on it.
+"""The game as a set of camera clips read as one continuous recording, and the match's own clock on it.
 
-The camera writes ~30-minute clips, so a game arrives as two or three files. Analysing them as separate videos
+The camera writes ~30-minute clips, so a game arrives as two or three files. Analyzing them as separate videos
 would restart the camera-motion chain and the player identities at every join, and there would be no single clock
-to hang "kick-off", "half-time" and "the final whistle" on. Combining the clips costs no re-encode - they come from
-one camera, so the streams are simply copied - and afterwards everything downstream (Stage A, frame grabs, audio,
-reels) sees an ordinary single video.
+to hang "kick-off", "half-time" and "the final whistle" on. The game is therefore described by this manifest:
+the clips in playing order with the game-clock second each begins at. Readers resolve a game time to the clip that
+contains it and decode clip after clip (`ingest.source`), so the joins are invisible to Stage A and the scans -
+and no merged video has to exist. (The old workflow stream-copied the clips into one file; `build_game` remains as
+an optional utility, but nothing in the pipeline needs it and the dashboard does not offer it.)
 
-What the combined video does not know is when the game actually was: recording starts before kick-off and runs on
-after the final whistle. Those three moments are marked by scrubbing the low-resolution proxy, and stored here, in
-the *game's own clock* - seconds into the combined video. Everything else (which half an event belongs to, which
-window to analyse) follows from those three numbers.
+What the clips do not know is when the game actually was: recording starts before kick-off and runs on after the
+final whistle. Those three moments are marked by scrubbing the marking stream (frames straight from the clips),
+and stored here, in the *game's own clock*. Everything else (which half an event belongs to, which window to
+analyze) follows from those three numbers.
 
-The video itself is written next to the clips it came from - it is as large as the clips are, so it belongs on the
-same disk, not in this repository. The manifest and the marking proxy live in the *analysis directory of that
-combined video* (``<footage>/analysis/<video id>/game.json``), beside the match record for the same footage, so a
-match directory carries its game manifest with it. The old ``data/games`` root stays readable for archives from
-before the move.
+The manifest lives in the analysis directory of the game itself (``<footage>/analysis/<id>/game.json``), beside
+the match record for the same footage, so a match directory carries its game with it. The old ``data/games`` root
+stays readable for archives from before the move.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ class GameRecord:
         return 1 if time_s < half else 2
 
     def window(self, selection: str) -> tuple[float, float]:
-        """The analysed ``(start, end)`` window in game seconds for a choice from :data:`WINDOW_CHOICES`."""
+        """The analyzed ``(start, end)`` window in game seconds for a choice from :data:`WINDOW_CHOICES`."""
         bounds = self.bounds()
         if bounds is None:
             raise ValueError("the game has not been marked yet")
@@ -204,7 +204,7 @@ class GameRecord:
 # --------------------------------------------------------------------------------------------------------------
 # Planning and building the combined video
 # --------------------------------------------------------------------------------------------------------------
-def sanitise(name: str) -> str:
+def sanitize(name: str) -> str:
     """A filesystem-safe version of a clip name; the camera's names carry colons."""
     return "".join(c if c.isalnum() or c in "-_." else "-" for c in name)
 
@@ -218,20 +218,21 @@ def game_id_for(paths: list[Path]) -> str:
     """Stable id for a set of clips, keyed by name *and* size so a replaced clip is not mistaken for the same game."""
     first = Path(paths[0])
     total = sum(Path(p).stat().st_size for p in paths)
-    return f"game_{sanitise(first.stem)}_{total}"
+    return f"game_{sanitize(first.stem)}_{total}"
 
 
 def output_for(paths: list[Path]) -> Path:
-    """Where the combined video goes: beside the clips, because it is as large as they are.
+    """The path the combination *would* have had; nothing writes it any more.
 
-    A single clip is already the game video and is returned as it stands. The alternative - concatenating one
-    input onto itself - would copy tens of gigabytes to produce a byte-identical file, and on a filesystem that
-    is nearly full that is how you lose a match you already have.
+    It survives because it is how the game's analysis directory is derived from the clips (the directory is named
+    after it - see :func:`analysis_id_for`), and because a single clip is already the game video and is returned
+    as it stands. A multi-clip game's manifest records the same name in ``output`` so archives that only know the
+    old layout can still find their game; the file itself no longer exists, and no reader needs it to.
     """
     if len(paths) == 1:
         return Path(paths[0])
     first = Path(paths[0])
-    return first.parent / f"game_{sanitise(first.stem)}.mp4"
+    return first.parent / f"game_{sanitize(first.stem)}.mp4"
 
 
 def locations(
@@ -425,15 +426,48 @@ def half_labels_for(record: GameRecord, times: Iterable[float]) -> list[str]:
     return [HALF_LABELS.get(record.half_of(float(time_s)), "-") for time_s in times]
 
 
-def clip_offset_for(record: GameRecord, video: str | Path) -> float | None:
-    """Where ``video`` starts inside the game's combined recording, or ``None`` when it is not one of its clips.
+def prepare(paths: Iterable[str | Path]) -> tuple[GameRecord, Path]:
+    """Plan the clips, keep the earlier marks, and write the manifest: no video is produced or copied.
 
-    A moment's seconds are seconds of the recording it was found in, and the game's clock is the combined video's.
-    A whistle scanned on ``16:58:38.391.MP4`` reports 5.3 s, which is 1805.5 s of the game - the two clocks differ
-    by this offset, and anything that asks a question about the game (which half, where on the timeline) has to
-    translate first. The combined video itself maps to 0.
+    This is what replaced the combination. The record names every clip and where it starts on the game clock;
+    Stage A, the marking stream and every frame grab resolve game time to a clip themselves, so the tens of
+    gigabytes of duplicate file, the build step and its failure modes are gone. Re-running over the same clips
+    preserves the marks - where half-time is does not change because the manifest was rewritten.
+    """
+    ordered, output, directory = locations(paths)
+    planned = plan(ordered)
+    if planned.problem:
+        raise ValueError(f"these clips cannot form one game: {planned.problem}")
+    duration = sum(float(clip.duration_s) for clip in planned.clips)
+    record = GameRecord(game_id=directory.name, output=str(output), duration_s=duration, clips=planned.clips)
+    manifest = directory / MANIFEST_FILE
+    if manifest.exists():
+        previous = GameRecord.load(directory)
+        if [clip.path for clip in previous.clips] == [clip.path for clip in planned.clips]:
+            record.start_s, record.half_s, record.end_s = previous.start_s, previous.half_s, previous.end_s
+    record.save(directory)
+    return record, directory
+
+
+def manifest_for(record: GameRecord) -> Path | None:
+    """The record's own manifest file, when it exists: the game's source of truth for readers."""
+    path = manifest_dir(record) / MANIFEST_FILE
+    return path if path.exists() else None
+
+
+def clip_offset_for(record: GameRecord, video: str | Path) -> float | None:
+    """Where ``video`` starts inside the game's recording, or ``None`` when it is not part of it.
+
+    A moment's seconds are seconds of the recording it was found in, and the game's clock is the game's own. A
+    whistle scanned on ``16:58:38.391.MP4`` reports 5.3 s, which is 1805.5 s of the game - the two clocks differ by
+    this offset, and anything that asks a question about the game (which half, where on the timeline) has to
+    translate first. The manifest itself (the game's source in the never-merged workflow) and the legacy combined
+    video both map to 0.
     """
     target = Path(video).resolve()
+    manifest = manifest_for(record)
+    if manifest is not None and manifest.resolve() == target:
+        return 0.0
     if Path(record.output).resolve() == target:
         return 0.0
     for clip in record.clips:
@@ -456,7 +490,7 @@ def half_labels_for_events(record: GameRecord, events: Iterable) -> list[str]:
     """The half each event belongs to, translating each one out of its own recording's clock first.
 
     An event carries the recording it was found in (``Event.video``); a whistle candidate's seconds are seconds of
-    a single camera file while the game's marks are on the combined video's clock. Labelling without translating
+    a single camera file while the game's marks are on the combined video's clock. Labeling without translating
     put every audio candidate in the first half - or outside the game entirely - because 5 s of a clip is not 5 s
     of the match.
     """
@@ -469,16 +503,20 @@ def half_labels_for_events(record: GameRecord, events: Iterable) -> list[str]:
 
 
 def find_for_video(video: str | Path, root: str | Path | None = None) -> GameRecord | None:
-    """The game record whose combined video is ``video``, if it was made by this app.
+    """The game record this path belongs to, if it was made by this app.
 
-    Both sides are resolved before comparing: the page passes the absolute path the video picker found, while a
-    manifest may name its video relatively (older builds did), and the two must still be recognised as the same.
-    The video's own analysis directory is checked first; then, unless a specific legacy ``root`` is given, the
-    manifests beside the rest of the footage and the old ``data/games`` archive.
+    The path may be a clip, the legacy combined video, or the game's own manifest - the never-merged workflow
+    analyzes the manifest, while the picker still hands over clips. Both sides are resolved before comparing: the
+    page passes the absolute path the video picker found, while a manifest may name its files relatively, and the
+    two must still be recognized as the same. The video's own analysis directory is checked first; then, unless a
+    specific legacy ``root`` is given, the manifests beside the rest of the footage and the old ``data/games``
+    archive.
     """
     target = Path(video).resolve()
     beside = manifest_dir_for_video(video) / MANIFEST_FILE
     candidates: list[Path] = [beside] if beside.exists() else []
+    if target.name == MANIFEST_FILE and target.exists():
+        candidates.insert(0, target)
     if root is not None:
         base = Path(root)
         if base.exists():
@@ -498,13 +536,22 @@ def find_for_video(video: str | Path, root: str | Path | None = None) -> GameRec
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             continue
         resolve_record_paths(record, manifest.parent)
-        if Path(record.output).resolve() != target:
+        if not _record_covers_path(record, manifest, target):
             continue
-        # Several manifests can describe the same video (a rebuild on a new game id); a marked one carries the
+        # Several manifests can describe the same game (a rebuild on a new game id); a marked one carries the
         # user's kick-off/half-time/full-time work, so it wins over an unmarked duplicate.
         if best is None or (record.bounds() is not None and best.bounds() is None):
             best = record
     return best
+
+
+def _record_covers_path(record: GameRecord, manifest: Path, target: Path) -> bool:
+    """Whether a game's path is the target: its manifest, its legacy combined video, or one of its clips."""
+    if manifest.resolve() == target:
+        return True
+    if Path(record.output).resolve() == target:
+        return True
+    return any(Path(clip.path).resolve() == target for clip in record.clips)
 
 
 # --------------------------------------------------------------------------------------------------------------

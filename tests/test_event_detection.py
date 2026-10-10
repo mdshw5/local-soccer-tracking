@@ -1,7 +1,7 @@
 """Event detection from the ball scan and the player tracks.
 
 Built on hand-made ball tracks with known geometry rather than the simulated match, because the point of each test
-is one detector's rule: a goal needs a centre-spot reset, a shot does not, a clearance needs to know which goal the
+is one detector's rule: a goal needs a center-spot reset, a shot does not, a clearance needs to know which goal the
 team defends. The simulated match is used only for the orientation, where the ground truth is the teams' own shape.
 """
 
@@ -70,10 +70,10 @@ def test_ball_motion_is_nan_across_a_gap() -> None:
 
 
 def test_ball_motion_rejects_positions_off_the_pitch() -> None:
-    """The projection of a ball near the horizon lands kilometres away; that is not a position."""
+    """The projection of a ball near the horizon lands kilometers away; that is not a position."""
     xy, measured, times = _ball([(20.0, 20.0)] * 5 + [(5000.0, 9000.0)] + [(20.0, 20.0)] * 5)
     motion = ball_motion(xy, measured, times, pitch=PITCH)
-    assert not np.isfinite(motion.xy[5, 0]), "a position kilometres off the pitch must be dropped"
+    assert not np.isfinite(motion.xy[5, 0]), "a position kilometers off the pitch must be dropped"
     assert not np.isfinite(motion.speed[5])
 
 
@@ -86,7 +86,7 @@ def test_ball_motion_caps_physically_impossible_speeds() -> None:
 
 
 def test_ball_motion_measures_straightness() -> None:
-    """A ball travelling in a line is straight; jitter that happens to be fast is not."""
+    """A ball traveling in a line is straight; jitter that happens to be fast is not."""
     straight_xy, measured, times = _ball([(10.0 + 2.0 * i, 20.0) for i in range(12)])
     motion = ball_motion(straight_xy, measured, times, pitch=PITCH)
     assert motion.straight[6] > 0.95, "a straight run must read as straight"
@@ -99,9 +99,9 @@ def test_ball_motion_measures_straightness() -> None:
     assert zigzag.straight[6] < 0.3, "a zig-zag must not read as travel"
 
 
-def test_a_goal_needs_the_centre_spot_reset() -> None:
-    """The ball reaching the goal line is not enough - it has to be put back on the centre spot."""
-    # Ball still, then driven into the left goal, then reset to the centre spot and held there.
+def test_a_goal_needs_the_center_spot_reset() -> None:
+    """The ball reaching the goal line is not enough - it has to be put back on the center spot."""
+    # Ball still, then driven into the left goal, then reset to the center spot and held there.
     positions: list[tuple[float, float] | None] = [(20.0, 20.0)] * 11
     positions += [(15.0, 20.0), (10.0, 20.0), (5.0, 20.0), (0.5, 20.0), (0.5, 20.0)]
     positions += [None, None, None]
@@ -110,16 +110,16 @@ def test_a_goal_needs_the_centre_spot_reset() -> None:
     events = detect_events(xy, measured, times, [], PITCH)
     goals = [e for e in events if e.type == "goal"]
     assert len(goals) == 1, [e.type for e in events]
-    assert "centre spot" in goals[0].note
+    assert "center spot" in goals[0].note
     assert goals[0].source == "ball"
 
 
 def test_a_ball_rolling_through_the_middle_is_not_a_reset() -> None:
-    """A goal needs the ball *put back* on the centre spot, not merely passing through the middle."""
+    """A goal needs the ball *put back* on the center spot, not merely passing through the middle."""
     positions: list[tuple[float, float] | None] = [(20.0, 20.0)] * 11
     positions += [(15.0, 20.0), (10.0, 20.0), (5.0, 20.0), (0.5, 20.0), (0.5, 20.0)]
     positions += [None, None, None]
-    # The ball crosses the centre spot at speed and keeps going: a pass, not a restart.
+    # The ball crosses the center spot at speed and keeps going: a pass, not a restart.
     positions += [(30.0, 20.0), (35.0, 20.0), (40.0, 20.0), (45.0, 20.0), (50.0, 20.0), (55.0, 20.0)]
     positions += [(58.0, 20.0)] * 10
     xy, measured, times = _ball(positions)
@@ -130,7 +130,7 @@ def test_a_ball_rolling_through_the_middle_is_not_a_reset() -> None:
 def test_a_forecast_reset_is_not_a_goal() -> None:
     """The scan's forecast across a missed frame is not a sighting: the *reset* has to be measured.
 
-    The ball crossing the line may be a forecast - the scan loses the ball against the net - but the centre-spot
+    The ball crossing the line may be a forecast - the scan loses the ball against the net - but the center-spot
     restart that confirms the goal has to be something a detector actually saw.
     """
     positions: list[tuple[float, float] | None] = [(20.0, 20.0)] * 11
@@ -138,14 +138,14 @@ def test_a_forecast_reset_is_not_a_goal() -> None:
     positions += [None, None, None]
     positions += [(30.0, 20.0)] * 20
     xy, measured, times = _ball(positions)
-    # Mark the frames at the centre spot as forecasts rather than detections.
+    # Mark the frames at the center spot as forecasts rather than detections.
     measured[17:] = 0.0
     events = detect_events(xy, measured, times, [], PITCH)
     assert not any(e.type == "goal" for e in events), "a forecast reset is not a restart"
 
 
 def test_a_shot_without_a_reset_is_not_a_goal() -> None:
-    """A hard kick at the goal that is not followed by a centre-spot reset is a shot, not a goal."""
+    """A hard kick at the goal that is not followed by a center-spot reset is a shot, not a goal."""
     positions: list[tuple[float, float] | None] = [(20.0, 20.0)] * 11
     # A hard, straight shot at the left goal that travels and then stops short of the line.
     positions += [(15.0, 20.0), (10.0, 20.0), (5.0, 20.0), (2.0, 20.0), (2.0, 20.0)]
@@ -159,7 +159,7 @@ def test_a_shot_without_a_reset_is_not_a_goal() -> None:
 
 
 def test_a_hard_kick_that_goes_nowhere_is_not_a_shot() -> None:
-    """A shot travels: a hard kick that stops after a few metres is not one."""
+    """A shot travels: a hard kick that stops after a few meters is not one."""
     positions: list[tuple[float, float] | None] = [(20.0, 20.0)] * 11
     positions += [(18.0, 20.0), (17.0, 20.0), (17.0, 20.0), (17.0, 20.0)]
     positions += [(17.0, 20.0)] * 6
@@ -208,10 +208,10 @@ def test_a_clearance_needs_the_defending_side() -> None:
     assert len(clearances) == 1, [e.type for e in events]
     assert clearances[0].team == 0
     assert "left goal" in clearances[0].note
-    assert "travelling" in clearances[0].note
+    assert "traveling" in clearances[0].note
 
 
-def test_a_short_kick_out_of_defence_is_not_a_clearance() -> None:
+def test_a_short_kick_out_of_defense_is_not_a_clearance() -> None:
     """A pass out of the third is not a clearance: the kick has to travel."""
     team0 = _track(1, 0, list(range(30)), [(15.0, 20.0)] * 30)
     team1 = _track(2, 1, list(range(30)), [(45.0, 20.0)] * 30)
@@ -326,12 +326,12 @@ def test_detection_runs_on_a_simulated_match_without_inventing_events() -> None:
 
 
 # --------------------------------------------------------------------------------------------------------------
-# Rebuilding tracks from the replay payload: the frame indices are within the analysed window.
+# Rebuilding tracks from the replay payload: the frame indices are within the analyzed window.
 # --------------------------------------------------------------------------------------------------------------
 def test_player_tracks_from_replay_applies_the_window_offset() -> None:
     """A track's time is ``start_s + frame / fps``, not ``frame / fps``.
 
-    Frame indices are within the analysed window, and the window starts at the kick-off offset chosen in Step 1.
+    Frame indices are within the analyzed window, and the window starts at the kick-off offset chosen in Step 1.
     Getting this wrong shifted every player-derived event by the offset: on the real game (kick-off at 9:00) a
     tackle at 11:11 was reported at 2:11, and the clip cut for it showed the wrong part of the match entirely.
     """
@@ -353,7 +353,7 @@ def test_player_tracks_from_replay_applies_the_window_offset() -> None:
 
 
 def test_player_tracks_from_replay_without_an_offset_is_zero_based() -> None:
-    """A segment that starts at the video's own frame 0 keeps the old behaviour."""
+    """A segment that starts at the video's own frame 0 keeps the old behavior."""
     from soccer_analytics.analysis.event_detection import player_tracks_from_replay
 
     replay = {"players": [{"track_id": 1, "team": 0, "frames": [10], "xy": [[5.0, 5.0]], "speed": [0.0]}]}

@@ -36,7 +36,7 @@ from soccer_analytics.dashboard.video import (  # noqa: E402
     encode_clip,
     pick_encoder,
 )
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader  # noqa: E402
+from soccer_analytics.ingest.source import open_reader  # noqa: E402
 
 QUALITY_POINTS = (19, 23, 27)
 _SSIM_RE = re.compile(r"All:([0-9.]+)")
@@ -44,7 +44,7 @@ _SSIM_RE = re.compile(r"All:([0-9.]+)")
 
 def render_reference(match, *, start_s: float, duration_s: float, fps: float, width: int, output: Path) -> int:
     """The window drawn once and stored losslessly (FFV1): the yardstick the encodes are measured against."""
-    reader = FFmpegFrameReader(match.video, fps=fps, width=width, start_s=start_s, duration_s=duration_s)
+    reader = open_reader(match.video, fps=fps, width=width, start_s=start_s, duration_s=duration_s)
     frames = reader.frames()
     first = next(frames, None)
     if first is None:
@@ -56,7 +56,7 @@ def render_reference(match, *, start_s: float, duration_s: float, fps: float, wi
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{actual_width}x{height}",
             "-framerate", f"{fps:g}", "-i", "pipe:0",
-            # yuv420p with the standard HD matrix, tagged: the encodes are compared in *their* colour space -
+            # yuv420p with the standard HD matrix, tagged: the encodes are compared in *their* color space -
             # an RGB reference would make every SSIM carry an implicit conversion nobody asked about (and the
             # conversion is lossy in itself, drowning the codec differences this script exists to show).
             "-vf", "scale=out_color_matrix=bt709:out_range=tv",

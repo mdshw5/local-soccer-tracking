@@ -13,13 +13,13 @@ a fixed tilt (11.6 deg) and pans +-62 deg, so the motion is a pure pan about a f
 image's vertical, because the camera is tilted down: it is the **world vertical** expressed in the camera's frame,
 which makes an angle of ``90 - tilt`` with the optical axis (78.4 deg here). That is a physical prior, and it is
 what the landmark clicks prefer - fitting the axis to the estimated chain instead lands near 49 deg, because the
-gimbal's rotation centre is not the lens centre and each step carries a small translation that tilts the apparent
+gimbal's rotation center is not the lens center and each step carries a small translation that tilts the apparent
 axis (the classic rotating-camera self-calibration error). The yaw *scale* (degrees of rotation per degree of
 logged yaw) is fitted from the chain's large per-step rotations, which are accurate even though the chain's
 accumulated orientation is not.
 
 The zoom step is a hardware number with no published mapping to focal length, and the chain's own focal estimate is
-too coarse to recover it (it is quantised to a few values). So the focal is left to the existing calibration, which
+too coarse to recover it (it is quantized to a few values). So the focal is left to the existing calibration, which
 already solves a focal scale from landmark clicks; only the orientation is replaced here.
 
 Measured on the whole 2026-10-03 game: a model fitted on the first minutes predicts landmark clicks 40 minutes
@@ -155,9 +155,9 @@ def fit_pan_model(
     own frame at frame 0, so the axis is the world-up direction expressed there: it lies in the image's vertical
     plane and makes an angle of ``90 - tilt`` with the optical axis, where ``tilt`` is the pitch the log records.
     That is a *physical* prior, and it matters: fitting the axis to the chain's per-step rotations instead lands
-    near 49 deg, because the gimbal's rotation centre is not the lens centre and each step carries a small
+    near 49 deg, because the gimbal's rotation center is not the lens center and each step carries a small
     translation that tilts the apparent axis - the classic rotating-camera self-calibration error. The physical
-    axis (78 deg here) is what the landmark clicks prefer, and it generalises: a model fitted on the first minutes
+    axis (78 deg here) is what the landmark clicks prefer, and it generalizes: a model fitted on the first minutes
     predicts clicks 40 minutes later to 16 m, against 48 m for the chain.
 
     The scale (degrees of rotation per degree of logged yaw) is fitted from windows of chain motion that are both
@@ -245,7 +245,7 @@ def refine_pan_model(
     """Refine the pan axis and scale against landmark clicks, when the user's clicks are trusted.
 
     The physical axis and the chain-derived scale are a good prior, but the clicks are the only *absolute* ground
-    control. This makes one coarse sweep over a small neighbourhood of the axis tilt and the scale, keeping any
+    control. This makes one coarse sweep over a small neighborhood of the axis tilt and the scale, keeping any
     move that lowers the click residual, so it can adjust the model but never replace it with a different camera.
     Returns the original model unchanged when there are too few clicks to constrain it.
     """
@@ -274,7 +274,7 @@ def _perturb(model: PanModel, d_pitch_deg: float, d_scale: float) -> PanModel:
 
 
 def _click_rms(model: PanModel, yaw: np.ndarray, landmarks, focal: np.ndarray, aspect: float) -> float | None:
-    """Calibration RMS (metres) for a pan model, or ``None`` when the fit does not converge."""
+    """Calibration RMS (meters) for a pan model, or ``None`` when the fit does not converge."""
     from soccer_analytics.geometry.pitch_calibration import calibrate
 
     q = log_orientation(yaw, model)
@@ -426,6 +426,13 @@ def _game_manifest_for(video: str) -> dict | None:
         except (OSError, ValueError):
             return None
 
+    if video_path.name == "game.json" and video_path.exists():
+        # The never-merged workflow analyzes the manifest itself (``meta["video"]`` names it), so the manifest
+        # is its own description - the search below, which looks for the manifest *of* a video, does not apply.
+        payload = load(video_path)
+        _GAME_MANIFEST_CACHE[video] = payload
+        return payload
+
     def matches(payload: dict | None) -> bool:
         if payload is None:
             return False
@@ -482,13 +489,22 @@ def _resolve_clip_path(value: str, base: Path) -> str:
 def _clips_for_segment(segment) -> tuple[list[str], list[float]]:
     """The clips a segment's footage came from, and where each begins on the segment's own clock.
 
-    Two shapes exist. A segment analysed from the *combined game video* names that video, and the game manifest
-    connecting it to its source clips lists, per clip, the path and the second it begins at in the combined
-    video (paths are resolved against the video's own directory - see :func:`_resolve_clip_path`). A segment
-    analysed from a *single raw clip* names the clip itself, which begins at 0. Either way the result is a list
-    of clip paths and their start seconds, which is what places the logs on the analysis clock.
+    Three shapes exist. A segment analyzed from the *game manifest* (the never-merged workflow) names the
+    manifest, whose clips and offsets load through :class:`GameRecord` - paths resolved against the footage
+    directory, exactly as the manifest stored them. A segment analyzed from the *combined game video* names that
+    video, and the game manifest connecting it to its source clips lists, per clip, the path and the second it
+    begins at in the combined video (paths are resolved against the video's own directory - see
+    :func:`_resolve_clip_path`). A segment analyzed from a *single raw clip* names the clip itself, which begins
+    at 0. Either way the result is a list of clip paths and their start seconds, which places the logs on the
+    analysis clock.
     """
     video = str(segment.meta.get("video", ""))
+    if Path(video).name == "game.json":
+        from soccer_analytics.analysis.game import GameRecord  # noqa: PLC0415 - avoids an import cycle
+
+        record = GameRecord.load(Path(video).parent)
+        if record.clips:
+            return ([clip.path for clip in record.clips], [float(clip.start_s) for clip in record.clips])
     manifest = _game_manifest_for(video)
     if manifest is not None:
         clips = manifest.get("clips") or []

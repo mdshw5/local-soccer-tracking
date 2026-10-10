@@ -141,7 +141,7 @@ def test_the_pitch_overlay_follows_the_timeline_in_the_browser() -> None:
     still_branch, live_branch = branches.split("} else {")
     assert "overviewCtx.drawImage(overviewImage" in still_branch, "the exact still is drawn when it is up"
     assert "drawPitchOverlay();" in live_branch, "the browser projection is drawn only while the still is away"
-    # The overlay's y must scale by the canvas/frame *height* ratio: v is width-normalised, and dividing by the
+    # The overlay's y must scale by the canvas/frame *height* ratio: v is width-normalized, and dividing by the
     # width squashed the geometry to 9/16 of its height - the pitch hovered far above the field.
     draw = html.split("function drawPitchOverlay")[1].split("function drawOverview")[0]
     assert "overview.height / frameHeight" in draw

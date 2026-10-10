@@ -3,7 +3,7 @@
 A small MJPEG server (no new dependencies - the stdlib's http.server, opencv and the project's own ffmpeg
 reader) in front of one or more matches in the archive:
 
-* ``/`` - an index page: every streamable match, its teams' colours, and links to play it;
+* ``/`` - an index page: every streamable match, its teams' colors, and links to play it;
 * ``/stream/<match_id>.mjpg`` - the stream itself. Query parameters: ``start`` (source-clock seconds),
   ``rate`` (playback speed, 0.25-8x), ``width`` (decode width, 320-2560 px);
 * ``/frame/<match_id>.jpg?t=<seconds>`` - one annotated still, for checking quickly;

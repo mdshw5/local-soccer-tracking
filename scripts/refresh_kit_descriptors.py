@@ -1,4 +1,4 @@
-"""Recompute the stored per-detection kit descriptors of an analysed segment, without re-analysing it.
+"""Recompute the stored per-detection kit descriptors of an analyzed segment, without re-analyzing it.
 
 Why this exists: the kit descriptor (`analysis.kit.kit_descriptor`) is a pure function of one decoded frame and one
 stored detection box - the grass mask, the torso crop and the Lab/HSV summary. Detection and camera motion are
@@ -6,10 +6,12 @@ stored detection box - the grass mask, the torso crop and the Lab/HSV summary. D
 (a GPU detection sweep over every frame); it requires re-reading the frames the boxes were found in. That is the
 difference between an hour and a few minutes, and it is why this is a separate script rather than a Stage A flag.
 
-What it does, per chunk: decode that chunk's frames, recompute each box's descriptor with the current code, and
-rewrite the chunk with only ``det_kit`` replaced. Everything else in the chunk - poses, steps, focals, boxes,
-confidences - is copied through untouched, and the write is atomic (temp file + rename), so an interrupted run
-leaves the segment exactly as it was and a re-run continues from the first chunk not yet refreshed.
+What it does, per chunk: decode that chunk's frames at the analysis width (``detect_width`` - the resolution Stage A
+computed the descriptors at, and ~1.5x faster to decode than the 4K source), recompute each box's descriptor with
+the current code, and rewrite the chunk with only ``det_kit`` replaced. Everything else in the chunk - poses,
+steps, focals, boxes, confidences - is copied through untouched, and the write is atomic (temp file + rename), so
+an interrupted run leaves the segment exactly as it was and a re-run continues from the first chunk not yet
+refreshed.
 
 Resuming is implicit and recorded in ``kit_refresh.json``: a chunk is only marked done after its file is replaced.
 Progress only counts against the *same descriptor code* that produced it (a hash of the descriptor and the
@@ -38,7 +40,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from soccer_analytics.analysis.kit import kit_descriptor  # noqa: E402
 from soccer_analytics.analysis.stage_a import chunk_path, completed_chunks, load_segment  # noqa: E402
-from soccer_analytics.ingest.ffmpeg_reader import FFmpegFrameReader  # noqa: E402
+from soccer_analytics.ingest.source import open_reader  # noqa: E402
 
 STATUS_FILE = "kit_refresh.json"
 
@@ -104,7 +106,11 @@ def refresh(segment_dir: Path, limit_chunks: int = 0) -> dict:
     segment = load_segment(segment_dir)
     video = Path(json.loads((segment_dir / "meta.json").read_text())["video"])
     meta = json.loads((segment_dir / "meta.json").read_text())
-    width, fps = int(meta["width"]), float(segment.meta["fps"])
+    # The descriptor must see the frame Stage A saw: decode at the analysis width, not the source width. Decoding
+    # the 4K source costs ~1.5x the time for fidelity this descriptor never uses, and recomputing at a scale
+    # Stage A never used writes descriptors its own pipeline would never produce. Measured on the 2026-10-03 game
+    # (the same 20 s window): 13.9 s at 3840 vs 9.2 s at 1920.
+    width, fps = int(meta.get("detect_width") or meta["width"]), float(segment.meta["fps"])
     total_chunks = completed_chunks(segment_dir)
     if total_chunks == 0:
         raise SystemExit(f"{segment_dir} has no complete chunks to refresh")
@@ -151,7 +157,9 @@ def refresh(segment_dir: Path, limit_chunks: int = 0) -> dict:
         # is harmless - and necessary, because the final chunk of a segment is legitimately short (the window ends
         # mid-chunk: the whole game ends at 4851.0s with 252 frames in the last chunk, not 300).
         duration = float(times[-1]) - chunk_start + 1.0 / fps + 1.0
-        reader = FFmpegFrameReader(video, fps=fps, width=width, start_s=chunk_start, duration_s=duration)
+        # ``video`` may be a game.json manifest (a never-merged game): open_reader then decodes the right clip
+        # for this absolute source time, and the chunk times below stay on the manifest's clock.
+        reader = open_reader(video, fps=fps, width=width, start_s=chunk_start, duration_s=duration)
         kits = np.zeros_like(rows["det_kit"])
         seen = -1
         for local, (_time, frame) in enumerate(reader.frames()):

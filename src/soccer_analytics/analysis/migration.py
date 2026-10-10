@@ -6,9 +6,9 @@ to the video they describe. The layout now is one ``analysis/<id>`` directory be
 moves the old data into it:
 
 * a match directory moves to the analysis directory of the video its segment was built on (or, when there is no
-  readable segment, of its first recorded source); every artefact inside it moves with it;
+  readable segment, of its first recorded source); every artifact inside it moves with it;
 * the segment directories the record names move into that directory's ``segments/``; the record is rewritten with
-  the new relative paths and with its source pointing at the analysed video, and its id becomes the analysis
+  the new relative paths and with its source pointing at the analyzed video, and its id becomes the analysis
   directory's name;
 * the game manifest (and its marking proxy) for that video moves in beside the record;
 * segment directories and game manifests no record references are still moved to the analysis directory of their
@@ -54,7 +54,7 @@ def _move_into(source: Path, target: Path, log) -> None:
 
 
 def _segment_video(segment_dirs: list[str]) -> str | None:
-    """The video the segments were analysed from: the first readable ``meta.json`` that names one."""
+    """The video the segments were analyzed from: the first readable ``meta.json`` that names one."""
     for entry in segment_dirs:
         meta_path = Path(entry) / "meta.json"
         try:
@@ -146,7 +146,7 @@ def migrate_all(
             handled.add(legacy_dir)
 
             # Segments move into the match directory's own ``segments/`` folder, and the record remembers them
-            # relative to the analysis directory (save() does the relativising), so the folder is portable.
+            # relative to the analysis directory (save() does the relativizing), so the folder is portable.
             moved_segments: list[str] = []
             for entry in record.segments:
                 source = Path(entry)
