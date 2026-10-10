@@ -167,7 +167,17 @@ def main() -> int:
     else:
         status.stage("ball", "running", "Running the ball scan (long: it checkpoints as it goes)...")
         code = _run_mirrored(
-            [sys.executable, str(REPO_ROOT / "scripts" / "run_ball_scan.py"), "--segment", str(segment_dir)],
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "run_ball_scan.py"),
+                "--segment",
+                str(segment_dir),
+                # The same recording the other stages read. The scan itself still prefers the segment's own source
+                # when this machine has it (that is the clock its offsets were recorded against); this is the
+                # fallback for a machine that does not, where the stored absolute path no longer resolves.
+                "--video",
+                video,
+            ],
             status=status,
             stage="ball",
             base=BALL_SPAN[0],

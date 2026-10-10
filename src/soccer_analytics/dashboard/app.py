@@ -1756,12 +1756,18 @@ def replay_section(
             # first status. Writing the same "Starting..." the scan itself would write closes that window: the
             # button is disabled from the moment of the click instead of briefly offering a second scan that
             # would race the first over the same checkpoint. The child's own first update overwrites this one.
+            # The scan decodes at the SEGMENT's clock, so the segment's own video wins when this machine has it;
+            # the page's selected recording - the one the other scans read - is the fallback when it does not.
+            segment_video = str(segment.meta.get("video") or "") if segment is not None else ""
+            scan_video = segment_video if segment_video and Path(segment_video).exists() else video
             status_path = Path(segment_dir) / BALL_STATUS_FILE
             command = [
                 sys.executable,
                 str(REPO_ROOT / "scripts" / "run_ball_scan.py"),
                 "--segment",
                 str(segment_dir),
+                "--video",
+                scan_video,
             ]
             try:
                 status_path.write_text(json.dumps({"state": "running", "message": "Starting...", "updated": time.time()}))

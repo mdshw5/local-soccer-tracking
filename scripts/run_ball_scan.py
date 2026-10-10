@@ -318,9 +318,24 @@ def _counts(records: list[dict]) -> dict:
     return counts
 
 
+def source_video(args_video: str, meta: dict) -> str:
+    """The recording the scan decodes: the segment's stored source when it is reachable, else ``--video``.
+
+    The scan decodes at the *segment's* clock, so the video the segment was analyzed from is the one its offsets
+    are true for - and it wins whenever this machine has it. On a machine that does not (the analysis was copied
+    from another footage root, or the footage moved), the caller's recording - the page passes the same one the
+    other scans read - is used instead of failing on the stale absolute path.
+    """
+    stored = str(meta.get("video") or "")
+    if stored and Path(stored).exists():
+        return stored
+    return str(args_video or stored)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--segment", required=True, help="segment directory (with meta.json and chunk files)")
+    parser.add_argument("--video", default="", help="the recording to read (default: the segment's own stored source)")
     parser.add_argument("--force", action="store_true", help="discard an existing checkpoint and start over")
     parser.add_argument("--limit-frames", type=int, default=0, help="stop after this many frames (a smoke test)")
     return parser.parse_args()
@@ -338,9 +353,15 @@ def main() -> int:
             for name in (RESULT_FILE, STATUS_FILE):
                 (segment_dir / name).unlink(missing_ok=True)
 
+        video = source_video(args.video, meta)
+        if not Path(video).exists():
+            raise FileNotFoundError(
+                f"{video} is not on this machine - the segment's source lives with the footage it was analyzed "
+                "from; sync it beside the analysis directory, or pass --video with a recording of the same game"
+            )
         segment = load_segment(segment_dir)
         payload = scan(
-            video=meta["video"],
+            video=video,
             out_dir=segment_dir,
             start_s=float(meta["start_s"]),
             fps=float(meta["fps"]),

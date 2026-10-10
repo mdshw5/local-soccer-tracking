@@ -77,6 +77,47 @@ def _run(module, video: Path, out_dir: Path, detector, *, limit_frames: int = 0)
     )
 
 
+def test_the_source_prefers_the_segments_own_video_when_this_machine_has_it(tmp_path: Path) -> None:
+    """The scan decodes at the segment's clock, so its stored source wins whenever it is present.
+
+    A machine that does not have it - the analysis was copied from another footage root, or the footage moved -
+    must read the caller's recording (the page passes the same one the other scans read) instead of failing on
+    the stale absolute path, which is what left the scan stuck with a bare "No such file or directory".
+    """
+    run = _script()
+    stored = tmp_path / "stored.mp4"
+    stored.write_bytes(b"x")
+    other = tmp_path / "other.mp4"
+    other.write_bytes(b"x")
+
+    assert run.source_video("", {"video": str(stored)}) == str(stored)
+    assert run.source_video(str(other), {"video": str(stored)}) == str(stored)  # reachable stored wins
+
+    missing = tmp_path / "gone" / "game.json"
+    assert run.source_video(str(other), {"video": str(missing)}) == str(other)  # stale stored steps aside
+    assert run.source_video("", {"video": str(missing)}) == str(missing)  # ...with nothing else to read
+
+
+def test_a_stale_source_fails_with_guidance_not_a_bare_enoent(tmp_path: Path, monkeypatch) -> None:
+    """The stored path is the analyzing machine's own; a copy on another machine must be told what to do.
+
+    The dashboard shows the status file's error verbatim, so naming the missing path alone - FileNotFoundError's
+    own message - sends the reader hunting for a file the code cannot use anyway. The message says how to make
+    the scan work instead.
+    """
+    run = _script()
+    segment = tmp_path / "seg"
+    segment.mkdir()
+    (segment / "meta.json").write_text(
+        json.dumps({"video": str(tmp_path / "gone" / "game.json"), "start_s": 0.0, "fps": 5.0, "width": WIDTH})
+    )
+    monkeypatch.setattr("sys.argv", ["run_ball_scan.py", "--segment", str(segment)])
+    assert run.main() == 1
+    status = json.loads((segment / "ball_scan.json").read_text())
+    assert status["state"] == "error"
+    assert "not on this machine" in status["error"]
+
+
 def test_the_scan_writes_a_track_and_reports_to_the_status_file(tmp_path: Path) -> None:
     module = _script()
     video = _make_video(tmp_path / "tiny.mp4")
