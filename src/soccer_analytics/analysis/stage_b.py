@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import min_weight_full_bipartite_matching
 
 from soccer_analytics.analysis.kit import DESCRIPTOR_SIZE, kit_rgb
 from soccer_analytics.analysis.projection import PitchDetections, on_pitch_mask
@@ -44,6 +46,7 @@ SPEED_PERCENTILE = 95
 MAX_PLAUSIBLE_SPEED_KMH = 36.0  # faster than any human sprint: a meter of far-side error, not a real speed
 MAX_GAP_FOR_DISTANCE_S = 1.0  # movement across a longer unobserved gap is unknown; do not invent it as distance
 _UNREACHABLE = 1e6  # cost above the gate: used to forbid an assignment rather than to rank it
+_UNMATCHED_COST = 1e6  # cost of leaving a fragment unjoined; above any real join's cost, so joins are preferred
 
 
 def detection_rate(detections: PitchDetections) -> float:
@@ -367,13 +370,48 @@ def _track_kit_colors(detections: PitchDetections, tracks: dict[int, np.ndarray]
     return {track_id: _track_kit_descriptor(detections, rows) for track_id, rows in tracks.items()}
 
 
+def _join_fragments(cost: dict[tuple[int, int], float], fragment_ids: list[int]) -> dict[int, int]:
+    """Which fragments continue which: the globally cheapest set of gate-passing joins, one per fragment.
+
+    The rule this replaced - join only when each side is the other's *best* candidate - starved exactly the
+    crowded moments it was meant for: on the 2026-10-03 game only 7,412 of 235,618 gate-passing pairs were
+    joined and 14,617 fragments lost their preferred continuation to a contest, so players in a crowd stayed
+    split and the leftover pieces then read as bystanders. Every pair here already passed the gates (sprint
+    distance, kit compatibility); matching only decides *which* of those valid joins to take, consistently - a
+    fragment gets at most one predecessor and one successor - by minimising the total cost. Leaving a fragment
+    unjoined is allowed at a cost above any real join, so more joins always beat fewer.
+    """
+    position = {track: index for index, track in enumerate(fragment_ids)}
+    count = len(fragment_ids)
+    rows: list[int] = []
+    cols: list[int] = []
+    values: list[float] = []
+    for (before, after), value in cost.items():
+        rows.append(position[before])
+        cols.append(position[after])
+        values.append(value + 1.0)  # keep every real edge strictly above the sparse zero and below _UNMATCHED_COST
+    for index in range(count):
+        rows.append(index)
+        cols.append(count + index)
+        values.append(_UNMATCHED_COST)
+    matrix = coo_matrix((values, (rows, cols)), shape=(count, 2 * count)).tocsr()
+    matched_rows, matched_cols = min_weight_full_bipartite_matching(matrix)
+    return {
+        fragment_ids[int(before)]: fragment_ids[int(after)]
+        for before, after in zip(matched_rows, matched_cols)
+        if after < count
+    }
+
+
 def _stitch_tracks(detections: PitchDetections, assignment: TrackAssignment) -> TrackAssignment:
     """Reconnect track fragments that the online pass had to break.
 
     A fragment is a stitch candidate for a later fragment when it starts where the earlier one plausibly could have
     moved to - within a sprint plus slack - and the two wear compatible kit colors (when both have color
-    evidence). Only *mutual best* pairs join, so two nearby candidates cannot both claim the same continuation.
-    Chains are resolved afterwards: a player who left and returned twice becomes one track.
+    evidence). Which of the valid joins are taken is decided globally: every fragment gets at most one
+    continuation and one predecessor, and the set of joins minimises the total cost meanwhile preferring to join
+    at all (see :func:`_join_fragments`). Chains are resolved afterwards: a player who left and returned twice
+    becomes one track.
     """
     tracks = {track_id: np.sort(rows) for track_id, rows in assignment.tracks.items()}
     if len(tracks) < 2:
@@ -407,20 +445,11 @@ def _stitch_tracks(detections: PitchDetections, assignment: TrackAssignment) -> 
                 if distance > STITCH_BASE_M + STITCH_NO_KIT_FACTOR * sprint_per_frame * gap:
                     continue
                 pair_cost = distance / gap + 0.5
+            if not np.isfinite(pair_cost):
+                continue  # a degenerate position cannot rank a join
             cost[(before, after)] = pair_cost
 
-    best_successor: dict[int, int] = {}
-    best_predecessor: dict[int, int] = {}
-    for (before, after), value in cost.items():
-        if before not in best_successor or value < cost[(before, best_successor[before])]:
-            best_successor[before] = after
-        if after not in best_predecessor or value < cost[(best_predecessor[after], after)]:
-            best_predecessor[after] = before
-
-    successor: dict[int, int] = {}
-    for before, after in best_successor.items():
-        if best_predecessor.get(after) == before:
-            successor[before] = after
+    successor = _join_fragments(cost, sorted(tracks))
 
     # Walk the chains from their heads (members with no predecessor) so a player who left and returned twice
     # becomes a single track under its first id.

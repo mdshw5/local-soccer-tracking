@@ -103,3 +103,26 @@ def test_movement_across_a_long_gap_is_not_counted_as_distance() -> None:
     # observed steps: 1 m + 1 m + 1 m within each run = 6 m; the 28 m jump is not movement
     assert tracks[0].distance_m == 6.0
     assert float(np.max(tracks[0].speed_kmh)) <= 18.0 + 1e-6  # 1 m per 0.2 s = 18 km/h, never a teleport
+
+
+def test_a_crowd_contest_does_not_strand_the_other_pair() -> None:
+    """Two near-identical continuations, each contested: matching must join both pairs, not one.
+
+    Two players run side by side; both fragments end and two continuations start after the online buffer. The
+    nearer continuation is within reach of *both* endpoints, so under "join only mutual best" the loser's
+    preferred link is consumed and its pair stays split - on the real game that stranded 14,617 of 24,273
+    fragments' preferred links, leaving crowd players split in two. Both pairs pass the gates, so a global
+    matching must take both.
+    """
+    rows = (
+        _chain(10.0, KIT_A, range(0, 8))  # player 1: ends at (12.8, 10)
+        + _chain(10.6, KIT_A, range(0, 8))  # player 2: ends at (13.4, 10)
+        + _chain(12.5, KIT_A, range(24, 32))  # continuation 1 (reachable from both)
+        + _chain(13.05, KIT_A, range(24, 32))  # continuation 2 (nearer to both endpoints)
+    )
+    detections = _detections(rows)
+    assignment = _track_people(detections, np.ones(len(rows), dtype=bool))
+    assert len(assignment.tracks) == 4, "the online pass must have left four fragments"
+
+    stitched = _stitch_tracks(detections, assignment)
+    assert len(stitched.tracks) == 2, "both gate-valid pairs must be joined despite the contested bests"
