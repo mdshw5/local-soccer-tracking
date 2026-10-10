@@ -120,6 +120,35 @@ def test_bystanders_are_excluded_from_the_field_of_play() -> None:
             assert _is_bystander(player), f"track {player.track_id} was dropped but does not look like a bystander"
 
 
+def test_stillness_is_judged_in_seconds_not_observations() -> None:
+    """The evidence floor is time, not a frame count - the analysis rate once changed under it.
+
+    It was 20 observations, written at 5 fps (4 s of behaviour). At the 15 fps the pipeline now runs, that was
+    a bare 1.3 s, and on the 2026-10-03 game the exclusion rate tripled to 47% of tracks - 84% of them holding
+    under 10 seconds of observations, fragments of real players who merely stood still for a moment (worst at
+    the window's start, where the whole kickoff formation is standing). In seconds the rule cannot drift again.
+    """
+    from soccer_analytics.analysis.stage_b import PlayerTrack
+    from soccer_analytics.dashboard.replay import _is_bystander
+
+    def still(observations: int, fps: float = 15.0) -> PlayerTrack:
+        frame = np.arange(observations)
+        return PlayerTrack(
+            track_id=1,
+            team=-1,
+            frame=frame,
+            time=frame / fps,
+            xy=np.tile(np.array([50.0, 32.0]), (observations, 1)),
+            sigma_m=np.ones(observations),
+            speed_kmh=np.zeros(observations),
+            distance_m=0.0,
+        )
+
+    assert _is_bystander(still(30)) is False, "2 s standing still is too little evidence"
+    assert _is_bystander(still(120)) is False, "8 s standing still is still too little"
+    assert _is_bystander(still(300)) is True, "20 s in one spot is a bystander"
+
+
 def test_observations_are_ordered_and_complete(replay_case) -> None:
     replay, _, segment, _ = replay_case
     for player in replay["players"]:

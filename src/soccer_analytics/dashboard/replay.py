@@ -44,21 +44,29 @@ ROUND_M = 0.1
 BYSTANDER_MIN_EXTENT_M = 8.0  # below this diagonal the track never left its spot
 BYSTANDER_EXTENT_M = 15.0  # the "small and still" band's upper edge
 BYSTANDER_MOVING_FRACTION = 0.05  # below this share of moving observations a small track is "still"
-BYSTANDER_MIN_OBSERVATIONS = 20  # shorter tracks say too little about extent or movement to judge
+# Evidence floor: how long a track must have lived before stillness may convict it. This was 20 observations -
+# written when Stage A analyzed at 5 fps, when that was 4 seconds of behaviour. The analysis now runs at 15 fps,
+# where the same count was a bare 1.3 seconds, and the exclusions on the 2026-10-03 game grew to 47% of all
+# tracks (5,930 of 12,627) against the ~25% the rule was calibrated to - 84% of the dropped tracks holding
+# under 10 seconds of observations: fragments of real players who merely stood still for a moment, worst at the
+# window's start where the whole kickoff formation is standing. In seconds the meaning cannot silently drift
+# with the analysis rate again.
+BYSTANDER_MIN_SECONDS = 10.0
 
 
 def _is_bystander(track: PlayerTrack) -> bool:
     """True for a track that behaves like a touchline bystander rather than a player.
 
     Extent is the diagonal of the track's bounding box in pitch meters; movement is the share of observations
-    whose speed exceeds 1 km/h (the same threshold the report uses for "moving"). Tracks too short to judge are
-    kept - dropping them would hide real players who were only briefly visible, and a short fragment cannot
-    clutter the animation much either way.
+    whose speed exceeds 1 km/h (the same threshold the report uses for "moving"). A track must have lived
+    ``BYSTANDER_MIN_SECONDS`` before any of that may convict it: a fragment shows too little of a person to
+    judge - dropping one would hide a real player who was briefly visible, and a fragment cannot clutter the
+    animation much either way.
     """
-    if len(track.xy) < BYSTANDER_MIN_OBSERVATIONS:
+    if len(track.time) < 2 or float(track.time[-1]) - float(track.time[0]) < BYSTANDER_MIN_SECONDS:
         return False
     finite = track.xy[np.isfinite(track.xy).all(axis=1)]
-    if len(finite) < BYSTANDER_MIN_OBSERVATIONS:
+    if len(finite) < 2:
         return False
     extent = float(np.hypot(np.ptp(finite[:, 0]), np.ptp(finite[:, 1])))
     if extent < BYSTANDER_MIN_EXTENT_M:
