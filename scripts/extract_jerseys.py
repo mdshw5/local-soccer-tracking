@@ -45,6 +45,12 @@ from soccer_analytics.ingest.source import open_reader, probe_source  # noqa: E4
 
 MIN_CONFIDENCE = 0.55  # detections below this are not worth cropping
 UPSAMPLE_TARGET_PX = 96.0  # torso crops smaller than this are upscaled before OCR
+# The smallest box worth cropping is measured, not guessed. On the real game OCR read "76" at 1.00 confidence
+# from boxes 81-99 px tall, "22" at 0.76-1.00 from 90-115 px and "50" at 1.00 from 95-130 px - all below the old
+# 130 px floor, which never cropped them: 9 of the 13 real players on screen at 17:22.0 were under 130 px for
+# their whole track (4334 of the build's 5252 tracks got zero crops). 88 sits at the bottom of the demonstrated
+# clean-read band; below it nothing ever read - the 50-80 px zone is blur and clutter.
+MIN_HEIGHT_PX = 88.0
 # The very largest boxes are near-sideline bystanders (coaches, spectators), not players - measured on the real
 # game, boxes over 200 px at 1920 width are overwhelmingly off-pitch people. Numbers are read from player-sized
 # boxes only, and the sharpest crops win: motion blur kills OCR on small digits.
@@ -66,9 +72,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video", required=True)
     parser.add_argument("--segment", required=True, help="segment directory from Stage A")
     parser.add_argument("--width", type=int, default=1920, help="decode width for the crops")
-    parser.add_argument("--min-height-px", type=float, default=130.0, help="box height (at 1920) worth OCRing")
+    parser.add_argument("--min-height-px", type=float, default=MIN_HEIGHT_PX, help="box height (at 1920) worth OCRing")
     parser.add_argument("--max-per-track", type=int, default=24, help="crops per track: half sharpest, half spread over time")
-    parser.add_argument("--max-crops", type=int, default=24000, help="safety valve only - per-track budgets bound the normal case")
+    parser.add_argument("--max-crops", type=int, default=60000, help="safety valve only - per-track budgets bound the normal case")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     return parser.parse_args()
 
@@ -136,8 +142,9 @@ def main() -> int:
         # Every track gets its OWN budget instead of a slice of one global crop count: the vote needs MIN_VOTES
         # agreeing readings, but only a fraction of torso crops show a number at all (the player may face the
         # camera, or another body occludes the shirt), so a track needs a healthy row of crops before its number
-        # can win. A track with fewer usable rows than MIN_VOTES can never reach the quorum and is skipped - no
-        # crop of its could ever be part of a majority.
+        # can win. A track with a single usable row cannot reach any acceptance route and is skipped; two rows
+        # are kept, because the vote's unanimous-pair route accepts two agreeing readings at >= 0.90 confidence
+        # (measured on the real game: track 5896 read "76" at 1.00 twice among such a pair).
         heights = detections.height_px
         selected: dict[int, list[int]] = {}
         for track_id, rows in assignment.tracks.items():
@@ -148,7 +155,7 @@ def main() -> int:
                 and args.min_height_px <= heights[row] <= PLAYER_MAX_HEIGHT_PX
                 and detections.conf[row] >= MIN_CONFIDENCE
             ]
-            if len(usable) < MIN_VOTES:
+            if len(usable) < 2:
                 continue
             usable.sort(key=lambda row: -(heights[row] * detections.conf[row]))
             if len(usable) > args.max_per_track:
@@ -168,9 +175,10 @@ def main() -> int:
                 rows_by_frame.setdefault(int(detections.frame[row]), []).append((track_id, row))
         total = sum(len(v) for v in rows_by_frame.values())
         if total > args.max_crops:
-            # Emergency valve only: per-track budgets bound the normal case (~900 votable tracks x 24 crops), so
-            # this triggers only on a pathological segment. If it does, drop whole frames evenly - never single
-            # crops off the front, which would re-starve the vote for whichever tracks were listed last.
+            # Emergency valve only: per-track budgets bound the normal case (~1600 votable tracks x 24 crops at
+            # the 88 px floor - measured ~34k crops), so this triggers only on a pathological segment. If it
+            # does, drop whole frames evenly - never single crops off the front, which would re-starve the vote
+            # for whichever tracks were listed last.
             stride = int(np.ceil(total / args.max_crops))
             frames_sorted = sorted(rows_by_frame)
             rows_by_frame = {frame: rows_by_frame[frame] for frame in frames_sorted[::stride]}
