@@ -502,8 +502,13 @@ def _clips_for_segment(segment) -> tuple[list[str], list[float]]:
     if Path(video).name == "game.json":
         from soccer_analytics.analysis.game import GameRecord  # noqa: PLC0415 - avoids an import cycle
 
-        record = GameRecord.load(Path(video).parent)
-        if record.clips:
+        try:
+            record = GameRecord.load(Path(video).parent)
+        except (OSError, ValueError, KeyError, TypeError):
+            # An unreadable manifest is no manifest: the segment's own chunks are complete without it, and the
+            # documented best effort is to keep the estimated chain rather than fail the whole results read.
+            record = None
+        if record is not None and record.clips:
             return ([clip.path for clip in record.clips], [float(clip.start_s) for clip in record.clips])
     manifest = _game_manifest_for(video)
     if manifest is not None:

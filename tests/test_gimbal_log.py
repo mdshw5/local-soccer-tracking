@@ -22,6 +22,7 @@ from soccer_analytics.geometry.gimbal_motion import (
     find_logs_for_clips,
     fit_pan_model,
     log_orientation,
+    segment_has_log,
 )
 
 HEADER = """2026-10-03 16:28:37.951
@@ -332,6 +333,28 @@ def test_clips_for_segment_resolves_relative_clip_paths(tmp_path) -> None:
         assert starts == [0.0, 1800.2, 3599.1]
     finally:
         _GAME_MANIFEST_CACHE.clear()
+
+
+def test_clips_for_segment_survives_a_missing_or_unreadable_game_manifest(tmp_path) -> None:
+    """Reading a segment's results must not depend on the clip manifest; only the gimbal-log refinement does.
+
+    A production copy of the archive may have lost - or never received - the small ``game.json`` beside its
+    analysis directory, and the documented best effort is then to report no clips, so the caller keeps the
+    estimated chain. Letting the read fail is what the dashboard turns into "Could not read the segment
+    results", although the segment's own chunks are complete without the manifest.
+    """
+    from types import SimpleNamespace
+
+    missing = tmp_path / "analysis" / "2026-10-03_game_x" / "game.json"
+    segment = SimpleNamespace(meta={"video": str(missing)})
+    assert _clips_for_segment(segment) == ([str(missing)], [0.0])
+    assert segment_has_log(segment) is False
+
+    # A manifest that is there but unreadable degrades the same way.
+    missing.parent.mkdir(parents=True)
+    missing.write_text("this is not json")
+    _GAME_MANIFEST_CACHE.clear()
+    assert _clips_for_segment(segment) == ([str(missing)], [0.0])
 
 
 def test_game_manifest_is_found_by_path_and_by_basename() -> None:

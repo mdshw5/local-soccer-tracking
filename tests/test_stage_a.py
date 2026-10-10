@@ -258,3 +258,70 @@ def test_segment_dir_changes_when_the_file_changes(tmp_path: Path) -> None:
     video.write_bytes(b"x" * 11)
     assert segment_dir_for(video, tmp_path / "out") != first
     shutil.rmtree(tmp_path / "out", ignore_errors=True)
+
+
+def _write_segment(directory: Path, video: str, frames: int = 3) -> None:
+    """A minimal loadable segment: the meta plus one complete, detection-free chunk."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "meta.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "video": video,
+                "width": 640,
+                "height": 360,
+                "fps": 5.0,
+                "motion_width": 320,
+                "detect_width": 640,
+                "chunk_frames": frames,
+                "total_chunks": 1,
+                "default_focal": 0.8,
+            }
+        )
+    )
+    np.savez(
+        directory / "chunk_00000.npz",
+        time=np.arange(frames) / 5.0,
+        ok=np.ones(frames, dtype=bool),
+        inlier=np.ones(frames, dtype=np.float32),
+        step=np.tile(np.eye(3), (frames, 1, 1)),
+        focal=np.full(frames, 0.8, dtype=np.float32),
+        det_frame=np.zeros(0, dtype=np.int32),
+        det_box=np.zeros((0, 4), dtype=np.float32),
+        det_conf=np.zeros(0, dtype=np.float32),
+        det_kit=np.zeros((0, 12), dtype=np.float32),
+        det_track=np.zeros(0, dtype=np.int32),
+    )
+
+
+def test_load_segment_repoints_a_video_path_after_the_footage_tree_moved(tmp_path: Path) -> None:
+    """A stored absolute path may not resolve on the machine reading the results; the sibling by name does.
+
+    ``meta.json`` records the source as the analyzing machine saw it, so an archive copied to another root - or
+    a server that mounts the same footage elsewhere - leaves every stored path carrying the old prefix. The same
+    file name always sits beside the segment: a game's ``game.json`` in the analysis directory one level up, the
+    combined video at the footage root three levels up. Loading re-points to those, and keeps the stored path
+    when nothing matches rather than blanking it.
+    """
+    footage = tmp_path / "footage"
+    analysis = footage / "analysis" / "2026-10-03_game_x"
+    segment = analysis / "segments" / "2026-10-03_game_x__whole_game_0_10"
+
+    # The never-merged workflow's manifest lives in the analysis directory; the stored path was written at a
+    # root that does not exist here.
+    _write_segment(segment, str(tmp_path / "old_root" / "analysis" / "2026-10-03_game_x" / "game.json"))
+    manifest = analysis / "game.json"
+    manifest.write_text("{}")
+    assert Path(load_segment(segment).meta["video"]).resolve() == manifest.resolve()
+
+    # The old workflow's combined video lives at the footage root.
+    manifest.unlink()
+    combined = footage / "game_16-28-37.784.mp4"
+    combined.write_bytes(b"x")
+    _write_segment(segment, str(tmp_path / "old_root" / "2026-10-03" / "game_16-28-37.784.mp4"))
+    assert Path(load_segment(segment).meta["video"]).resolve() == combined.resolve()
+
+    # Nothing near the segment carries the name: the stored path survives untouched.
+    stored = str(tmp_path / "gone" / "raw_clip.MP4")
+    _write_segment(segment, stored)
+    assert load_segment(segment).meta["video"] == stored

@@ -476,9 +476,35 @@ class SegmentData:
         return self.meta["height"] / self.meta["width"]
 
 
+def _resolve_video_path(stored: str, directory: Path) -> str:
+    """The stored source path in its usable form for the segment directory it was recorded beside.
+
+    ``meta.json`` records the source as the machine that ran the analysis saw it - an absolute path - and an
+    archive copied to another root, or a machine mounting the same footage elsewhere, keeps the layout without
+    the prefix. The same file name sits either in the segment's analysis directory, one level up (the
+    ``game.json`` manifest of the never-merged workflow), or at the footage root, three levels up (the combined
+    video and the raw clips). Those are tried in that order, and the stored path survives when neither exists,
+    so callers receive what was written rather than a silent miss.
+    """
+    path = Path(stored)
+    if not stored or path.exists():
+        return stored
+    parents = directory.resolve().parents
+    for index in (1, 3):  # the analysis directory holding game.json; the footage folder holding the clips
+        if index >= len(parents):
+            continue
+        candidate = parents[index] / path.name
+        if candidate.exists():
+            return str(candidate)
+    return stored
+
+
 def load_segment(directory: str | Path) -> SegmentData:
     directory = Path(directory)
     meta = json.loads((directory / "meta.json").read_text())
+    # Results are read on machines that may see the footage under a different root than the one that ran the
+    # analysis, so the stored video path is re-pointed the way the match record's own paths are.
+    meta["video"] = _resolve_video_path(str(meta.get("video") or ""), directory)
     chunks = completed_chunks(directory)
     if chunks == 0:
         raise FileNotFoundError(f"no completed chunks in {directory}")
