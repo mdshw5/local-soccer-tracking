@@ -180,6 +180,3 @@ def test_the_component_composes_the_url_from_the_pages_own_host() -> None:
     assert "args.game_id" in html and "/game/" in html and ".mjpg" in html
     assert "location.hostname" in html and "args.stream_port" in html
     assert "//localhost" not in html, "the stream host must follow the page's own host, not a literal localhost"
-
-
-
