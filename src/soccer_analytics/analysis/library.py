@@ -11,6 +11,7 @@ on one machine. The archive now sits with the recording instead::
                 match.json        this index (sources, segments, format, team names)
                 events.json, report.json, replay.json, calibration.json, highlights/, identities/ ...
                 segments/         the Stage A results (and the ball scan's) for this match's windows
+                audio/            the recording's audio as wav (the whistle scan's cache; re-extracted if removed)
                 game.json         the game manifest and its marking proxy, when this video is a combined game
 
 Copying that directory (or the whole footage directory) carries the analysis with it: the recorded paths are
@@ -32,10 +33,12 @@ import numpy as np
 
 from soccer_analytics.analysis.events import EventLog
 from soccer_analytics.geometry.pitch_calibration import PitchCalibration
+from soccer_analytics.ingest.source import as_source
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ANALYSIS_DIRNAME = "analysis"  # the folder each analyzed video's match directory lives in
 SEGMENTS_DIRNAME = "segments"  # Stage A results, inside the match directory
+AUDIO_DIRNAME = "audio"  # the recording's audio as wav (the whistle scan's cache), inside the match directory
 GAME_MANIFEST_FILENAME = "game.json"  # a game's clip manifest; the manifest itself is the analyzed source
 LEGACY_MATCHES_ROOT = REPO_ROOT / "data" / "matches"  # where archives lived before the move beside the footage
 MATCHES_ROOT = LEGACY_MATCHES_ROOT  # kept for callers that still name the old root
@@ -90,18 +93,30 @@ def video_roots() -> list[Path]:
     return roots
 
 
+def _under_analysis(path: Path) -> bool:
+    """Whether a path lies under an analysis directory - including one moved aside (``analysis.old``).
+
+    Moving the analysis directory is how a match is reset; what the move leaves behind is still app-produced
+    media (preview clips, montages), never footage, so the exclusion follows the name's prefix rather than the
+    literal ``analysis`` alone. The live archive itself is still discovered by its exact name
+    (:func:`discover_match_manifests`), so a moved-aside copy is a backup, not a second match.
+    """
+    return any(part == ANALYSIS_DIRNAME or part.startswith(ANALYSIS_DIRNAME + ".") for part in path.parts[:-1])
+
+
 def discover_videos(roots: list[Path] | None = None) -> list[Path]:
     """Video files under the footage roots, newest first, so the most recent match is the default.
 
     Anything under an ``analysis`` directory is excluded: the reels, preview clips and centered clips the tool
     itself writes are MP4s too, and listing an analysis's own output back as footage to analyze is nonsense.
+    A directory moved aside as a backup (``analysis.old``) is excluded the same way - its media is still output.
     """
     found: list[Path] = []
     for root in roots if roots is not None else video_roots():
         if not root.exists():
             continue
-        found += [p for p in root.rglob("*.MP4") if ANALYSIS_DIRNAME not in p.parts]
-        found += [p for p in root.rglob("*.mp4") if ANALYSIS_DIRNAME not in p.parts]
+        found += [p for p in root.rglob("*.MP4") if not _under_analysis(p)]
+        found += [p for p in root.rglob("*.mp4") if not _under_analysis(p)]
     return sorted(set(found), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
@@ -159,6 +174,17 @@ def segments_root_for(video: str | Path) -> Path:
     if path.name == GAME_MANIFEST_FILENAME:
         return path.parent / SEGMENTS_DIRNAME
     return analysis_dir_for(path) / SEGMENTS_DIRNAME
+
+
+def audio_cache_path(match_dir: str | Path, video: str | Path) -> Path:
+    """Where a match's extracted audio (the whistle scan's wav cache) lives: inside the match directory.
+
+    Everything derived from a match lives beside the match, this cache included, so clearing or moving the
+    analysis directory resets or carries the audio with the rest of the state. The file name is keyed by what
+    the video *is* - a clip set's game id, a file's stem - not by its basename alone: every never-merge game's
+    manifest is called ``game.json``, and ``game.wav`` would hand the first game's audio to every later one.
+    """
+    return Path(match_dir) / AUDIO_DIRNAME / f"{as_source(video).key_name}.wav"
 
 
 def match_id_from_path(path: str | Path) -> str:

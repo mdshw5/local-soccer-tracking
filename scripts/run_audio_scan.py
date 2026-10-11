@@ -5,9 +5,10 @@ transform took, which on a full game is minutes of a spinner and nothing else. I
 writes ``audio_scan.json`` beside the match - the same contract as the shirt-number scan - so the page only has to
 poll a file and draw a bar.
 
-The audio is cached as a wav beside the video (``data/cache/<video>.wav``), because the decode is the part that has
-to touch the whole file; a repeat scan after changing the detector's strictness only re-runs the transform. The
-extraction writes through a temporary name and is renamed when it lands, so a scan never reads half a recording.
+The audio is cached as a wav inside the match directory (``<match>/audio/<key>.wav``, keyed by the recording), because
+the decode is the part that has to touch the whole file; a repeat scan after changing the detector's strictness only
+re-runs the transform. The extraction writes through a temporary name and is renamed when it lands, so a scan never
+reads half a recording.
 
 Usage::
 
@@ -31,11 +32,9 @@ from soccer_analytics.analysis.events import (
     detect_whistles,
     whistles_to_events,
 )
-from soccer_analytics.analysis.library import MatchLibrary
+from soccer_analytics.analysis.library import MatchLibrary, audio_cache_path
 from soccer_analytics.ingest.ffmpeg_reader import extract_audio, read_wav_mono
-from soccer_analytics.ingest.source import as_source
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 STATUS_FILE = "audio_scan.json"
 # How the bar is split between the two phases. The decode reads the whole recording, but the transform is the part
 # that scales with the *content*, and on the real footage the two come out within a factor of two of each other.
@@ -52,7 +51,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="do not reject blasts that bring low frequencies with them (voices and bird calls)",
     )
-    parser.add_argument("--wav", default="", help="where to cache the audio (default data/cache/<video>.wav)")
+    parser.add_argument("--wav", default="", help="where to cache the audio (default <match>/audio/<video key>.wav)")
     return parser.parse_args()
 
 
@@ -100,10 +99,10 @@ def scan(
     """
     status = status or Status(library.path(match_id) / STATUS_FILE)
     try:
-        # The cache is keyed by what the video *is*, not by its filename: every never-merge game's manifest is
-        # called game.json, and "game.wav" would hand the first game's audio to every later one. A clip set keys
-        # on its game id (manifest directory name); a plain file keeps its own stem, exactly as before.
-        wav = Path(wav_path) if wav_path else REPO_ROOT / "data" / "cache" / f"{as_source(video).key_name}.wav"
+        # The cache lives inside the match directory (the audio_cache_path rule), so clearing or moving the
+        # analysis carries or resets its decoded audio with everything else; the name stays keyed by what the
+        # video is (a clip set's game id / a file's stem), not by its basename alone.
+        wav = Path(wav_path) if wav_path else audio_cache_path(library.path(match_id), video)
         base, span = 0.0, 1.0
         if wav.exists() and wav.stat().st_size > 1024:
             status.update(force=True, stage="detect", progress=0.0, message="Using the cached audio")

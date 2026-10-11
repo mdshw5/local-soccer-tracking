@@ -73,12 +73,42 @@ def test_creating_a_match_writes_beside_the_video_and_discovery_finds_it(footage
 
 
 def test_discovery_never_lists_an_analysis_output_as_footage(footage_root: Path) -> None:
-    """The reels and clips the tool writes are MP4s under the footage root now; they are outputs, not sources."""
+    """The reels and clips the tool writes are MP4s under the footage root now; they are outputs, not sources.
+
+    A backup of the analysis (moved aside as ``analysis.old``) is the same kind of output, so the exclusion
+    follows that name too - the picker must not offer an archived match's previews back as footage."""
     video = _fake_video(footage_root / "2026-10-03" / "game.mp4")
     reel = footage_root / "2026-10-03" / "analysis" / "2026-10-03_game" / "highlights" / "goals.mp4"
     reel.parent.mkdir(parents=True)
     reel.write_bytes(b"reel")
+    archived = footage_root / "2026-10-03" / "analysis.old" / "2026-10-03_game" / "highlights" / "previews" / "p.mp4"
+    archived.parent.mkdir(parents=True)
+    archived.write_bytes(b"preview")
     assert discover_videos() == [video]
+
+
+def test_a_moved_aside_analysis_resets_the_match(footage_root: Path) -> None:
+    """Moving ``analysis`` aside is how a match is reset: it leaves the library, its footage reads as never
+    analyzed, and none of its media leaks into the picker; moving it back restores everything."""
+    video = _fake_video(footage_root / "2026-10-03" / "game.mp4")
+    library = MatchLibrary()
+    record = library.create(video)
+    analysis = analysis_dir_for(video)
+    (analysis / "highlights" / "previews").mkdir(parents=True)
+    (analysis / "highlights" / "previews" / "p.mp4").write_bytes(b"preview")
+
+    moved = analysis.parent.with_name("analysis.old")
+    shutil.move(str(analysis.parent), str(moved))
+
+    fresh = MatchLibrary()
+    assert record.match_id not in fresh.list_ids(), "a moved-aside analysis is not a live match"
+    assert fresh.match_for_video(video) is None
+    assert discover_videos() == [video], "an archived analysis's media is not footage"
+
+    shutil.move(str(moved), str(analysis.parent))
+    again = MatchLibrary()
+    assert record.match_id in again.list_ids()
+    assert again.match_for_video(video) == record.match_id
 
 
 def test_a_moved_footage_directory_still_opens_its_own_files(

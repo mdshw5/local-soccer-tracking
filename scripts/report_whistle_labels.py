@@ -10,7 +10,8 @@ Usage::
     python scripts/report_whistle_labels.py --match <match_id> [--video <file>] [--wav <file>]
 
 ``--video``/``--wav`` default to the video the candidates were scanned from (``Event.video``) and the matching
-``data/cache/<stem>.wav``. A candidate with no verdict is skipped: unreviewed is not evidence.
+audio cache inside the match directory (``<match>/audio/<key>.wav``). A candidate with no verdict is skipped:
+unreviewed is not evidence.
 """
 
 from __future__ import annotations
@@ -30,17 +31,15 @@ from soccer_analytics.analysis.events import (  # noqa: E402
     EventLog,
     detect_whistles,
 )
-from soccer_analytics.analysis.library import MatchLibrary  # noqa: E402
+from soccer_analytics.analysis.library import MatchLibrary, audio_cache_path  # noqa: E402
 from soccer_analytics.ingest.ffmpeg_reader import read_wav_mono  # noqa: E402
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--match", required=True, help="match id in the archive")
     parser.add_argument("--video", default="", help="the recording the candidates were scanned from")
-    parser.add_argument("--wav", default="", help="cached audio (default data/cache/<video stem>.wav)")
+    parser.add_argument("--wav", default="", help="cached audio (default <match>/audio/<video key>.wav)")
     parser.add_argument("--tolerance", type=float, default=0.3, help="seconds; how near a candidate must be")
     return parser.parse_args()
 
@@ -58,7 +57,7 @@ def main() -> int:
     if not video:
         print("The labeled candidates do not record the video they came from; pass --video.")
         return 1
-    wav = Path(args.wav) if args.wav else REPO_ROOT / "data" / "cache" / f"{Path(video).stem}.wav"
+    wav = Path(args.wav) if args.wav else audio_cache_path(library.path(args.match), video)
     if not wav.exists():
         print(f"No cached audio at {wav} - run the scan once, or pass --wav.")
         return 1

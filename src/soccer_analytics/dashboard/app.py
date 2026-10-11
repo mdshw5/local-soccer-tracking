@@ -2467,6 +2467,11 @@ with st.container(border=True):
         pending = st.session_state.pop("archive_select_pending", None)
         if pending in match_ids:
             st.session_state["archive_selection"] = pending
+        # A match whose analysis was cleared or moved out from under the page must not keep this selectbox on a
+        # value it no longer offers (Streamlit breaks on a stored value that is not among the options): the page
+        # resets to "(new analysis)", which is exactly what a cleared analysis should mean.
+        if st.session_state.get("archive_selection") not in match_ids + ["(new analysis)"]:
+            st.session_state.pop("archive_selection", None)
         selection = st.selectbox(
             "Match",
             match_ids + ["(new analysis)"],

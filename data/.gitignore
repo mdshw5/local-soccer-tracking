@@ -1,10 +1,9 @@
-# Everything under data/ is produced by running the pipeline, and it is not small - one 81 minute match is
-# hundreds of megabytes:
+# Everything under data/ is produced by running the pipeline, and most of it is not small. Most of that state no
+# longer lives here at all: each match's analysis - segments, reports, replays, events, scans, caches - is saved
+# beside the footage in an `analysis/` folder, so clearing, copying or moving the match takes its state along.
+# What can still sit here:
 #
-#   cache/      the audio track of each recording as wav (250 MB for one match), so a rescan need not re-decode it
-#   segments/   Stage A's per-frame results, chunk by chunk, and the scrub proxies built from them
-#   matches/    one directory per match: events, tags, reports, replays, preview clips and exported reels
-#   games/      the combined multi-clip game video's manifest and its low-resolution marking proxy
+#   games/      legacy manifests of combined multi-clip games; newer ones live with the analysis beside the clips
 #   rosters/    team rosters: shirt number -> player name, typed once per team and reused across matches
 #   videos/     local input footage (see the .gitignore in there)
 #   models/     downloaded detector weights and saved calibrations (see the .gitignore in there)

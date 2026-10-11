@@ -16,7 +16,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from soccer_analytics.analysis.library import MatchLibrary
+from soccer_analytics.analysis import game as game_lib
+from soccer_analytics.analysis.library import MatchLibrary, audio_cache_path
 from soccer_analytics.ingest.ffmpeg_reader import extract_audio
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,30 @@ def _script():  # noqa: ANN202 - the scan module, loaded without making scripts/
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_the_audio_cache_lives_inside_the_match_keyed_by_the_source(tmp_path: Path) -> None:
+    """Everything derived from a match lives beside it: clearing or moving the analysis resets or carries its
+    cached audio with the rest of the state. The name is keyed by what the video is - a clip set by its game id
+    (every manifest is called game.json), a plain file by its stem - so two recordings cannot share a cache."""
+    video = tmp_path / "2026-10-03" / "game_16-28-37.784.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"x" * 8)
+    match = tmp_path / "2026-10-03" / "analysis" / "2026-10-03_game_16-28-37.784"
+    assert audio_cache_path(match, video) == match / "audio" / "game_16-28-37.784.wav"
+
+    clips = []
+    for index, (start, length) in enumerate(((0.0, 5.0), (5.0, 5.0))):
+        clip = tmp_path / "2026-10-03" / f"clip{index}.MP4"
+        clip.write_bytes(b"c" * 4)
+        clips.append(game_lib.Clip(path=str(clip), start_s=start, duration_s=length, bytes=0))
+    game_dir = tmp_path / "2026-10-03" / "analysis" / "2026-10-03_game_x"
+    game_dir.mkdir(parents=True)
+    game_lib.GameRecord(
+        game_id=game_dir.name, output=str(tmp_path / "2026-10-03" / "merged.mp4"), duration_s=10.0, clips=clips
+    ).save(game_dir)
+    manifest = game_dir / "game.json"
+    assert audio_cache_path(match, manifest) == match / "audio" / f"{game_dir.name}.wav"
 
 
 def _tone(freq: float, duration: float, amplitude: float = 0.35) -> np.ndarray:

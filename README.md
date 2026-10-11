@@ -173,9 +173,10 @@ Every analysis is *self-contained*: it lives in an `analysis/` folder beside the
         highlights/             # exported reels and their manifests
         game.json               # the clip manifest — the recording
         segments/<segment_id>/  # Stage A chunks, status.json, ball scan
+        audio/<key>.wav         # the recording's audio for the whistle scan (a cache; re-extracted if removed)
 ```
 
-Recorded paths are stored relative to the folder and re-resolved on load, so a match directory can be copied or moved as a unit. Footage can be organized with one directory per match, and recordings split into several clips are described by the manifest. `scripts/migrate_analysis.py` moves archives from the older repository-era roots into this shape.
+Recorded paths are stored relative to the folder and re-resolved on load, so a match directory can be copied or moved as a unit — and clearing or moving it away is a full reset for that match: every piece of its state, caches included, lives inside it. Footage can be organized with one directory per match, and recordings split into several clips are described by the manifest. `scripts/migrate_analysis.py` moves archives from the older repository-era roots into this shape.
 
 ## Getting started
 
