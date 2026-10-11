@@ -2727,9 +2727,32 @@ if game_record is not None:
     stream_ready = is_reachable(mark_port)
     if not stream_ready:
         st.info(
-            "The marking stream comes from the footage server: start "
-            f"`scripts/run_match_stream.py --port {mark_port}` and the clips appear here - frames are read "
-            "directly, so there is no proxy to build and nothing to wait for."
+            "The marking stream comes from the footage server (`scripts/run_match_stream.py`): starting it puts "
+            "the clips here - frames are read directly, so there is no proxy to build and nothing to wait for. "
+            "The same server plays the annotated footage beside the replay later."
+        )
+
+        def _start_mark_stream() -> None:
+            # One server serves everything - these marking frames and the annotated stream - so this is the same
+            # action as the replay section's button, offered here because this is where the missing server is
+            # felt first.
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "run_match_stream.py"),
+                    "--port",
+                    str(mark_port),
+                ],
+                cwd=str(REPO_ROOT),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            st.session_state["step1_flash"] = ("success", f"Footage stream starting on port {mark_port}.")
+
+        st.button(
+            "Start the footage stream",
+            key=f"start_mark_stream::{game_record.game_id}",
+            on_click=_start_mark_stream,
         )
     else:
         mark_result = GAME_TIMELINE_COMPONENT(

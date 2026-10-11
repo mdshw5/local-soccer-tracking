@@ -22,6 +22,7 @@ from soccer_analytics.analysis.game import (
     half_labels_for,
     half_labels_for_events,
     locations,
+    manifest_dir,
     plan,
 )
 from soccer_analytics.ingest.ffmpeg_reader import FFmpegError, VideoProbe, probe_video
@@ -226,6 +227,44 @@ def test_a_relative_video_path_still_finds_its_game(tmp_path: Path, monkeypatch:
 
     assert find_for_video("game_16-28-37.784.mp4", tmp_path / "games") is not None
     assert find_for_video(str(tmp_path / "game_16-28-37.784.mp4"), tmp_path / "games") is not None
+
+
+def test_a_never_merged_game_keeps_its_analysis_beside_the_footage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The combined video is a name now, not a file - and a name that exists nowhere must still anchor beside
+    the footage, because every other stored path proves the base it was written against.
+
+    The regression: ``output`` is stored relative (that is what makes an archive portable), the never-merged
+    workflow never writes the file, and left as-is the relative name anchored at the process's working
+    directory instead - a dashboard run looked for ``<repo>/analysis/<today's date>_game_.../game.json`` and
+    raised FileNotFoundError for a game whose manifest was sitting beside its clips all along.
+    """
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    footage = tmp_path / "2026-10-03"
+    directory = footage / "analysis" / "2026-10-03_game_16-28-37-784"
+    clip = footage / "16:28:37.784.MP4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"x")
+    record = GameRecord(
+        game_id=directory.name,
+        output=str(footage / "game_16-28-37.784.mp4"),  # where the merge would have gone; nothing writes it
+        duration_s=6000.0,
+        clips=[Clip(path=str(clip), start_s=0.0, duration_s=6000.0, bytes=1)],
+    )
+    record.save(directory)
+
+    loaded = GameRecord.load(directory)
+    assert Path(loaded.output) == footage / "game_16-28-37.784.mp4"
+    assert manifest_dir(loaded) == directory
+    assert (manifest_dir(loaded) / "game.json").exists()
+    assert not (Path.cwd() / "analysis").exists(), "nothing may anchor at the working directory"
+
+    found = find_for_video(clip, footage / "analysis")
+    assert found is not None and found.game_id == record.game_id
+    assert manifest_dir(found) == directory
+    assert found.clips[0].path == str(clip)
 
 
 def _write_clip(path: Path, seconds: int, color: int, fps: int = 10) -> None:

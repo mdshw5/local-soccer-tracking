@@ -179,3 +179,25 @@ def test_streamlits_video_player_is_never_given_a_media_url() -> None:
         and any(isinstance(arg, ast.Name) and arg.id in url_names for arg in node.args)
     ]
     assert not offenders, f"st.video() was given a media URL at line(s) {offenders}: pass the file path instead"
+
+
+def test_the_marking_step_offers_the_stream_start_when_the_server_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The screen that needs the footage server must offer the one press that starts it, not just name a script.
+
+    The marking step renders frames straight from the camera clips through the stream server; a fresh machine -
+    or one after a reboot - has no server yet, and being told to go run a script, with no button and no path
+    from here, is a dead end. ``SOCCER_STREAM_PORT`` is pointed at a port nothing listens on so the
+    not-running branch renders even on a machine where a server happens to be up.
+    """
+    monkeypatch.setenv("SOCCER_STREAM_PORT", "8599")
+    app = streamlit_testing.AppTest.from_file(str(APP), default_timeout=120)
+    app.run()
+    assert not app.exception, [str(e.value) for e in app.exception]
+    if _no_footage(app):
+        pytest.skip("no footage available in this environment")
+    if not any("marking stream" in str(block.value) for block in app.info):
+        pytest.skip("this machine has no game to mark a clock on")
+    keys = [str(button.key) for button in app.button]
+    assert any(key.startswith("start_mark_stream::") for key in keys), f"no start button in the marking step: {keys}"

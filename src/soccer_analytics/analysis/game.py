@@ -364,12 +364,25 @@ def resolve_record_paths(record: GameRecord, directory: str | Path) -> GameRecor
     Called wherever a manifest is read (``load`` and the discovery in :func:`find_for_video`), so a footage
     directory moved to another disk keeps its game clock, its clip offsets and its marking proxy: a stored path
     that no longer exists is looked up by name beside the manifest - which is where the videos sit, whether the
-    manifest was written portable (relative) or by an older version (absolute at the old location).
+    manifest was written portable (relative) or by an older version (absolute at the old location). A manifest
+    in the analysis layout stores its paths relative to the footage by construction (``save`` does it), so a
+    relative path that exists nowhere is still anchored there: it is a name (the never-merged game's combined
+    video is never written), and left as-is it would anchor at the process's working directory instead - a
+    dashboard run once looked for ``<repo>/analysis/<today>_game_.../game.json`` for a game whose manifest was
+    sitting beside its clips all along.
     """
     directory = Path(directory)
     base = _path_base(directory)
-    record.output = resolve_path(record.output, base)
-    record.clips = [replace(clip, path=resolve_path(clip.path, base)) for clip in record.clips]
+    portable = directory.parent.name == ANALYSIS_DIRNAME
+
+    def anchored(value: str) -> str:
+        resolved = resolve_path(value, base)
+        if portable and not Path(resolved).is_absolute():
+            return str(base / resolved)
+        return resolved
+
+    record.output = anchored(record.output)
+    record.clips = [replace(clip, path=anchored(clip.path)) for clip in record.clips]
     return record
 
 
