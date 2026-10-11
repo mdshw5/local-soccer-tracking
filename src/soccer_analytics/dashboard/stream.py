@@ -7,14 +7,15 @@ diagram, this one serves the footage itself as MJPEG - each frame carries:
   touchlines, the halfway line, both boxes, the circles and the spots) - the same overlay the calibration view
   uses to show a fit against the real markings, per frame;
 * the **detection boxes** of every field player the tracker follows, in that player's measured team color;
-* the **ball**, from the segment's ball scan, drawn as a detection when a detector saw it and as a hollow
-  forecast ring when the scan coasted across a miss - the scan's own honesty rule, kept through to the player;
+* the **ball**, from the segment's ball scan, drawn only where a detector saw it - a filled dot in a small box,
+  never a position the tracker only forecast, so the mark always means "seen right here";
 * a **label chip** on each player - the shirt number the roster or the OCR scan assigned, or the track id when
   nobody has named them - so an appearance in the footage can be matched to their row in the dashboard tables.
 
-What it deliberately does not do is invent: a player without a number shows their track id, not a guess; a
-forecast ball position is drawn differently from a sighting; and a replay that predates the per-player boxes is
-refused with the one command that rebuilds it, rather than streaming boxes that would be silently absent.
+What it deliberately does not do is invent: a player without a number shows their track id, not a guess; a ball
+position the scan did not actually detect is left unmarked, forecast or not; and a replay that predates the
+per-player boxes is refused with the one command that rebuilds it, rather than streaming boxes that would be
+silently absent.
 
 The HTTP surface lives in :class:`MatchStreamServer` (index page, ``/matches``, ``/stream/<id>.mjpg`` and a
 single-frame ``/frame/<id>.jpg``); ``scripts/run_match_stream.py`` is the process that runs it. Each viewer gets
@@ -41,7 +42,7 @@ import numpy as np
 
 from soccer_analytics.analysis import game as game_lib
 from soccer_analytics.analysis.identity import numbers_are_stale
-from soccer_analytics.analysis.library import MatchLibrary, resolve_path
+from soccer_analytics.analysis.library import MatchLibrary, MatchRecord, resolve_path
 from soccer_analytics.analysis.projection import segment_poses
 from soccer_analytics.analysis.rosters import RosterLibrary, team_rosters_for
 from soccer_analytics.analysis.stage_a import load_segment
@@ -189,7 +190,6 @@ class TeamStyle:
 # back on its own palette for). BGR, because that is what OpenCV draws with.
 FALLBACK_BGR = ((60, 60, 230), (230, 130, 60))
 OTHER_BGR = (150, 150, 150)
-FORECAST_BGR = (0, 200, 255)  # amber: "this position is the scan's forecast across a miss"
 # Roles are color-coded rather than spelled into the chips (the user's call), matching the pane's ring
 # colors so the two views name the same person the same way. BGR order, unlike the pane's hex.
 ROLE_BGR = {"referee": (247, 85, 168), "goalkeeper": (11, 158, 245)}  # #a855f7, #f59e0b
@@ -231,18 +231,19 @@ def chip_text(number, name: str, track_id: int, *, debug: bool = False) -> tuple
 def ball_stamps(records: list[dict], frame_count: int) -> np.ndarray:
     """The ball scan's records as ``(F, 3)`` arrays of ``u, v, measured``, NaN where there is nothing to draw.
 
-    Only ``tracking`` (a detection - ``measured=1``) and ``coasting`` (the forecast across a miss -
-    ``measured=0``) carry a position; ``lost`` and ``out_of_view`` do not. That is the same rule the replay
-    payload applies, so the two views can never disagree about whether the ball was seen.
+    Only ``tracking`` - a detection, ``measured=1`` - carries a position. ``coasting`` is the tracker's own
+    forecast across a miss: the position was predicted, not seen, and the stream draws the ball only where a
+    detector saw it, so a coast is not carried here at all. ``lost`` and ``out_of_view`` have no position
+    either.
     """
     out = np.full((frame_count, 3), np.nan)
     for record in records:
         frame = int(record.get("i", -1))
         status = record.get("status")
         u, v = record.get("u"), record.get("v")
-        if not 0 <= frame < frame_count or status not in ("tracking", "coasting") or u is None or v is None:
+        if not 0 <= frame < frame_count or status != "tracking" or u is None or v is None:
             continue
-        out[frame] = (float(u), float(v), 1.0 if status == "tracking" else 0.0)
+        out[frame] = (float(u), float(v), 1.0)
     return out
 
 
@@ -354,6 +355,55 @@ def slerp_rotation(first: np.ndarray, second: np.ndarray, alpha: float) -> np.nd
     return _matrix_from_quaternion((np.sin((1 - alpha) * theta) * a + np.sin(alpha * theta) * b) / np.sin(theta))
 
 
+def _fits_replay(meta_path: Path, replay: dict) -> bool:
+    """Whether a segment's frame grid is the one the replay payload was built on.
+
+    The stream draws the replay's per-frame boxes and the segment's per-frame ball onto the segment's own frame
+    grid; a segment of another window or rate would put them at the wrong times. The two numbers that pin a
+    segment's grid - its analysis rate and frame count - are both stored in its meta and baked into the replay
+    at build time, so they are what a candidate is judged by.
+    """
+    try:
+        meta = json.loads(meta_path.read_text())
+        return (
+            abs(float(meta["fps"]) - float(replay["fps"])) < 1e-6
+            and abs(int(meta["total_frames"]) - int(replay["frame_count"])) <= 2
+        )
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+
+
+def _segment_for(record: MatchRecord, replay: dict | None = None) -> Path:
+    """The record's segment a full-fidelity reader should open - for the stream, the one the replay belongs to.
+
+    ``MatchLibrary.add_segment`` appends: the segments list is an archive, oldest first, so blindly taking the
+    first entry (as this stream used to) serves the OLDEST run of the footage. That is how the ball silently
+    disappeared: the oldest run predated the ball scan, and the scan written beside a later run was never
+    opened. The right segment is the one the replay was built from - the most recently added run on the same
+    frame grid (:func:`_fits_replay`), the last match winning because runs are appended as they start. A
+    record whose segments all disagree with the replay still gets its newest usable one, and a record with a
+    single segment behaves exactly as it always did.
+    """
+    seen: set[str] = set()
+    usable: list[Path] = []
+    fitting: Path | None = None
+    for entry in record.segments:
+        directory = Path(entry)
+        key = os.path.normpath(str(directory))
+        if key in seen:
+            continue
+        seen.add(key)
+        meta_path = directory / "meta.json"
+        if not meta_path.exists():
+            continue
+        usable.append(directory)
+        if replay is not None and _fits_replay(meta_path, replay):
+            fitting = directory
+    if fitting is not None:
+        return fitting
+    return usable[-1] if usable else Path(record.segments[0])
+
+
 class AnnotatedMatch:
     """One match, ready to draw: boxes by frame, ball by frame, the camera chain and the calibration.
 
@@ -462,10 +512,13 @@ class AnnotatedMatch:
         JSON the browser never draws); they live beside it in ``boxes.npz``, and a replay without them is refused
         with the one command that rebuilds both - a stream of boxes labeled "missing" would be worse than one
         that says why it cannot start. A payload that still carries its boxes inline (a build from before the
-        sidecar) is tolerated so the stream works across the transition. The jersey numbers come from the OCR scan
-        and the names from the manual roster or the *team rosters* linked to the match (the same merge rule the
-        dashboard applies), so both views name a player the same way; a scan built against an older fit is called
-        out in the notes rather than silently mismapping numbers onto the wrong people.
+        sidecar) is tolerated so the stream works across the transition. The segment served is the one the replay
+        was built from, not blindly the record's oldest entry (:func:`_segment_for`): the per-frame ball scan
+        lives beside the segment, and the oldest run's missing scan is exactly how the ball silently disappeared
+        from this stream once. The jersey numbers come from the OCR scan and the names from the manual roster or
+        the *team rosters* linked to the match (the same merge rule the dashboard applies), so both views name a
+        player the same way; a scan built against an older fit is called out in the notes rather than silently
+        mismapping numbers onto the wrong people.
         """
         library = MatchLibrary(root)
         match_dir = library.path(match_id)
@@ -490,7 +543,7 @@ class AnnotatedMatch:
                 f"{match_id}'s replay has no per-player image boxes (no boxes.npz, or one that predates them) - "
                 f"run scripts/rebuild_match.py --match {match_id}"
             )
-        segment_dir = Path(segment) if segment else Path(record.segments[0])
+        segment_dir = Path(segment) if segment else _segment_for(record, replay)
         meta_path = segment_dir / "meta.json"
         if not meta_path.exists():
             raise StreamError(f"segment not found for {match_id}: {segment_dir}")
@@ -506,18 +559,20 @@ class AnnotatedMatch:
             team_rosters=team_rosters_for(RosterLibrary(), record.team_rosters),
         )
 
-        notes: list[str] = []
-        excluded = int(replay.get("bystanders_excluded") or 0)
-        if excluded:
-            notes.append(f"{excluded} off-field tracks hidden (coaches/spectators)")
-        if replay.get("ball") is None:
-            notes.append("no ball scan for this segment")
-
-        ball_records = []
+        ball_records: list[dict] = []
         try:
             ball_records = json.loads((segment_dir / BALL_TRACK_FILE).read_text()).get("frames") or []
         except (OSError, json.JSONDecodeError):
             pass
+
+        notes: list[str] = []
+        excluded = int(replay.get("bystanders_excluded") or 0)
+        if excluded:
+            notes.append(f"{excluded} off-field tracks hidden (coaches/spectators)")
+        if not ball_records:
+            # Judged from the segment just opened, not from the replay payload: the two disagreed silently once
+            # (the segment fix above), and this note must describe what the stream is actually drawing.
+            notes.append("no ball scan for this segment")
 
         team_names = list(replay.get("team_names") or record.team_names)
         team_colors = list(replay.get("team_colors") or [])
@@ -625,21 +680,23 @@ class AnnotatedMatch:
         return out
 
     def ball_at(self, position: float) -> tuple[float, float, float]:
-        """The ball at a fractional analysis position: a position interpolates when the scan has one on both
-        sides, is held when the next sample has none (the ball did not vanish), and does not appear before the
-        sample that first saw it - the same appearance it has at the analysis rate. The *measured* flag belongs
-        to the nearest sample: between a sighting and a forecast, the nearer sample's claim is the honest one.
+        """The ball at a fractional analysis position, only where a detector actually saw it.
+
+        Between two *neighboring sightings* the position interpolates (a 30 or 60 fps render moves the dot the
+        way it moves the boxes); anywhere else there is nothing to draw - before the first sighting and after
+        the last, and across any sample the scan did not detect the ball on. A forecast is never drawn: the mark
+        means "a detector saw the ball right here". The *measured* flag rides along for the caller.
         """
         earlier, later, alpha = self._neighbors(position)
         u0, v0, m0 = self.ball[earlier]
-        u1, v1, m1 = self.ball[later]
-        filled = np.isfinite(u0) and np.isfinite(v0)
-        following = np.isfinite(u1) and np.isfinite(v1)
-        if filled and following and alpha > 0.0:
+        if not (np.isfinite(u0) and np.isfinite(v0)):
+            return float("nan"), float("nan"), float("nan")
+        if alpha > 0.0:
+            u1, v1, m1 = self.ball[later]
+            if not (np.isfinite(u1) and np.isfinite(v1)):
+                return float("nan"), float("nan"), float("nan")
             return (u0 + (u1 - u0) * alpha, v0 + (v1 - v0) * alpha, m0 if alpha < 0.5 else m1)
-        if filled:
-            return float(u0), float(v0), float(m0)
-        return float("nan"), float("nan"), float("nan")
+        return float(u0), float(v0), float(m0)
 
     def pose_at(self, position: float) -> tuple[np.ndarray, float]:
         """The camera pose at a fractional analysis position: the chain slerps, the focal interpolates."""
@@ -699,10 +756,11 @@ class AnnotatedMatch:
         """Draw the overlay for any source-clock time, not only the analysis grid - the full-rate entry point.
 
         The analysis samples the match at ``fps`` (5 a second on the real matches); a frame between two samples
-        has no boxes of its own. Everything that moves - the boxes, the ball, the camera pose - interpolates
-        between the neighboring samples (see :meth:`players_at`), which is what makes a 60 fps render a real
-        60 fps rather than each sample held for twelve frames. The text layers stay on the nearer sample: they
-        name where the analysis is, and that stays true between its frames.
+        has no boxes of its own. Everything that moves - the boxes, the camera pose, and the ball between two
+        sightings - interpolates between the neighboring samples (see :meth:`players_at` and :meth:`ball_at`),
+        which is what makes a 60 fps render a real 60 fps rather than each sample held for twelve frames. The
+        text layers stay on the nearer sample: they name where the analysis is, and that stays true between its
+        frames.
         """
         position = (float(at_s) - self.start_s) * self.fps
         earlier, _later, _alpha = self._neighbors(position)
@@ -810,25 +868,26 @@ class AnnotatedMatch:
             _chip(frame, x, y + detail_height, main, color, font)
 
     def _draw_ball(self, frame: np.ndarray, index: int, *, stamp=None) -> None:
+        """The ball, only where a detector saw it: a small box (the "detection box" a viewer expects) with the
+        ball itself as a filled dot inside it.
+
+        A position the scan only forecast - the tracker's coasted guess across a miss - is not drawn: the mark
+        on the picture is a sighting, or it is absent. ``stamp`` is the full-rate path's interpolated position,
+        which only ever sits between two neighboring sightings (see :meth:`ball_at`).
+        """
         u, v, measured = self.ball[index] if stamp is None else stamp
-        if not (np.isfinite(u) and np.isfinite(v)):
+        if measured != 1.0 or not (np.isfinite(u) and np.isfinite(v)):
             return
         height, width = frame.shape[:2]
         center = (int(round(u * width)), int(round(v * width)))
         if not (-0.05 * width <= center[0] <= 1.05 * width and -0.05 * width <= center[1] <= 1.05 * width):
             return
         radius = max(5, int(round(height / 150.0)))
-        if measured == 1.0:
-            # A detection: a small box around the center (the "detection box" a viewer expects) plus the ball
-            # itself as a filled dot inside it.
-            half = radius + max(3, radius // 2)
-            cv2.rectangle(frame, (center[0] - half, center[1] - half), (center[0] + half, center[1] + half),
-                          (255, 255, 255), max(1, radius // 4))
-            cv2.circle(frame, center, radius, (255, 255, 255), -1)
-            cv2.circle(frame, center, radius, (40, 40, 220), max(2, radius // 3))
-        else:
-            # The scan coasted across a miss: a forecast, drawn as a hollow ring so it reads as one.
-            cv2.circle(frame, center, radius, FORECAST_BGR, max(2, radius // 3))
+        half = radius + max(3, radius // 2)
+        cv2.rectangle(frame, (center[0] - half, center[1] - half), (center[0] + half, center[1] + half),
+                      (255, 255, 255), max(1, radius // 4))
+        cv2.circle(frame, center, radius, (255, 255, 255), -1)
+        cv2.circle(frame, center, radius, (40, 40, 220), max(2, radius // 3))
 
     def _draw_hud(self, frame: np.ndarray, index: int, *, note: str = "", session_line: bool = False) -> None:
         """The watching corners: who is playing, which color they are, and where in the match this is.
@@ -990,7 +1049,7 @@ def streamable_matches(root: str | Path | None = None) -> list[dict]:
         if not record.segments or not (directory / "calibration.json").exists() or not (directory / "replay.json").exists():
             rows.append({"match_id": match_id, "streamable": False, "reason": "no calibration or replay yet"})
             continue
-        segment_dir = Path(record.segments[0])
+        segment_dir = _segment_for(record)
         meta_path = segment_dir / "meta.json"
         if not meta_path.exists():
             rows.append({"match_id": match_id, "streamable": False, "reason": "segment not found"})

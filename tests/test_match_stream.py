@@ -22,6 +22,7 @@ from soccer_analytics.analysis.library import MatchLibrary, MatchRecord
 from soccer_analytics.analysis.projection import project_segment, segment_poses
 from soccer_analytics.dashboard.replay import build_replay, track_boxes
 from soccer_analytics.dashboard.stream import (
+    _segment_for,
     AnnotatedMatch,
     MatchStreamServer,
     OVERLAY_NAMES,
@@ -116,9 +117,10 @@ def test_without_a_number_the_track_id_can_never_look_like_a_worn_number() -> No
 # --------------------------------------------------------------------------------------------------------------
 # The ball stamps
 # --------------------------------------------------------------------------------------------------------------
-def test_only_seen_and_forecast_ball_frames_carry_a_position() -> None:
-    """``tracking`` is a sighting, ``coasting`` a forecast across a miss, and everything else has nothing to draw -
-    the same rule the replay payload applies, so the two views cannot disagree about the ball."""
+def test_only_a_sighting_carries_a_position_and_a_forecast_never_does() -> None:
+    """``tracking`` is a sighting; ``coasting`` is the tracker's forecast across a miss, and the stream draws
+    the ball only where a detector saw it - so a coast is not carried at all, and neither are the statuses that
+    have no position."""
     records = [
         {"i": 0, "status": "tracking", "u": 0.5, "v": 0.3},
         {"i": 1, "status": "coasting", "u": 0.55, "v": 0.31},
@@ -128,7 +130,7 @@ def test_only_seen_and_forecast_ball_frames_carry_a_position() -> None:
     ]
     stamps = ball_stamps(records, 5)
     assert stamps[0, 2] == 1.0 and np.allclose(stamps[0, :2], (0.5, 0.3))
-    assert stamps[1, 2] == 0.0, "a forecast is not a sighting"
+    assert np.isnan(stamps[1]).all(), "a forecast is not a sighting: nothing to draw"
     assert np.isnan(stamps[2]).all() and np.isnan(stamps[3]).all()
     assert np.isnan(stamps[4]).all()
 
@@ -447,9 +449,9 @@ def test_a_track_id_chip_is_debug_information(stream_case) -> None:
     assert np.count_nonzero(np.any(chipped != corners, axis=2)) > 0, "the debug layer shows the track id"
 
 
-def test_a_seen_ball_is_marked_where_the_scan_put_it_and_a_forecast_rings_differently(stream_case) -> None:
-    """A detection and a forecast are the scan's two different claims about the ball - the picture must not blur
-    them into one, and a frame the scan has nothing for must carry no ball mark at all."""
+def test_a_seen_ball_is_marked_and_a_forecast_is_never_drawn(stream_case) -> None:
+    """The mark on the picture is a sighting, or it is absent: a frame the scan only forecast the ball on must
+    carry no mark at all - not even the hollow ring a forecast used to draw."""
     segment, _calibration, _q, _focal, _replay, _boxes = stream_case
     index = len(segment.time) // 2
     match = _annotated(stream_case)
@@ -462,7 +464,8 @@ def test_a_seen_ball_is_marked_where_the_scan_put_it_and_a_forecast_rings_differ
     match.ball[index] = (0.5, 0.3, 0.0)
     forecast = np.full((360, 640, 3), 60, dtype=np.uint8)
     match.render(forecast, index, pitch=False, boxes=False, numbers=False, ball=True, hud=False)
-    assert tuple(int(v) for v in forecast[int(0.3 * 640), 320]) == (60, 60, 60), "a forecast is hollow"
+    around = forecast[int(0.3 * 640) - 7 : int(0.3 * 640) + 8, 320 - 7 : 320 + 8]
+    assert np.all(around == 60), "a forecast is not a detection: not even a ring may be drawn for it"
 
     match.ball[index] = (np.nan, np.nan, np.nan)
     empty = np.full((360, 640, 3), 60, dtype=np.uint8)
@@ -573,6 +576,49 @@ def test_the_listing_needs_a_calibration_and_a_replay_and_carries_team_colors(tm
     assert rows["2026-01-01_ok"]["team_names"] == ["Reds", "Blues"]
     assert rows["2026-01-01_ok"]["team_colors"][0] == [200, 50, 50]
     assert rows["2026-01-02_no_replay"]["streamable"] is False
+
+
+def test_the_listing_serves_the_newest_usable_segment_not_a_stale_first_entry(tmp_path) -> None:
+    """A moved directory can leave the record's first entry dangling; the run that is actually on disk must
+    still make the match streamable - the same choice the stream itself makes."""
+    root = tmp_path / "matches"
+    fresh = tmp_path / "segments" / "fresh"
+    fresh.mkdir(parents=True)
+    (fresh / "meta.json").write_text(
+        json.dumps({"start_s": 0.0, "end_s": 2.0, "total_frames": 10, "fps": 5.0, "video": "v.mp4"})
+    )
+    _write_match(root, "2026-01-03_moved", segment_dir=fresh)
+    library = MatchLibrary(root)
+    record = library.load("2026-01-03_moved")
+    record.segments = [str(tmp_path / "segments" / "gone"), *record.segments]
+    library.save(record)
+    rows = {row["match_id"]: row for row in streamable_matches(root)}
+    assert rows["2026-01-03_moved"]["streamable"] is True
+
+
+def test_the_segment_served_is_the_one_the_replay_was_built_on(tmp_path) -> None:
+    """The record lists every run, oldest first - and the ball scan lives beside one of them. Blindly taking the
+    first entry is how a segment WITHOUT its ball scan silently got served; the choice is the newest run on the
+    replay's own frame grid, and a replay built on an older window keeps its own segment."""
+    old = tmp_path / "segments" / "old"
+    new = tmp_path / "segments" / "new"
+    for directory, frames in ((old, 450), (new, 10)):
+        directory.mkdir(parents=True)
+        (directory / "meta.json").write_text(
+            json.dumps({"start_s": 0.0, "end_s": 2.0, "total_frames": frames, "fps": 5.0, "video": "v.mp4"})
+        )
+    record = MatchRecord(match_id="m", segments=[str(old), str(old), str(new)])  # the duplicate a re-add leaves
+
+    replay = {"fps": 5.0, "frame_count": 10}
+    assert _segment_for(record, replay) == new, "among the runs on the replay's grid, the newest wins"
+    assert _segment_for(record) == new, "without a replay, the newest usable run wins"
+    assert _segment_for(record, {"fps": 5.0, "frame_count": 450}) == old, (
+        "a replay built on the old window keeps the segment it was built on"
+    )
+    gone = tmp_path / "segments" / "gone"
+    assert _segment_for(MatchRecord(match_id="m", segments=[str(gone)])) == gone, (
+        "a record with nothing usable still names its first entry - the load's error reports it"
+    )
 
 
 def test_a_replay_without_player_boxes_is_refused_with_the_rebuild_command(tmp_path) -> None:

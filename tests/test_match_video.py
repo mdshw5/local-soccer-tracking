@@ -110,19 +110,26 @@ def test_a_box_holds_through_a_gap_and_a_track_does_not_appear_before_its_first_
     assert late.players_at(0.5) == [], "the track appears when its sample arrives, not before"
 
 
-def test_the_ball_interpolates_and_carries_the_nearer_samples_claim() -> None:
-    """A sighting and a forecast are different claims; between them the nearer sample's claim is the one the
-    interpolated position belongs to, and a ball the scan has not seen yet is not drawn."""
+def test_the_ball_interpolates_between_two_sightings_and_is_absent_everywhere_else() -> None:
+    """The dot moves between two neighboring sightings - and a forecast is never drawn: where a coast interrupts
+    the track, or the scan has not seen the ball yet, the picture carries no ball mark at all."""
     match = _match(
+        ball_records=[
+            {"i": 0, "status": "tracking", "u": 0.2, "v": 0.4},
+            {"i": 1, "status": "tracking", "u": 0.6, "v": 0.8},
+        ]
+    )
+    assert match.ball_at(0.4) == pytest.approx((0.36, 0.56, 1.0)), "between sightings the dot interpolates"
+    assert match.ball_at(0.0) == pytest.approx((0.2, 0.4, 1.0)), "a sample a detector saw draws as seen"
+    coasted = _match(
         ball_records=[
             {"i": 0, "status": "tracking", "u": 0.2, "v": 0.4},
             {"i": 1, "status": "coasting", "u": 0.6, "v": 0.8},
         ]
     )
-    assert match.ball_at(0.4) == pytest.approx((0.36, 0.56, 1.0))
-    assert match.ball_at(0.75) == pytest.approx((0.5, 0.7, 0.0))
+    assert not np.isfinite(coasted.ball_at(0.4)[0]), "a forecast is not a detection: not drawn"
     gap = _match(ball_records=[{"i": 0, "status": "tracking", "u": 0.2, "v": 0.4}])
-    assert gap.ball_at(0.5) == pytest.approx((0.2, 0.4, 1.0)), "held across the later gap"
+    assert not np.isfinite(gap.ball_at(0.5)[0]), "nothing is held across a later gap"
     future = _match(ball_records=[{"i": 1, "status": "tracking", "u": 0.2, "v": 0.4}])
     assert not np.isfinite(future.ball_at(0.5)[0]), "not yet seen at the earlier sample"
 

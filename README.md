@@ -139,7 +139,7 @@ The footage pane is served by a small stream server of its own, which can also b
 .venv/bin/python scripts/run_match_stream.py --port 8510
 ```
 
-Every stream is annotated from the archive's own data — pitch markings projected through the corrected camera chain, a box on each tracked player in their measured team color with a shirt-number chip (or `#track_id` until a number is known), the ball from the scan (filled where a detector saw it, hollow where the scan coasted a miss) and a clock/legend HUD. The stream draws what the archive already knows and invents nothing: a replay without stored boxes is refused with the command that rebuilds it, and a stale shirt-number scan is called out in the corner rather than mapping numbers onto the wrong tracks.
+Every stream is annotated from the archive's own data — pitch markings projected through the corrected camera chain, a box on each tracked player in their measured team color with a shirt-number chip (or `#track_id` until a number is known), the ball from the scan (drawn only where a detector actually saw it — a position the tracker merely forecast is left unmarked) and a clock/legend HUD. The stream draws what the archive already knows and invents nothing: a replay without stored boxes is refused with the command that rebuilds it, and a stale shirt-number scan is called out in the corner rather than mapping numbers onto the wrong tracks.
 
 | Route | Description |
 | --- | --- |
