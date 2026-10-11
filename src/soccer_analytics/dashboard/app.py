@@ -565,9 +565,24 @@ def _load_replay_cached(path: str, mtime_ns: int) -> dict:
     return upgrade_replay_payload(json.loads(Path(path).read_text()))
 
 
-BALL_STATUS_STALE_S = 300.0
 BALL_STATUS_FILE = "ball_scan.json"  # written by scripts/run_ball_scan.py beside the segment
 BALL_TRACK_FILE = "ball_track.json"  # the scan's result, beside the status
+JERSEY_STATUS_FILE = "jerseys_status.json"  # written by scripts/extract_jerseys.py beside the match
+AUDIO_STATUS_FILE = "audio_scan.json"  # written by scripts/run_audio_scan.py beside the match
+SCAN_STATUS_STALE_S = 300.0  # any scan silent for this long counts as stopped, whatever its file says
+
+
+def _scan_alive(status: dict) -> bool:
+    """Whether a background scan is running right now: its status says so *and* it was updated recently.
+
+    The recentness is the point. A process killed without a chance to write (a reboot, a crash) leaves "running"
+    behind, and a control disabled by a dead process cannot be pressed to start it again - so anything that has
+    not reported for minutes counts as stopped. Every scan updates every few seconds while it runs, so the
+    window is generous.
+    """
+    if status.get("state") != "running":
+        return False
+    return (time.time() - float(status.get("updated") or 0.0)) < SCAN_STATUS_STALE_S
 
 
 def _ball_status(segment_dir: Path) -> dict:
@@ -579,17 +594,8 @@ def _ball_status(segment_dir: Path) -> dict:
 
 
 def _ball_scan_alive(segment_dir: Path) -> bool:
-    """Whether a scan is running right now: its status says so *and* it was updated recently.
-
-    The recentness is the point. A process killed without a chance to write (a reboot, a crash) leaves "running"
-    behind, and a button disabled by a dead process cannot be pressed to resume it - so anything that has not
-    reported for minutes counts as stopped. The scan updates every few seconds while it runs, so the window is
-    generous.
-    """
-    status = _ball_status(segment_dir)
-    if status.get("state") != "running":
-        return False
-    return (time.time() - float(status.get("updated") or 0.0)) < BALL_STATUS_STALE_S
+    """Whether the ball scan is running right now - its button stays disabled while it is."""
+    return _scan_alive(_ball_status(segment_dir))
 
 
 def _ball_track_for_replay(
@@ -693,7 +699,6 @@ def _build_report_and_replay(
 
 
 DETECTIONS_STATUS_FILE = "detections.json"  # written by scripts/run_detections.py
-DETECTIONS_STATUS_STALE_S = 300.0
 
 
 def _detections_status(library: MatchLibrary, match_id: str) -> dict:
@@ -705,11 +710,8 @@ def _detections_status(library: MatchLibrary, match_id: str) -> dict:
 
 
 def _detections_alive(library: MatchLibrary, match_id: str) -> bool:
-    """Whether the enrichment run is actually in progress, not just leaving "running" behind after a crash."""
-    status = _detections_status(library, match_id)
-    if status.get("state") != "running":
-        return False
-    return (time.time() - float(status.get("updated") or 0.0)) < DETECTIONS_STATUS_STALE_S
+    """Whether the enrichment run is in progress, not just leaving "running" behind after a crash."""
+    return _scan_alive(_detections_status(library, match_id))
 
 
 def _start_all_detections(library: MatchLibrary, match_id: str, video: str, segment_dir: Path) -> None:
@@ -747,38 +749,6 @@ def _start_all_detections(library: MatchLibrary, match_id: str, video: str, segm
     except OSError:
         pass  # an unwritable match directory fails the child too, and its error lands in the status file
     subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-@st.fragment(run_every=POLL_SECONDS)
-def _detections_run_status(library: MatchLibrary, match_id: str, watch_key: str) -> None:
-    """Live progress of the all-detections run; the report and the replay are rebuilt when it lands."""
-    status = _detections_status(library, match_id)
-    if not status:
-        return  # never run: the button's own help text says what it would do
-    state = status.get("state")
-    previous = st.session_state.get(watch_key)
-    st.session_state[watch_key] = state
-    if state == "running":
-        if _detections_alive(library, match_id):
-            st.progress(
-                min(1.0, float(status.get("progress") or 0.0)),
-                text=str(status.get("message") or "Running the detections..."),
-            )
-            st.caption(
-                "Running in the background - this bar updates by itself. The scans check their own checkpoints, "
-                "so the run can be left overnight; the report and the replay are rebuilt when everything is in."
-            )
-        else:
-            st.warning(
-                "The run says it is running but has not reported for minutes, so it has probably stopped. Press "
-                "the button again: every stage that already finished is skipped."
-            )
-    elif state == "error":
-        st.error(f"All-detections run failed: {status.get('error') or status.get('message')}")
-    else:
-        st.caption(f"Last all-detections run: {str(status.get('message') or 'finished').rstrip('.')}.")
-    if previous == "running" and state != "running":
-        st.rerun()
 
 
 def _clip_offsets(video: str) -> dict[str, float]:
@@ -1100,136 +1070,186 @@ def fit_message(calibration: PitchCalibration, labeled: list[tuple[dict, str]]) 
     return message
 
 
-@st.fragment(run_every=POLL_SECONDS)
-def _jersey_scan_status(library: MatchLibrary, match_id: str, watch_key: str) -> None:
-    """Live progress of the background shirt-number scan; the page picks the numbers up when it lands."""
-    status = library.load_jerseys_status(match_id)
-    state = status.get("state")
-    previous = st.session_state.get(watch_key)
-    st.session_state[watch_key] = state
-    if not status:
-        st.caption(
-            "Not scanned yet. The scan re-decodes this segment, crops the torso of every tracked player on the "
-            "frames where they are largest, and reads the number with OCR. It keeps the readings per track and only "
-            "reports a number when several agree. It runs in the background and takes a few minutes; the scan is a "
-            "suggestion - manual entries override it."
-        )
-    elif state == "running":
-        done, total = int(status.get("crops_done", 0)), int(status.get("crops_total", 0))
-        st.progress(
-            min(1.0, done / max(1, total)),
-            text=f"{done}/{total} crops, {status.get('readings', 0)} readings",
-        )
-        st.caption("Running in the background - this bar updates by itself.")
-    elif state == "error":
-        st.error(f"The scan failed: {status.get('message')}")
-    else:
-        meta = library.load_jerseys(match_id).get("meta", {})
-        st.caption(
-            f"Last scan: {meta.get('crops', 0)} crops from {meta.get('tracks_scanned', 0)} tracks, "
-            f"{meta.get('readings', 0)} readings, {meta.get('suggested', 0)} suggested number(s). "
-            + (status.get("message") or "")
-        )
-    if previous == "running" and state != "running":
-        st.rerun()
+_SCAN_STATE_WORDS = {"running": "running", "done": "done", "error": "failed", "partial": "stopped early"}
+
+
+def _scan_row(title: str, state: str | None):
+    """The shell every scan row shares: a bordered box whose first line names the scan and its state.
+
+    Returns the box to draw the row's body into, so every scan reads the same way: name and state first, then a
+    live bar, a stall warning, an error, or the last result.
+    """
+    box = st.container(border=True)
+    with box:
+        word = _SCAN_STATE_WORDS.get(str(state), "not run yet") if state else "not run yet"
+        st.markdown(f"**{title}** - {word}")
+    return box
 
 
 @st.fragment(run_every=POLL_SECONDS)
-def _audio_scan_status(library: MatchLibrary, match_id: str, watch_key: str) -> None:
-    """Live progress of the background whistle scan; the events table picks the candidates up when it lands."""
-    status = library.load_audio_scan_status(match_id)
-    state = status.get("state")
-    previous = st.session_state.get(watch_key)
-    st.session_state[watch_key] = state
-    if not status:
-        st.caption(
-            "Not scanned yet. The scan decodes the recording's audio once (and caches it), then looks for narrowband "
-            "blasts in the whistle band. It runs in the background and reports progress here."
-        )
-    elif state == "running":
-        st.progress(
-            min(1.0, float(status.get("progress") or 0.0)),
-            text=str(status.get("message") or "Scanning..."),
-        )
-        st.caption("Running in the background - this bar updates by itself.")
-    elif state == "error":
-        st.error(f"The scan failed: {status.get('error')}")
-    else:
-        found = int(status.get("found", 0))
-        minutes = float(status.get("minutes", 0.0))
-        if found:
-            already = found - int(status.get("added", found))
-            dropped = int(status.get("dropped", 0))
+def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Path) -> None:
+    """The one spot to watch every background scan: ball, whistle, shirt numbers, and the run that chains them.
+
+    The scans used to report under their own controls, so watching two of them meant scrolling between three
+    expanders. Here each scan gets a row rendered the same way - its state, a live bar carrying the scan's own
+    message while it runs, a stall warning when a "running" file has gone quiet, or the last result when it is
+    idle. The controls that start a scan stay with their settings; this is the spot to look at while they work.
+    """
+    st.subheader("Scan activity")
+    st.caption(
+        "One row per scan - ball, whistle, shirt numbers - and for the all-detections run that chains them. Bars "
+        "update by themselves while a scan runs; each row shows the last result when it is idle."
+    )
+    finished_any = False
+
+    # --- the ball scan ----------------------------------------------------------------------------------------
+    ball = _ball_status(segment_dir)
+    previous = st.session_state.get(f"ball_watch::{match_id}")
+    st.session_state[f"ball_watch::{match_id}"] = ball.get("state")
+    with _scan_row("Ball scan", ball.get("state")):
+        if not ball:
+            st.caption("Not scanned yet - about an hour on a whole game; start it from its control below.")
+        elif ball.get("state") == "running":
+            if _scan_alive(ball):
+                st.progress(
+                    min(1.0, float(ball.get("progress") or 0.0)),
+                    text=str(ball.get("message") or "Scanning..."),
+                )
+                st.caption("Running in the background - it can be closed and resumed later.")
+            else:
+                st.warning(
+                    "Says it is running but has not reported for minutes, so it has probably stopped. Start it "
+                    "again from its control below - it resumes from its last checkpoint."
+                )
+        elif ball.get("state") == "error":
+            st.error(f"The scan failed: {ball.get('error')}")
+        else:
+            counts = ball.get("counts") or {}
+            scanned = int(ball.get("scanned") or 0)
+            if counts and scanned:
+                total = int(ball.get("total_frames") or 0)
+                seen = 100 * counts.get("tracking", 0) / scanned
+                forecast = 100 * counts.get("coasting", 0) / scanned
+                off = 100 * (counts.get("out_of_view", 0) + counts.get("lost", 0)) / scanned
+                summary = (
+                    f"Last scan: {scanned} of {total} frame(s) - the ball was seen on {seen:.0f}% of them, "
+                    f"forecast across a missed frame on {forecast:.0f}%, off the picture on {off:.0f}%."
+                )
+            else:
+                # A status written by an older version of the scan has no counts in it; the replay itself does
+                # not care - the track on disk is the same - so the summary degrades to the message.
+                summary = f"Last scan: {ball.get('message') or 'finished'}."
+            if ball.get("state") == "partial":
+                summary += " The scan was stopped early; start it again to resume it."
+            else:
+                summary += " Press **Build report** to draw the track on the replay."
+            st.caption(summary)
+    finished_any = finished_any or (previous == "running" and ball.get("state") != "running")
+
+    # --- the whistle scan -------------------------------------------------------------------------------------
+    audio = library.load_audio_scan_status(match_id)
+    previous = st.session_state.get(f"whistle_watch::{match_id}")
+    st.session_state[f"whistle_watch::{match_id}"] = audio.get("state")
+    with _scan_row("Whistle scan", audio.get("state")):
+        if not audio:
+            st.caption("Not scanned yet - start it from its control below.")
+        elif audio.get("state") == "running":
+            if _scan_alive(audio):
+                st.progress(
+                    min(1.0, float(audio.get("progress") or 0.0)),
+                    text=str(audio.get("message") or "Scanning..."),
+                )
+                st.caption("Running in the background - this bar updates by itself.")
+            else:
+                st.warning(
+                    "Says it is running but has not reported for minutes, so it has probably stopped. Start it "
+                    "again from its control below."
+                )
+        elif audio.get("state") == "error":
+            st.error(f"The scan failed: {audio.get('error')}")
+        else:
+            found = int(audio.get("found", 0))
+            minutes = float(audio.get("minutes", 0.0))
+            if found:
+                already = found - int(audio.get("added", found))
+                dropped = int(audio.get("dropped", 0))
+                st.caption(
+                    f"Last scan: {minutes:.0f} min of audio, {found} candidate(s)"
+                    + (f", {already} already recorded" if already else "")
+                    + (f", {dropped} dropped as no longer detected" if dropped else "")
+                    + f", the strongest at {float(audio.get('strongest', 0.0)):.0f}x the match level."
+                )
+            else:
+                st.caption(
+                    f"Last scan: {minutes:.0f} min of audio, no whistle candidates. The detector wants a loud, "
+                    "sustained blast, so a quiet recording - or a referee a long way from the camera - can leave "
+                    "it with nothing to report."
+                )
+    finished_any = finished_any or (previous == "running" and audio.get("state") != "running")
+
+    # --- the shirt-number scan --------------------------------------------------------------------------------
+    jersey = library.load_jerseys_status(match_id)
+    previous = st.session_state.get(f"jersey_watch::{match_id}")
+    st.session_state[f"jersey_watch::{match_id}"] = jersey.get("state")
+    with _scan_row("Shirt numbers", jersey.get("state")):
+        if not jersey:
+            st.caption("Not scanned yet - a few minutes of OCR; start it from its control below.")
+        elif jersey.get("state") == "running":
+            if _scan_alive(jersey):
+                done, total = int(jersey.get("crops_done", 0)), int(jersey.get("crops_total", 0))
+                detail = str(jersey.get("message") or f"{done}/{total} crops, {jersey.get('readings', 0)} readings")
+                st.progress(min(1.0, done / max(1, total)), text=detail)
+                st.caption("Running in the background - this bar updates by itself.")
+            else:
+                st.warning(
+                    "Says it is running but has not reported for minutes, so it has probably stopped. Start it "
+                    "again from its control below."
+                )
+        elif jersey.get("state") == "error":
+            st.error(f"The scan failed: {jersey.get('message')}")
+        else:
+            meta = library.load_jerseys(match_id).get("meta", {})
             st.caption(
-                f"Last scan: {minutes:.0f} min of audio, {found} candidate(s)"
-                + (f", {already} already recorded" if already else "")
-                + (f", {dropped} dropped as no longer detected" if dropped else "")
-                + f", the strongest at {float(status.get('strongest', 0.0)):.0f}x the match level."
+                f"Last scan: {meta.get('crops', 0)} crops from {meta.get('tracks_scanned', 0)} tracks, "
+                f"{meta.get('readings', 0)} readings, {meta.get('suggested', 0)} suggested number(s). "
+                + (jersey.get("message") or "")
             )
-        else:
+    finished_any = finished_any or (previous == "running" and jersey.get("state") != "running")
+
+    # --- the run that chains them all -------------------------------------------------------------------------
+    run = _detections_status(library, match_id)
+    previous = st.session_state.get(f"detections_watch::{match_id}")
+    st.session_state[f"detections_watch::{match_id}"] = run.get("state")
+    with _scan_row("All-detections run", run.get("state")):
+        if not run:
             st.caption(
-                f"Last scan: {minutes:.0f} min of audio, no whistle candidates. The detector wants a loud, "
-                "sustained blast, so a quiet recording - or a referee a long way from the camera - can leave it "
-                "with nothing to report."
+                "Not run yet - **Build report + run all detections** above chains the three scans, the event "
+                "detectors and a final rebuild, skipping whatever already finished."
             )
-    if previous == "running" and state != "running":
-        st.rerun()
+        elif run.get("state") == "running":
+            if _scan_alive(run):
+                st.progress(
+                    min(1.0, float(run.get("progress") or 0.0)),
+                    text=str(run.get("message") or "Running the detections..."),
+                )
+                st.caption(
+                    "Running in the background - the scans check their own checkpoints, so the run can be left "
+                    "overnight; the report and the replay are rebuilt when everything is in."
+                )
+            else:
+                st.warning(
+                    "The run says it is running but has not reported for minutes, so it has probably stopped. "
+                    "Press the button again: every stage that already finished is skipped."
+                )
+        elif run.get("state") == "error":
+            st.error(f"All-detections run failed: {run.get('error') or run.get('message')}")
+        else:
+            st.caption(f"Last all-detections run: {str(run.get('message') or 'finished').rstrip('.')}.")
+    finished_any = finished_any or (previous == "running" and run.get("state") != "running")
 
-
-@st.fragment(run_every=POLL_SECONDS)
-def _ball_scan_status(segment_dir: Path, watch_key: str) -> None:
-    """Live progress of the background ball scan; the replay draws the track once the report is rebuilt."""
-    status = _ball_status(segment_dir)
-    state = status.get("state")
-    previous = st.session_state.get(watch_key)
-    st.session_state[watch_key] = state
-    if not status:
-        st.caption(
-            "Not scanned yet. The scan re-reads this segment's video at full resolution and follows the ball frame "
-            "by frame: a window around the prediction while it holds the ball, the whole frame to re-find it after "
-            "a gap, and the camera's own motion (plus the ball's velocity) as the prediction between frames. It is "
-            "expensive - about an hour for a whole game - and it checkpoints on the way, so it can be stopped and "
-            "resumed."
-        )
-    elif state == "running":
-        if _ball_scan_alive(segment_dir):
-            st.progress(
-                min(1.0, float(status.get("progress") or 0.0)),
-                text=str(status.get("message") or "Scanning..."),
-            )
-            st.caption("Running in the background - this bar updates by itself. It can be closed and resumed later.")
-        else:
-            # The process died without a chance to write (a reboot, a crash): the file still says "running" but
-            # nothing has moved the bar for minutes. Saying so beats a progress bar that will never advance.
-            st.warning(
-                "A scan says it is running but has not reported for minutes, so it has probably stopped. The "
-                "button below resumes it from its last checkpoint."
-            )
-    elif state == "error":
-        st.error(f"The scan failed: {status.get('error')}")
-    else:
-        counts = status.get("counts") or {}
-        scanned = int(status.get("scanned") or 0)
-        if counts and scanned:
-            total = int(status.get("total_frames") or 0)
-            seen = 100 * counts.get("tracking", 0) / scanned
-            forecast = 100 * counts.get("coasting", 0) / scanned
-            off = 100 * (counts.get("out_of_view", 0) + counts.get("lost", 0)) / scanned
-            summary = (
-                f"Last scan: {scanned} of {total} frame(s) - the ball was seen on {seen:.0f}% of them, "
-                f"forecast across a missed frame on {forecast:.0f}%, off the picture on {off:.0f}%."
-            )
-        else:
-            # A status written by an older version of the scan has no counts in it; the replay itself does not
-            # care - the track on disk is the same - so the summary degrades to the message rather than inventing
-            # percentages.
-            summary = f"Last scan: {status.get('message') or 'finished'}."
-        if state == "partial":
-            summary += " The scan was stopped early; press the button again to resume it."
-        else:
-            summary += " Press **Build report** to draw the track on the replay."
-        st.caption(summary)
-    if previous == "running" and state != "running":
+    # When anything the page draws from lands - shirt numbers for the replay, a ball track that wants a rebuild,
+    # whistle candidates for the events table - one full rerun picks it all up.
+    if finished_any:
         st.rerun()
 
 
@@ -1722,7 +1742,12 @@ def replay_section(
             st.rerun()
 
     with st.expander("Read shirt numbers from the footage (automatic scan)"):
-        _jersey_scan_status(library, match_id, watch_key=f"jersey_watch::{match_id}")
+        st.caption(
+            "The scan re-decodes this segment, crops the torso of every tracked player on the frames where they "
+            "are large enough, and reads the number with OCR; only a number several readings agree on is "
+            "reported. It keeps the readings per track, and the scan is a suggestion - manual entries override "
+            "it. Live progress and the last result: **Scan activity** at the top of Step 3."
+        )
 
         def _start_scan() -> None:
             # The scan decodes at the SEGMENT's clock - the clock of the video the segment was built from, which
@@ -1738,18 +1763,54 @@ def replay_section(
                 "--video", scan_video,
                 "--segment", str(segment_dir),
             ]
-            subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # The child spends its first minutes loading the segment and rebuilding the tracks before it writes
+            # anything; writing the same "Starting..." it would write closes that window - the row in Scan
+            # activity flips to running on the click instead of minutes later.
+            status_path = library.path(match_id) / JERSEY_STATUS_FILE
+            try:
+                status_path.write_text(
+                    json.dumps(
+                        {
+                            "state": "running",
+                            "crops_total": 0,
+                            "crops_done": 0,
+                            "readings": 0,
+                            "message": "Starting...",
+                            "started": time.time(),
+                            "updated": time.time(),
+                        }
+                    )
+                )
+            except OSError:
+                pass  # an unwritable match directory fails the child too, and its error lands in its status
+            try:
+                subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
+                try:
+                    status_path.write_text(
+                        json.dumps({"state": "error", "message": f"could not start: {exc}", "updated": time.time()})
+                    )
+                except OSError:
+                    pass
+                st.session_state["replay_flash"] = ("warning", f"The scan could not be started: {exc}")
+                return
             st.session_state["replay_flash"] = ("success", "Shirt-number scan started in the background.")
 
         st.button(
             "Scan for shirt numbers (background)",
             on_click=_start_scan,
-            disabled=segment is None or calibration is None,
+            disabled=segment is None or calibration is None or _scan_alive(library.load_jerseys_status(match_id)),
             key=f"scan_jerseys::{match_id}",
         )
 
     with st.expander("Track the ball in the footage (automatic scan)"):
-        _ball_scan_status(segment_dir, watch_key=f"ball_watch::{match_id}")
+        st.caption(
+            "The scan re-reads this segment's video at full resolution and follows the ball frame by frame: a "
+            "window around the prediction while it holds the ball, the whole frame to re-find it after a gap, "
+            "and the camera's own motion as the prediction between frames. About an hour for a whole game, and "
+            "it checkpoints, so it can be stopped and resumed. Live progress and the last result: **Scan "
+            "activity** at the top of Step 3."
+        )
 
         def _start_ball_scan() -> None:
             # The child takes seconds to boot (interpreter, torch, the segment's meta) and only then writes its
@@ -1847,7 +1908,36 @@ def events_section(
         ]
         if not st.session_state.get("whistle_reject_voices", True):
             command.append("--keep-voices")
-        subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # The child takes seconds to boot (interpreter, libraries) before it writes its first status; writing the
+        # same "Starting..." closes that window - the row in Scan activity flips on the click, and the button
+        # disables instead of briefly offering a second scan that would race the first over the same cache.
+        status_path = library.path(match_id) / AUDIO_STATUS_FILE
+        try:
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "state": "running",
+                        "stage": "extract",
+                        "progress": 0.0,
+                        "message": "Starting...",
+                        "started": time.time(),
+                        "updated": time.time(),
+                    }
+                )
+            )
+        except OSError:
+            pass  # an unwritable match directory fails the child too, and its error lands in its status
+        try:
+            subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
+            try:
+                status_path.write_text(
+                    json.dumps({"state": "error", "error": f"could not start: {exc}", "updated": time.time()})
+                )
+            except OSError:
+                pass
+            st.session_state["events_flash"] = ("warning", f"The scan could not be started: {exc}")
+            return
         st.session_state["events_flash"] = ("success", "Whistle scan started in the background.")
 
     def _discard_detected() -> None:
@@ -2110,10 +2200,10 @@ def events_section(
         st.button(
             "Scan audio for whistles (background)",
             on_click=_start_audio_scan,
-            disabled=library.load_audio_scan_status(match_id).get("state") == "running",
+            disabled=_scan_alive(library.load_audio_scan_status(match_id)),
             key=f"scan_audio::{match_id}",
         )
-        _audio_scan_status(library, match_id, watch_key=f"whistle_watch::{match_id}")
+        st.caption("Live progress and the last result: **Scan activity** at the top of Step 3.")
         st.button(
             "Detect events from the ball and player tracks",
             on_click=_detect_events,
@@ -3459,7 +3549,9 @@ else:
                 "All detections are running in the background - progress below. The page stays usable while "
                 "they run; everything they find is saved as they go."
             )
-    _detections_run_status(library, match_id, watch_key=f"detections_watch::{match_id}")
+    # One place to watch every scan the page can start - the ball, the whistle, the shirt numbers, and the
+    # all-detections run above.
+    scan_activity_section(library, match_id, segment_dir)
 
     payload = st.session_state.get("report") or report_from_library(library, match_id)
     if payload:

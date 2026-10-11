@@ -84,7 +84,18 @@ class Status:
 
     def __init__(self, path: Path, total: int):
         self.path = path
-        self.payload = {"state": "running", "crops_total": total, "crops_done": 0, "readings": 0, "started": time.time()}
+        self.payload = {
+            "state": "running",
+            "crops_total": total,
+            "crops_done": 0,
+            "readings": 0,
+            "started": time.time(),
+            "message": "Starting - loading the segment and rebuilding the player tracks...",
+        }
+        # Write at once, not at the first crop: the pipeline phase is minutes long, and a status that only shows
+        # up after it reads as a scan that never started. The dashboard's own start button writes a "Starting..."
+        # too - this covers the runs started from a script or from the all-detections pipeline.
+        self.update()
 
     def update(self, **kwargs) -> None:
         """Update the progress file - and never let its failure end the scan it reports on.
@@ -122,7 +133,9 @@ def main() -> int:
         calibration_saved = calibration_file.stat().st_mtime if calibration_file.exists() else None
         record = library.load(args.match)
         segment = load_segment(args.segment)
+        status.update(message="Projecting the detections to the pitch...")
         detections = project_segment(segment, calibration)
+        status.update(message="Rebuilding the player tracks (this takes a few minutes)...")
         report, assignment = stage_b.build_report(
             detections,
             pitch_length_m=record.pitch_length_m,
@@ -130,6 +143,7 @@ def main() -> int:
             match_frames=len(segment.time),
         )
         _ = report
+        status.update(message="Choosing the frames to crop...")
 
         keep = on_pitch_mask(detections, record.pitch_length_m, record.pitch_width_m)
         track_of_row = np.full(len(detections.frame), -1, dtype=np.int64)
@@ -183,7 +197,7 @@ def main() -> int:
             frames_sorted = sorted(rows_by_frame)
             rows_by_frame = {frame: rows_by_frame[frame] for frame in frames_sorted[::stride]}
             total = sum(len(v) for v in rows_by_frame.values())
-        status.update(crops_total=total)
+        status.update(crops_total=total, message=f"Reading {total} torso crops from {len(selected)} tracks...")
         print(f"[jerseys] {len(selected)} tracks, {total} crops from {len(rows_by_frame)} frames", flush=True)
         if total == 0:
             status.update(state="done", message="no detections large or confident enough to read a number")
@@ -237,6 +251,7 @@ def main() -> int:
         # and 0 suggestions because the OCR was looking at grass.
         segment_start_s = float(segment.meta.get("start_s", 0.0))
         done_pairs: set[tuple[int, int]] = set()  # (track, analysis frame) already cropped once
+        crop_started = time.time()  # for the estimate on the bar - measured over the crop phase only
         for time_s, frame in video_reader.frames():
             index = int(round((time_s - segment_start_s) * fps))
             if index not in wanted:
@@ -265,7 +280,16 @@ def main() -> int:
                     per_track_readings.setdefault(track_id, []).append(candidate)
                 done += 1
                 if done % 25 == 0:
-                    status.update(crops_done=done, readings=len(candidates))
+                    rate = done / max(1e-6, time.time() - crop_started)
+                    left_min = max(1, int(((total - done) / rate) / 60.0)) if rate > 0 else 0
+                    status.update(
+                        crops_done=done,
+                        readings=len(candidates),
+                        message=(
+                            f"Reading torso crops ({done}/{total}, {len(candidates)} readings, "
+                            f"~{left_min} min left)"
+                        ),
+                    )
                     print(f"[jerseys] {done}/{total} crops, {len(candidates)} readings", flush=True)
             if done >= total:
                 break
@@ -279,6 +303,7 @@ def main() -> int:
         }
         refined = 0
         if refine_targets:
+            status.update(message="Taking a second look at the frames around the readings so far...")
             wanted_refine: dict[int, list[tuple[int, int]]] = {}
             seen_pairs: set[tuple[int, int]] = set()
             for track_id, items in refine_targets.items():
@@ -353,7 +378,12 @@ def main() -> int:
                                 per_track_readings.setdefault(track_id, []).append(candidate)
                         if not remaining:
                             break
-                status.update(crops_done=total, refined=refined, readings=len(candidates))
+                status.update(
+                    crops_done=total,
+                    refined=refined,
+                    readings=len(candidates),
+                    message=f"Voting {len(candidates)} readings into per-track numbers...",
+                )
                 print(f"[jerseys] second look done: {refined} extra crops, {len(candidates)} readings total", flush=True)
 
         suggestions = aggregate_candidates(per_track_readings)

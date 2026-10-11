@@ -253,7 +253,11 @@ def main() -> int:
                 else None
             ),
             read_message=lambda inner: (
-                f"Shirt numbers: {inner.get('crops_done', 0)}/{inner.get('crops_total', 0)} crops, "
+                # The child's own message carries its phase - pipeline minutes, then crop counts and an estimate;
+                # the composed line is the fallback for a status from an older scan that has no message.
+                f"Shirt numbers: {inner.get('message')}"
+                if inner.get("message")
+                else f"Shirt numbers: {inner.get('crops_done', 0)}/{inner.get('crops_total', 0)} crops, "
                 f"{inner.get('readings', 0)} readings"
             ),
         )
