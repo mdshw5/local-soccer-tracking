@@ -315,8 +315,10 @@
     </div>
     <div id="tl-hint">
       The strip above is the match timeline: the momentum curve (share of contested frames, team 1 above the
-      center line) with every tagged and detected event marked. Click it to jump the replay to that moment,
-      hover a marker to see the event, or use the event arrows beside play to step between them.
+      center line) with every tagged and detected event on its own type's track - the shape says the kind of
+      moment (&#9650; offensive, &#9632; defensive, &#9679; other), filled where tagged and hollow where detected.
+      Click it to jump the replay to that moment, hover a marker to see the event, or use the event arrows
+      beside play to step between them.
     </div>
     <div id="tl-popover"></div>
     <div id="legend"></div>
@@ -365,8 +367,10 @@
       const MARGIN_M = 3.5; // room around the pitch for goals and breathing space
       const TRAIL_SECONDS = 4.0;
       const HEAT_RADIUS_M = 2.6;
-      const TL_HEIGHT = 74; // the timeline strip's height in CSS pixels
+      const TL_HEIGHT = 74; // the momentum band's height in CSS pixels
       const TL_PAD = 6; // the strip's drawing padding: the click math and the marker hit test share it
+      const TL_LANE_H = 14; // one track per event type, stacked below the momentum band
+      const TL_LANE_TOP = 80; // where the first track's row begins (just under the momentum band)
       // One color per event type, so a glance at the strip says what happened. Detected events are drawn hollow
       // (a ring) and manual tags filled, so a machine's guess never reads as a human's certainty.
       const EVENT_COLORS = {
@@ -976,6 +980,46 @@
         return EVENT_COLORS[type] || EVENT_COLORS.other;
       }
 
+      // Event categories: the marker's shape says what kind of moment an event is. Offensive is the stuff that
+      // tries to score, defensive the stuff that stops it; tackle and foul stay "other" - they are transactions
+      // about possession, not finishes, and the taxonomy is the user's call. Colors stay per type; the fill
+      // still says tagged vs detected.
+      const EVENT_CATEGORIES = {
+        goal: 'offensive',
+        shot: 'offensive',
+        corner: 'offensive',
+        penalty: 'offensive',
+        save: 'defensive',
+        block: 'defensive',
+        clearance: 'defensive',
+      };
+      const CATEGORY_RANK = {offensive: 0, defensive: 1, other: 2};
+
+      function eventCategory(type) {
+        return EVENT_CATEGORIES[type] || 'other';
+      }
+
+      function timelineLanes() {
+        // The strip's tracks: one row per event type actually present (events plus tags still in flight),
+        // ordered offensive -> defensive -> other and, inside a kind, by the tag bar's own order. Returns the
+        // types, the strip's total height and each type's marker row y - the drawing and the hit test share
+        // this layout, so a marker can never sit on one row while its hit zone points at another.
+        const present = new Set();
+        for (const event of state.events || []) present.add(String(event.type || 'other'));
+        for (const tag of state.pendingTags || []) present.add(String(tag.type || 'other'));
+        const tagOrder = (type) => {
+          const index = TAG_TYPES.indexOf(type);
+          return index < 0 ? TAG_TYPES.length : index;
+        };
+        const types = [...present].sort((a, b) => {
+          const byKind = CATEGORY_RANK[eventCategory(a)] - CATEGORY_RANK[eventCategory(b)];
+          return byKind !== 0 ? byKind : tagOrder(a) - tagOrder(b);
+        });
+        const height = types.length ? TL_LANE_TOP + types.length * TL_LANE_H + 4 : TL_HEIGHT;
+        const yOf = (type) => TL_LANE_TOP + TL_LANE_H / 2 + Math.max(0, types.indexOf(String(type))) * TL_LANE_H;
+        return {types, height, yOf};
+      }
+
       // ---------------------------------------------------------------------------------------------------
       // Quick tags.
       //
@@ -1045,15 +1089,48 @@
         Streamlit.setComponentValue({action: 'tag', tags: state.pendingTags.slice()});
       }
 
+      function eventShapePath(x, y, type) {
+        // The category's shape, centered on (x, y): a triangle for the offensive end (goal/shot/corner/penalty),
+        // a square for the defensive end (save/block/clearance), a circle for everything else. Sized to read at
+        // a glance even under the hollow 2 px stroke.
+        tlCtx.beginPath();
+        const category = eventCategory(type);
+        if (category === 'offensive') {
+          tlCtx.moveTo(x, y - 5.4);
+          tlCtx.lineTo(x - 5.0, y + 4.0);
+          tlCtx.lineTo(x + 5.0, y + 4.0);
+          tlCtx.closePath();
+        } else if (category === 'defensive') {
+          tlCtx.rect(x - 4.2, y - 4.2, 8.4, 8.4);
+        } else {
+          tlCtx.arc(x, y, 4.6, 0, Math.PI * 2);
+        }
+      }
+
+      function drawEventMarker(x, y, type, filled, color, alpha) {
+        tlCtx.globalAlpha = alpha;
+        eventShapePath(x, y, type);
+        if (filled) {
+          tlCtx.fillStyle = color;
+          tlCtx.fill();
+        } else {
+          tlCtx.lineWidth = 2;
+          tlCtx.strokeStyle = color;
+          tlCtx.stroke();
+        }
+        tlCtx.globalAlpha = 1;
+      }
+
       function drawTimeline() {
         if (!state.data) return;
         const dpr = window.devicePixelRatio || 1;
         const width = Math.max(320, document.body.clientWidth - 2);
+        const lanes = timelineLanes();
         tl.width = Math.round(width * dpr);
-        tl.height = Math.round(TL_HEIGHT * dpr);
-        tl.style.height = `${TL_HEIGHT}px`;
+        tl.height = Math.round(lanes.height * dpr);
+        tl.style.height = `${lanes.height}px`;
         tlCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        tlCtx.clearRect(0, 0, width, TL_HEIGHT);
+        tlCtx.clearRect(0, 0, width, lanes.height);
 
         const duration = state.data.duration_s || 1;
         const pad = TL_PAD;
@@ -1099,35 +1176,30 @@
           tlCtx.setLineDash([4, 3]);
           tlCtx.beginPath();
           tlCtx.moveTo(x, 2);
-          tlCtx.lineTo(x, TL_HEIGHT - 2);
+          tlCtx.lineTo(x, lanes.height - 2);
           tlCtx.stroke();
           tlCtx.setLineDash([]);
         }
 
-        // event markers: a vertical tick from the center line, a filled dot for a manual tag and a hollow ring
-        // for a detected one. The type's color is the legend.
-        for (const event of state.events || []) {
-          const x = xOf(event.time_s);
-          const color = eventColor(event.type);
-          const manual = event.source === 'manual';
-          tlCtx.strokeStyle = color;
-          tlCtx.globalAlpha = 0.5;
+        // event tracks: one faint row per type present, stacked under the momentum band - offensive kinds first,
+        // then defensive, then everything else. An empty row still reads as a track.
+        for (const type of lanes.types) {
+          const y = lanes.yOf(type);
+          tlCtx.strokeStyle = 'rgba(148,163,184,0.16)';
           tlCtx.lineWidth = 1;
           tlCtx.beginPath();
-          tlCtx.moveTo(x, midY - amp - 4);
-          tlCtx.lineTo(x, midY + amp + 4);
+          tlCtx.moveTo(pad, y);
+          tlCtx.lineTo(pad + plotW, y);
           tlCtx.stroke();
-          tlCtx.globalAlpha = 1;
-          tlCtx.beginPath();
-          tlCtx.arc(x, midY, 4.5, 0, Math.PI * 2);
-          if (manual) {
-            tlCtx.fillStyle = color;
-            tlCtx.fill();
-          } else {
-            tlCtx.lineWidth = 2;
-            tlCtx.strokeStyle = color;
-            tlCtx.stroke();
-          }
+        }
+
+        // event markers: every event on its own type's track, so a cluster no longer piles onto one spot. The
+        // shape says the category (triangle offensive, square defensive, circle other); filled still means a
+        // manual tag and hollow a detected one, and the color stays the type's.
+        for (const event of state.events || []) {
+          drawEventMarker(
+            xOf(event.time_s), lanes.yOf(event.type), event.type, event.source === 'manual', eventColor(event.type), 1
+          );
         }
 
         // playhead
@@ -1136,26 +1208,13 @@
         tlCtx.lineWidth = 1.5;
         tlCtx.beginPath();
         tlCtx.moveTo(headX, 0);
-        tlCtx.lineTo(headX, TL_HEIGHT);
+        tlCtx.lineTo(headX, lanes.height);
         tlCtx.stroke();
 
         // tags still on their way to Python: drawn faded from the press, replaced by the stored marker when the
         // store is acknowledged, so the button gives feedback in the same frame it is pressed.
         for (const tag of state.pendingTags || []) {
-          const x = xOf(tag.time_s);
-          const color = eventColor(tag.type);
-          tlCtx.globalAlpha = 0.45;
-          tlCtx.strokeStyle = color;
-          tlCtx.lineWidth = 1;
-          tlCtx.beginPath();
-          tlCtx.moveTo(x, midY - amp - 4);
-          tlCtx.lineTo(x, midY + amp + 4);
-          tlCtx.stroke();
-          tlCtx.beginPath();
-          tlCtx.arc(x, midY, 4.5, 0, Math.PI * 2);
-          tlCtx.fillStyle = color;
-          tlCtx.fill();
-          tlCtx.globalAlpha = 1;
+          drawEventMarker(xOf(tag.time_s), lanes.yOf(tag.type), tag.type, true, eventColor(tag.type), 0.45);
         }
       }
 
@@ -1168,14 +1227,18 @@
         return TL_PAD + (Math.min(duration, Math.max(0, eventTime)) / duration) * plotW;
       }
 
-      function eventAt(clientX) {
+      function eventAt(clientX, clientY) {
         if (!state.data || !(state.events || []).length) return null;
         const rect = tl.getBoundingClientRect();
         const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        const lanes = timelineLanes();
         let best = null;
         let bestDistance = 9; // the marker's radius plus a little slack for a steady hand
         for (const event of state.events) {
-          const distance = Math.abs(timelineMarkerX(event.time_s, rect.width) - x);
+          const dx = timelineMarkerX(event.time_s, rect.width) - x;
+          const dy = lanes.yOf(event.type) - y;
+          const distance = Math.hypot(dx, dy);
           if (distance <= bestDistance) {
             bestDistance = distance;
             best = event;
@@ -1712,7 +1775,10 @@
             ? `<span><span class="chip" style="background:${BALL_COLOR}"></span>` +
               `ball (scan: drawn = seen, dashed ring = forecast)</span>`
             : '') +
-          (eventChips ? `<span>events (filled = tagged, ring = detected):</span>${eventChips}` : '') +
+          (eventChips
+            ? `<span>events on their own tracks (&#9650; offensive, &#9632; defensive, &#9679; other; ` +
+              `filled = tagged, hollow = detected):</span>${eventChips}`
+            : '') +
           `<span>${state.data.players.length} tracks, ${Math.round(state.data.duration_s)}s at ${state.data.fps} fps</span>` +
           (state.data.bystanders_excluded
             ? `<span>${state.data.bystanders_excluded} bystander tracks (touchline/spectators) not shown</span>`
@@ -1751,7 +1817,7 @@
       prevEventBtn.addEventListener('click', () => seekToEvent(-1));
       nextEventBtn.addEventListener('click', () => seekToEvent(1));
       tl.addEventListener('mousemove', (event) => {
-        const hit = eventAt(event.clientX);
+        const hit = eventAt(event.clientX, event.clientY);
         if (hit) showEventPopover(hit, event.clientX, event.clientY);
         else hideEventPopover();
       });

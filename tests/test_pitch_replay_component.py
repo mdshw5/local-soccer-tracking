@@ -160,6 +160,23 @@ def test_the_timeline_strip_draws_momentum_and_events() -> None:
     assert "timeline.addEventListener('click'" in html, "clicking the strip must seek the replay"
 
 
+def test_each_event_type_gets_its_own_track_and_a_category_shape() -> None:
+    """The strip splits events onto tracks: one row per event type present, offensive kinds first, then
+    defensive, then the rest. The marker's shape says the category - triangle offensive (goal/shot/corner/
+    penalty), square defensive (save/block/clearance), circle other - while the color stays the type's and the
+    fill still means tagged vs detected."""
+    html = COMPONENT.read_text()
+    assert "timelineLanes" in html, "the layout is one track per event type"
+    assert "lanes.yOf(event.type)" in html, "every event is drawn on its own type's track"
+    assert "EVENT_CATEGORIES" in html
+    assert "goal: 'offensive'" in html and "shot: 'offensive'" in html
+    assert "corner: 'offensive'" in html and "penalty: 'offensive'" in html
+    assert "save: 'defensive'" in html and "block: 'defensive'" in html and "clearance: 'defensive'" in html
+    assert "function eventShapePath" in html and "drawEventMarker" in html
+    assert "category === 'offensive'" in html and "category === 'defensive'" in html, "triangle and square"
+    assert "TL_LANE_H" in html, "the tracks stack under the momentum band"
+
+
 def test_the_arrows_step_between_timeline_events_instead_of_frames() -> None:
     """One analysis frame is nothing to look at between events; the events are the moments a review moves
     between. The arrows jump to the previous/next event on the strip - strictly past the current second, so a
@@ -187,6 +204,7 @@ def test_timeline_markers_name_their_event_on_hover() -> None:
     assert "pointer-events: none" in html, "the popover must never eat the strip's clicks"
     hit = html.split("function eventAt", 1)[1].split("\n      function ", 1)[0]
     assert "tl.getBoundingClientRect()" in hit and "timelineMarkerX" in hit, "hit test in the drawing's coordinates"
+    assert "timelineLanes" in hit and "clientY" in hit, "the hit test must know which track the pointer is on"
     assert "const TL_PAD" in html and html.count("const pad = TL_PAD") == 2, (
         "one padding for drawing, clicking and hit testing"
     )

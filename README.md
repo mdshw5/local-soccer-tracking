@@ -8,7 +8,7 @@ The camera's motion is the central problem. A following camera has no fixed view
 
 ![The match view: pitch replay and annotated footage side by side, with the tag bar and event timeline](docs/images/dashboard.png)
 
-*The match view. The pitch replay and the annotated footage run in step, with the tag bar for manual events and the match timeline below — the momentum curve with every tagged and detected event marked.*
+*The match view. The pitch replay and the annotated footage run in step, with the tag bar for manual events and the match timeline below — a track per event type along the momentum curve, each marker shaped by its kind (▲ offensive, ■ defensive, ● other).*
 
 ## Highlights
 
@@ -104,7 +104,7 @@ The report covers every player the camera saw: distance (summed only over the st
 
 Players are split into teams by measured kit color. A player's torso crop is mostly pitch, so the grass is measured per frame and masked out first, using the 2nd–98th percentile of the frame's own grass pixels (which covers 98%+ of them, against 51–94% for a fixed hue band). Only player-sized, well-evidenced tracks are allowed to vote — near-sideline bystanders, coaches and spectators are excluded — which cuts roughly 2,800 stitched tracks to about 150 voting tracks and makes the team split clean.
 
-The replay animates the tracked players on a pitch drawn to the calibrated scale, with trails, optional heat maps, referee and goalkeeper roles, and the attack-direction arrows. Its timeline strip shows the momentum curve with every tagged and detected event marked; clicking seeks the replay, the arrows step between events, and hovering names the event. Beside the animation, the annotated footage of the exact moment stays in step — a still while paused, a live stream while playing.
+The replay animates the tracked players on a pitch drawn to the calibrated scale, with trails, optional heat maps, referee and goalkeeper roles, and the attack-direction arrows. Its timeline strip shows the momentum curve with a track per event type — markers shaped ▲ offensive, ■ defensive, ● other, filled for tags and hollow for detections; clicking seeks the replay, the arrows step between events, and hovering names the event. Beside the animation, the annotated footage of the exact moment stays in step — a still while paused, a live stream while playing.
 
 Highlight reels are cut in three tiers — `clip` (15–30 s), `goals` (1–2 min) and `match` (up to 5 min) — assembled from the event timeline, where manual tags weigh more than inferred candidates. Cuts are encoded from the original clips, clip by clip, and joined by stream copy.
 
