@@ -752,6 +752,131 @@ def _start_all_detections(library: MatchLibrary, match_id: str, video: str, segm
     subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _start_ball_scan(library: MatchLibrary, match_id: str, segment, segment_dir: Path, video: str) -> None:
+    """Start the ball scan as its own process; its Scan activity row reflects the run from the click on.
+
+    The child takes seconds to boot (interpreter, torch, the segment's meta) and only then writes its first
+    status. Writing the same "Starting..." the scan itself would write closes that window: the button disables
+    from the moment of the click instead of briefly offering a second scan that would race the first over the
+    same checkpoint. The child's own first update overwrites this one. The scan decodes at the SEGMENT's clock,
+    so the segment's own video wins when this machine has it; the page's selected recording is the fallback.
+    """
+    segment_video = str(segment.meta.get("video") or "") if segment is not None else ""
+    scan_video = segment_video if segment_video and Path(segment_video).exists() else video
+    status_path = Path(segment_dir) / BALL_STATUS_FILE
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "run_ball_scan.py"),
+        "--segment",
+        str(segment_dir),
+        "--video",
+        scan_video,
+    ]
+    try:
+        status_path.write_text(json.dumps({"state": "running", "message": "Starting...", "updated": time.time()}))
+    except OSError:
+        pass  # an unwritable segment directory fails the child too, and its error lands in the terminal
+    try:
+        subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
+        try:
+            status_path.write_text(json.dumps({"state": "error", "error": str(exc), "updated": time.time()}))
+        except OSError:
+            pass
+
+
+def _start_jersey_scan(library: MatchLibrary, match_id: str, segment, segment_dir: Path, video: str) -> None:
+    """Start the shirt-number scan as its own process; its Scan activity row reflects the run from the click on.
+
+    The scan decodes at the SEGMENT's clock - the clock of the video the segment was built from, which is not
+    necessarily whatever the picker holds: decoding a clip at game-clock offsets reads the wrong film entirely.
+    So the segment's own video wins when it is still reachable; the picker is only the fallback. The child spends
+    its first minutes loading the segment and rebuilding the tracks before it writes anything; the "Starting..."
+    below closes that window.
+    """
+    segment_video = str(segment.meta.get("video") or "") if segment is not None else ""
+    scan_video = segment_video if segment_video and Path(segment_video).exists() else video
+    status_path = library.path(match_id) / JERSEY_STATUS_FILE
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "extract_jerseys.py"),
+        "--match", match_id,
+        "--video", scan_video,
+        "--segment", str(segment_dir),
+    ]
+    try:
+        status_path.write_text(
+            json.dumps(
+                {
+                    "state": "running",
+                    "crops_total": 0,
+                    "crops_done": 0,
+                    "readings": 0,
+                    "message": "Starting...",
+                    "started": time.time(),
+                    "updated": time.time(),
+                }
+            )
+        )
+    except OSError:
+        pass  # an unwritable match directory fails the child too, and its error lands in its status
+    try:
+        subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
+        try:
+            status_path.write_text(
+                json.dumps({"state": "error", "message": f"could not start: {exc}", "updated": time.time()})
+            )
+        except OSError:
+            pass
+
+
+def _start_audio_scan(library: MatchLibrary, match_id: str, video: str) -> None:
+    """Start the whistle scan as its own process; its Scan activity row reflects the run from the click on.
+
+    The strictness and voice settings are baked into the command now, because the background process reads
+    nothing from this session - the page has moved on long before the scan finishes. The child takes seconds to
+    boot (interpreter, libraries) before it writes its first status; the "Starting..." below closes that window.
+    """
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "run_audio_scan.py"),
+        "--match",
+        str(match_id),
+        "--video",
+        str(video),
+        "--strictness",
+        f"{float(st.session_state.get('whistle_strictness', MIN_PROMINENCE)):.1f}",
+    ]
+    if not st.session_state.get("whistle_reject_voices", True):
+        command.append("--keep-voices")
+    status_path = library.path(match_id) / AUDIO_STATUS_FILE
+    try:
+        status_path.write_text(
+            json.dumps(
+                {
+                    "state": "running",
+                    "stage": "extract",
+                    "progress": 0.0,
+                    "message": "Starting...",
+                    "started": time.time(),
+                    "updated": time.time(),
+                }
+            )
+        )
+    except OSError:
+        pass  # an unwritable match directory fails the child too, and its error lands in its status
+    try:
+        subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
+        try:
+            status_path.write_text(
+                json.dumps({"state": "error", "error": f"could not start: {exc}", "updated": time.time()})
+            )
+        except OSError:
+            pass
+
+
 def _clip_offsets(video: str) -> dict[str, float]:
     """Where each of the game's clips starts inside ``video``, for mapping a moment onto the file being cut.
 
@@ -1088,18 +1213,22 @@ def _scan_row(title: str, state: str | None):
 
 
 @st.fragment(run_every=POLL_SECONDS)
-def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Path) -> None:
-    """The one spot to watch every background scan: ball, whistle, shirt numbers, and the run that chains them.
+def scan_activity_section(
+    library: MatchLibrary, match_id: str, segment, segment_dir: Path, video: str
+) -> None:
+    """The one spot for every background scan: start it, watch it, read its last result.
 
-    The scans used to report under their own controls, so watching two of them meant scrolling between three
-    expanders. Here each scan gets a row rendered the same way - its state, a live bar carrying the scan's own
-    message while it runs, a stall warning when a "running" file has gone quiet, or the last result when it is
-    idle. The controls that start a scan stay with their settings; this is the spot to look at while they work.
+    The scans used to report - and be started - under their own controls, so watching two of them meant
+    scrolling between expanders. Here each scan gets a row rendered the same way: its state, a live bar
+    carrying the scan's own message while it runs, a stall warning when a "running" file has gone quiet, or
+    the last result when it is idle - and the control that starts or resumes it (with the whistle's settings)
+    lives in the same row. One panel is the whole switchboard, and the whole progress report.
     """
     st.subheader("Scan activity")
     st.caption(
-        "One row per scan - ball, whistle, shirt numbers - and for the all-detections run that chains them. Bars "
-        "update by themselves while a scan runs; each row shows the last result when it is idle."
+        "One row per scan - ball, whistle, shirt numbers - and for the all-detections run that chains them. "
+        "Each row starts or resumes its scan and shows the last result; bars update by themselves while a scan "
+        "runs."
     )
     finished_any = False
 
@@ -1109,7 +1238,7 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
     st.session_state[f"ball_watch::{match_id}"] = ball.get("state")
     with _scan_row("Ball scan", ball.get("state")):
         if not ball:
-            st.caption("Not scanned yet - about an hour on a whole game; start it from its control below.")
+            st.caption("Not scanned yet - about an hour on a whole game.")
         elif ball.get("state") == "running":
             if _scan_alive(ball):
                 st.progress(
@@ -1120,7 +1249,7 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
             else:
                 st.warning(
                     "Says it is running but has not reported for minutes, so it has probably stopped. Start it "
-                    "again from its control below - it resumes from its last checkpoint."
+                    "again - it resumes from its last checkpoint."
                 )
         elif ball.get("state") == "error":
             st.error(f"The scan failed: {ball.get('error')}")
@@ -1145,6 +1274,14 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
             else:
                 summary += " Press **Build report** to draw the track on the replay."
             st.caption(summary)
+        if st.button(
+            "Scan for the ball (background)",
+            key=f"scan_ball::{match_id}",
+            disabled=_ball_scan_alive(segment_dir),
+            help="Follows the ball frame by frame at full resolution. It checkpoints, so a stopped scan resumes.",
+        ):
+            _start_ball_scan(library, match_id, segment, segment_dir, video)
+            st.rerun(scope="fragment")
     finished_any = finished_any or (previous == "running" and ball.get("state") != "running")
 
     # --- the whistle scan -------------------------------------------------------------------------------------
@@ -1153,7 +1290,7 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
     st.session_state[f"whistle_watch::{match_id}"] = audio.get("state")
     with _scan_row("Whistle scan", audio.get("state")):
         if not audio:
-            st.caption("Not scanned yet - start it from its control below.")
+            st.caption("Not scanned yet - decodes the recording's audio once, then looks for whistle blasts.")
         elif audio.get("state") == "running":
             if _scan_alive(audio):
                 st.progress(
@@ -1164,7 +1301,7 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
             else:
                 st.warning(
                     "Says it is running but has not reported for minutes, so it has probably stopped. Start it "
-                    "again from its control below."
+                    "again."
                 )
         elif audio.get("state") == "error":
             st.error(f"The scan failed: {audio.get('error')}")
@@ -1186,6 +1323,38 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
                     "sustained blast, so a quiet recording - or a referee a long way from the camera - can leave "
                     "it with nothing to report."
                 )
+        st.number_input(
+            "Detector strictness (x the match's own level)",
+            min_value=10.0,
+            max_value=2000.0,
+            value=float(MIN_PROMINENCE),
+            step=10.0,
+            key="whistle_strictness",
+            help=(
+                "How far above the match's typical level in the whistle band a blast must sit to be reported. "
+                "Higher means fewer, more confident candidates. Bump it up if the pitches next door dominate the "
+                "list; drop it if the referee's own whistle is being missed."
+            ),
+        )
+        st.checkbox(
+            "Reject voices and calls (keep only lone tones)",
+            value=True,
+            key="whistle_reject_voices",
+            help=(
+                "A whistle puts everything into its own narrow band. A shout - at any pitch - and a bird of "
+                "prey's call bring their own lower harmonics and formants with them, so a blast that lifts the "
+                "region below the band is dropped as a voice or a call. The thresholds were set from this match's "
+                "own confirmed and rejected candidates; turn it off if a real referee's whistle is being missed."
+            ),
+        )
+        if st.button(
+            "Scan audio for whistles (background)",
+            key=f"scan_audio::{match_id}",
+            disabled=_scan_alive(audio),
+            help="Searches the whistle band for loud, sustained blasts; the settings above travel with the run.",
+        ):
+            _start_audio_scan(library, match_id, video)
+            st.rerun(scope="fragment")
     finished_any = finished_any or (previous == "running" and audio.get("state") != "running")
 
     # --- the shirt-number scan --------------------------------------------------------------------------------
@@ -1194,7 +1363,7 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
     st.session_state[f"jersey_watch::{match_id}"] = jersey.get("state")
     with _scan_row("Shirt numbers", jersey.get("state")):
         if not jersey:
-            st.caption("Not scanned yet - a few minutes of OCR; start it from its control below.")
+            st.caption("Not scanned yet - a few minutes of OCR over torso crops.")
         elif jersey.get("state") == "running":
             if _scan_alive(jersey):
                 done, total = int(jersey.get("crops_done", 0)), int(jersey.get("crops_total", 0))
@@ -1204,7 +1373,7 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
             else:
                 st.warning(
                     "Says it is running but has not reported for minutes, so it has probably stopped. Start it "
-                    "again from its control below."
+                    "again."
                 )
         elif jersey.get("state") == "error":
             st.error(f"The scan failed: {jersey.get('message')}")
@@ -1215,6 +1384,14 @@ def scan_activity_section(library: MatchLibrary, match_id: str, segment_dir: Pat
                 f"{meta.get('readings', 0)} readings, {meta.get('suggested', 0)} suggested number(s). "
                 + (jersey.get("message") or "")
             )
+        if st.button(
+            "Scan for shirt numbers (background)",
+            key=f"scan_jerseys::{match_id}",
+            disabled=_scan_alive(jersey),
+            help="Reads numbers off torso crops with OCR; only a number several readings agree on is reported.",
+        ):
+            _start_jersey_scan(library, match_id, segment, segment_dir, video)
+            st.rerun(scope="fragment")
     finished_any = finished_any or (previous == "running" and jersey.get("state") != "running")
 
     # --- the run that chains them all -------------------------------------------------------------------------
@@ -1914,113 +2091,6 @@ def replay_section(
             st.session_state["replay_flash"] = ("success", f"Saved {len(new_roster)} player identit(ies).")
             st.rerun()
 
-    with st.expander("Read shirt numbers from the footage (automatic scan)"):
-        st.caption(
-            "The scan re-decodes this segment, crops the torso of every tracked player on the frames where they "
-            "are large enough, and reads the number with OCR; only a number several readings agree on is "
-            "reported. It keeps the readings per track, and the scan is a suggestion - manual entries override "
-            "it. Live progress and the last result: **Scan activity** at the top of Step 3."
-        )
-
-        def _start_scan() -> None:
-            # The scan decodes at the SEGMENT's clock - the clock of the video the segment was built from, which
-            # is not necessarily whatever the picker holds. One raw clip of a combined game keeps its own shorter
-            # clock, and decoding it at game-clock offsets reads the wrong film entirely. So the segment's own
-            # video wins when it is still reachable; the picker is only the fallback.
-            segment_video = str(segment.meta.get("video") or "") if segment is not None else ""
-            scan_video = segment_video if segment_video and Path(segment_video).exists() else video
-            command = [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "extract_jerseys.py"),
-                "--match", match_id,
-                "--video", scan_video,
-                "--segment", str(segment_dir),
-            ]
-            # The child spends its first minutes loading the segment and rebuilding the tracks before it writes
-            # anything; writing the same "Starting..." it would write closes that window - the row in Scan
-            # activity flips to running on the click instead of minutes later.
-            status_path = library.path(match_id) / JERSEY_STATUS_FILE
-            try:
-                status_path.write_text(
-                    json.dumps(
-                        {
-                            "state": "running",
-                            "crops_total": 0,
-                            "crops_done": 0,
-                            "readings": 0,
-                            "message": "Starting...",
-                            "started": time.time(),
-                            "updated": time.time(),
-                        }
-                    )
-                )
-            except OSError:
-                pass  # an unwritable match directory fails the child too, and its error lands in its status
-            try:
-                subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
-                try:
-                    status_path.write_text(
-                        json.dumps({"state": "error", "message": f"could not start: {exc}", "updated": time.time()})
-                    )
-                except OSError:
-                    pass
-                st.session_state["replay_flash"] = ("warning", f"The scan could not be started: {exc}")
-                return
-            st.session_state["replay_flash"] = ("success", "Shirt-number scan started in the background.")
-
-        st.button(
-            "Scan for shirt numbers (background)",
-            on_click=_start_scan,
-            disabled=segment is None or calibration is None or _scan_alive(library.load_jerseys_status(match_id)),
-            key=f"scan_jerseys::{match_id}",
-        )
-
-    with st.expander("Track the ball in the footage (automatic scan)"):
-        st.caption(
-            "The scan re-reads this segment's video at full resolution and follows the ball frame by frame: a "
-            "window around the prediction while it holds the ball, the whole frame to re-find it after a gap, "
-            "and the camera's own motion as the prediction between frames. About an hour for a whole game, and "
-            "it checkpoints, so it can be stopped and resumed. Live progress and the last result: **Scan "
-            "activity** at the top of Step 3."
-        )
-
-        def _start_ball_scan() -> None:
-            # The child takes seconds to boot (interpreter, torch, the segment's meta) and only then writes its
-            # first status. Writing the same "Starting..." the scan itself would write closes that window: the
-            # button is disabled from the moment of the click instead of briefly offering a second scan that
-            # would race the first over the same checkpoint. The child's own first update overwrites this one.
-            # The scan decodes at the SEGMENT's clock, so the segment's own video wins when this machine has it;
-            # the page's selected recording - the one the other scans read - is the fallback when it does not.
-            segment_video = str(segment.meta.get("video") or "") if segment is not None else ""
-            scan_video = segment_video if segment_video and Path(segment_video).exists() else video
-            status_path = Path(segment_dir) / BALL_STATUS_FILE
-            command = [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "run_ball_scan.py"),
-                "--segment",
-                str(segment_dir),
-                "--video",
-                scan_video,
-            ]
-            try:
-                status_path.write_text(json.dumps({"state": "running", "message": "Starting...", "updated": time.time()}))
-            except OSError:
-                pass  # an unwritable segment directory fails the child too, and its error lands in the terminal
-            try:
-                subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
-                status_path.write_text(json.dumps({"state": "error", "error": str(exc), "updated": time.time()}))
-                st.session_state["replay_flash"] = ("warning", f"The scan could not be started: {exc}")
-                return
-            st.session_state["replay_flash"] = ("success", "Ball scan started in the background.")
-
-        st.button(
-            "Scan for the ball (background)",
-            on_click=_start_ball_scan,
-            disabled=segment is None or _ball_scan_alive(segment_dir),
-            key=f"scan_ball::{match_id}",
-        )
     show_flash("replay_flash")
 
 
@@ -2032,12 +2102,12 @@ def events_section(
     calibration,
     review_index: int | None,
 ) -> None:
-    """Tag review, the detector controls and the highlight reels - directly under the playback.
+    """Tag review, the event detector and the highlight reels - directly under the playback.
 
     This is where Step 4 used to live. Tagging itself is the playback's own tag bar (a button stamps the second
     being watched, so no round trip can move the tag); what remains Python-side is everything around it: the
-    review queue of detected candidates, the scans and detectors that fill it, and the reel exports. All of it
-    sits below the pitch so a coach can watch, tag, review and cut without leaving the game.
+    review queue of detected candidates, the event detector that fills it, and the reel exports. All of it sits
+    below the pitch so a coach can watch, tag, review and cut without leaving the game.
 
     ``review_index`` is the moment the jump picker above the pitch is on: the verdict buttons act on it, so
     choosing a moment to watch is also choosing it to review, and marking it moves the picker to the next
@@ -2063,56 +2133,6 @@ def events_section(
 
     # These run before the next run's body, so the table below is rebuilt with the change already in it. Doing the
     # work inline instead would need a st.rerun() to redraw it, which is a second full run for one button.
-    def _start_audio_scan() -> None:
-        """Start the whistle scan as its own process: the decode and the transform take minutes on a full game.
-
-        The strictness and voice settings are baked into the command now, because the background process reads
-        nothing from this session - the page has moved on long before the scan finishes.
-        """
-        command = [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "run_audio_scan.py"),
-            "--match",
-            str(match_id),
-            "--video",
-            str(video),
-            "--strictness",
-            f"{float(st.session_state.get('whistle_strictness', MIN_PROMINENCE)):.1f}",
-        ]
-        if not st.session_state.get("whistle_reject_voices", True):
-            command.append("--keep-voices")
-        # The child takes seconds to boot (interpreter, libraries) before it writes its first status; writing the
-        # same "Starting..." closes that window - the row in Scan activity flips on the click, and the button
-        # disables instead of briefly offering a second scan that would race the first over the same cache.
-        status_path = library.path(match_id) / AUDIO_STATUS_FILE
-        try:
-            status_path.write_text(
-                json.dumps(
-                    {
-                        "state": "running",
-                        "stage": "extract",
-                        "progress": 0.0,
-                        "message": "Starting...",
-                        "started": time.time(),
-                        "updated": time.time(),
-                    }
-                )
-            )
-        except OSError:
-            pass  # an unwritable match directory fails the child too, and its error lands in its status
-        try:
-            subprocess.Popen(command, cwd=str(REPO_ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError as exc:  # e.g. the interpreter vanished between the page load and the click
-            try:
-                status_path.write_text(
-                    json.dumps({"state": "error", "error": f"could not start: {exc}", "updated": time.time()})
-                )
-            except OSError:
-                pass
-            st.session_state["events_flash"] = ("warning", f"The scan could not be started: {exc}")
-            return
-        st.session_state["events_flash"] = ("success", "Whistle scan started in the background.")
-
     def _discard_detected() -> None:
         log = library.events(match_id)
         removed = log.discard_detected()
@@ -2206,6 +2226,17 @@ def events_section(
         "and the weak ones are yours to reject. Each row also says whether the act was attacking or defensive by "
         "its type, and - for the attacks - which goal the acting team was attacking then, from the same measured "
         "directions the arrows on the pitch use."
+    )
+    # The detector that adds to the review list sits with it: press it, then review what it adds below.
+    st.button(
+        "Detect events from the ball and player tracks",
+        on_click=_detect_events,
+        key=f"detect_events::{match_id}",
+        help=(
+            "Reads the ball scan and the player tracks to infer goals, shots, corners, penalties, clearances "
+            "and tackles. Needs the report (Step 3) and the ball scan. The results are review candidates, like "
+            "the whistle scan's - check them and mark the false ones."
+        ),
     )
     if events.events:
         counts = events.review_counts()
@@ -2336,62 +2367,15 @@ def events_section(
                 on_click=_discard_false,
             )
     else:
-        st.info("No events yet - tag one from the buttons under the playback, or run the detectors below.")
-
-    with st.expander("Detectors and scans"):
-        st.caption(
-            "**Build report + run all detections** in Step 3 runs all of this in one go after the report: the "
-            "ball scan, the whistle scan and the shirt-number scan, then the event detectors and a final rebuild. "
-            "The individual controls stay here for running one scan on its own or changing the whistle settings."
-        )
-        # The clock is named because there are two of them: the selected video's own seconds (what all the scans
-        # use) and the match clock the table adds beside it.
-        st.number_input(
-            "Detector strictness (x the match's own level)",
-            min_value=10.0,
-            max_value=2000.0,
-            value=float(MIN_PROMINENCE),
-            step=10.0,
-            key="whistle_strictness",
-            help=(
-                "How far above the match's typical level in the whistle band a blast must sit to be reported. "
-                "Higher means fewer, more confident candidates. Bump it up if the pitches next door dominate the "
-                "list; drop it if the referee's own whistle is being missed."
-            ),
-        )
-        st.checkbox(
-            "Reject voices and calls (keep only lone tones)",
-            value=True,
-            key="whistle_reject_voices",
-            help=(
-                "A whistle puts everything into its own narrow band. A shout - at any pitch - and a bird of prey's "
-                "call bring their own lower harmonics and formants with them, so a blast that lifts the region "
-                "below the band is dropped as a voice or a call. The thresholds were set from this match's own "
-                "confirmed and rejected candidates; turn it off if a real referee's whistle is being missed."
-            ),
-        )
-        st.button(
-            "Scan audio for whistles (background)",
-            on_click=_start_audio_scan,
-            disabled=_scan_alive(library.load_audio_scan_status(match_id)),
-            key=f"scan_audio::{match_id}",
-        )
-        st.caption("Live progress and the last result: **Scan activity** at the top of Step 3.")
-        st.button(
-            "Detect events from the ball and player tracks",
-            on_click=_detect_events,
-            key=f"detect_events::{match_id}",
-            help=(
-                "Reads the ball scan and the player tracks to infer goals, shots, corners, penalties, clearances "
-                "and tackles. Needs the report (Step 3) and the ball scan. The results are review candidates, like "
-                "the whistle scan's - check them and mark the false ones."
-            ),
+        st.info(
+            "No events yet - tag one from the buttons under the playback, or press **Detect events from the ball "
+            "and player tracks** above."
         )
 
     payload = st.session_state.get("report") or report_from_library(library, match_id)
     st.subheader("Highlight reels")
     if not events.events:
-        st.info("Tag an event, or run the detectors above, before cutting highlights.")
+        st.info("Tag an event, or run the detector above, before cutting highlights.")
     else:
         moments = build_moments(events.events, (payload or {}).get("momentum"))
         st.write(f"{len(moments)} candidate moment(s).")
@@ -3722,9 +3706,9 @@ else:
                 "All detections are running in the background - progress below. The page stays usable while "
                 "they run; everything they find is saved as they go."
             )
-    # One place to watch every scan the page can start - the ball, the whistle, the shirt numbers, and the
-    # all-detections run above.
-    scan_activity_section(library, match_id, segment_dir)
+    # One place to start and watch every scan - the ball, the whistle, the shirt numbers - and the all-detections
+    # run that chains them (its button is above).
+    scan_activity_section(library, match_id, segment, segment_dir, chosen)
 
     payload = st.session_state.get("report") or report_from_library(library, match_id)
     if payload:
