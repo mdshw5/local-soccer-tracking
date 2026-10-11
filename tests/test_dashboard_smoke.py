@@ -106,6 +106,12 @@ def test_the_unique_players_panel_renders_when_a_report_exists() -> None:
     # The appearances offered are the chosen player's own tracks, so the second list is never empty either.
     appearance_box = next(box for box in panel.selectbox if box.label == "Which appearance to cut")
     assert len(appearance_box.options) > 0
+    # The page is roster-centred: one roster link per team (the scan supplies numbers, the linked team roster
+    # supplies names), and the per-track table is only the correction path.
+    assert any("Team rosters" in label for label in labels), "the roster editors must render beside the replay"
+    roster_boxes = [box for box in app.selectbox if box.label == "Roster"]
+    assert len(roster_boxes) == 2, "one roster choice per team"
+    assert all("(no roster)" in box.options for box in roster_boxes), "a team can be left without a roster"
 
 
 def _media_url_variables(tree) -> set[str]:  # noqa: ANN001 - ast.Module

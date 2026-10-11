@@ -201,6 +201,36 @@ def test_the_displayed_number_comes_from_the_jersey_scan_not_the_roster() -> Non
     assert 9 not in numbers, "neither scan nor roster said anything about this track"
 
 
+def test_a_team_roster_names_the_player_behind_a_scanned_number() -> None:
+    """The number is a detection; the name is squad knowledge from the linked team roster (number -> name),
+    which is what lets one roster typed for a team name the tracks of every match that links it."""
+
+    class _Library:
+        def load_jerseys(self, _match_id):
+            return {"suggestions": {"7": {"number": 9}}}
+
+        def load_roster(self, _match_id):
+            return {}
+
+    numbers, _jerseys = load_numbers(_Library(), "m", [7], teams={7: 0}, team_rosters={0: {9: "Smith"}})
+    assert numbers[7] == {"number": 9, "name": "Smith", "source": "scan"}
+    # The roster belongs to team 0; the same number on team 1 stays unnamed.
+    other, _jerseys = load_numbers(_Library(), "m", [7], teams={7: 1}, team_rosters={0: {9: "Smith"}})
+    assert other[7] == {"number": 9, "name": "", "source": "scan"}
+
+
+def test_a_manual_name_still_beats_the_team_roster() -> None:
+    class _Library:
+        def load_jerseys(self, _match_id):
+            return {"suggestions": {"7": {"number": 9}}}
+
+        def load_roster(self, _match_id):
+            return {7: {"name": "Jones"}}
+
+    numbers, _jerseys = load_numbers(_Library(), "m", [7], teams={7: 0}, team_rosters={0: {9: "Smith"}})
+    assert numbers[7] == {"number": 9, "name": "Jones", "source": "scan"}
+
+
 def test_a_live_refresh_moves_the_chips_to_the_new_numbers(stream_case) -> None:
     """The dashboard edits the roster *beside* the stream; a chip showing a number the user just removed would
     read as the stream ignoring them, so the labels - and the staleness note about them - are rebuilt in place."""

@@ -5,6 +5,7 @@
 #   segments/   Stage A's per-frame results, chunk by chunk, and the scrub proxies built from them
 #   matches/    one directory per match: events, tags, reports, replays, preview clips and exported reels
 #   games/      the combined multi-clip game video's manifest and its low-resolution marking proxy
+#   rosters/    team rosters: shirt number -> player name, typed once per team and reused across matches
 #   videos/     local input footage (see the .gitignore in there)
 #   models/     downloaded detector weights and saved calibrations (see the .gitignore in there)
 #

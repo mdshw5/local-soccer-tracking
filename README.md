@@ -81,7 +81,7 @@ These run on demand from the dashboard, independently of each other, and resume 
 
 - **Ball scan** — re-reads the segment at full resolution with two detectors and follows the ball frame by frame, keeping true sightings, short forecasts and "out of the picture" distinct. It is the most expensive scan (about 70 minutes for a full game on the reference hardware). On the reference match it held the ball on 70% of frames — 15,071 detected, 5,380 forecast across one-frame misses, 742 out of view, 359 lost — and 61% of the frames it saw also project onto the ground; an airborne ball has no ground intersection and is left undrawn rather than guessed at.
 - **Whistle scan** — a referee's whistle is a loud, sustained, tonal blast, and the detector requires all three: a narrow-band peak dominating the 2.2–4.6 kHz band, held for at least 0.2 s, and loud relative to the match's own median level in that band, so the gate does not depend on the recording level. A sideline microphone can hear a near whistle up to ~30× louder than a far-half one, so the default tuning leans slightly toward recall; every candidate records its measured level, so the loudest can be trusted first.
-- **Shirt-number scan** — OCR over player-sized torso crops, with motion-blur rejection; a number is accepted only when several independent crops agree, and it is combined with the roster to label tracks. The OCR engine is imported lazily and its absence is reported in the scan status rather than breaking the page.
+- **Shirt-number scan** — OCR over player-sized torso crops, with motion-blur rejection; a number is accepted only when several independent crops agree. The number is read off the footage per track; the *name* comes from the team roster the match links (jersey numbers to player names, typed once per team and reused in future matches). The OCR engine is imported lazily and its absence is reported in the scan status rather than breaking the page.
 
 Ball positions that feed event inference are filtered before use. The projection turns a pixel of jitter into meters when the ball is far away, so positions more than 3 m off the pitch are dropped, spikes are rejected, and speed is the net displacement over a short look-back window paired with a straightness ratio — jitter is fast but not straight, a struck ball is both. That leaves the real scan's speeds physical (p50 2.4 m/s, p90 15 m/s; nothing on a soccer pitch travels faster than ~45 m/s).
 
@@ -129,7 +129,7 @@ The dashboard walks through four steps in order, and each one stores its result 
 
 3. **Build the report.** Project detections, track players, split them into teams and compute the metrics — seconds, and re-runnable after re-clicking landmarks without touching the video. *Build report + run all detections* does the same and then everything else in the background: the ball scan, the whistle scan and the shirt-number scan, the event detectors over what they find, and a final rebuild. Every stage skips or resumes finished work, so a long scan can be left running.
 
-4. **Watch, tag and cut highlights.** Tag buttons stack under the pitch animation (Goal, Shot, Save, Tackle, Foul, Corner, Penalty, Block, Clearance, Substitution, Other, with a team picker and an optional note): a press stamps the event on the playback's own second, so tagging happens while the moment is on screen. Inferred events and whistle candidates arrive in the same review queue, with verdict buttons and per-event notes. Reels are exported from the events in three tiers, and the annotated footage runs beside the animation, synced to the same second, offering to start the stream server when it is not running.
+4. **Watch, tag and cut highlights.** Tag buttons stack under the pitch animation (Goal, Shot, Save, Tackle, Foul, Corner, Penalty, Block, Clearance, Substitution, Other, with a team picker and an optional note): a press stamps the event on the playback's own second, so tagging happens while the moment is on screen. Inferred events and whistle candidates arrive in the same review queue, with verdict buttons and per-event notes. Reels are exported from the events in three tiers, and the annotated footage runs beside the animation, synced to the same second, offering to start the stream server when it is not running. **Team rosters** are edited under the playback: each team links a saved roster of shirt numbers to player names, and every track the scan gives one of those numbers is then labelled with the name — in the animation, the tables, the events and the stream. A roster stored once is picked again for the next game between the same teams.
 
 ### The annotated stream server
 
@@ -167,7 +167,9 @@ Every analysis is *self-contained*: it lives in an `analysis/` folder beside the
         report.json             # players, teams, metrics, possession, momentum
         replay.json             # per-frame pitch positions and team assignment
         events.json             # tagged and detected events with review verdicts
-        identities/             # shirt-number scan results and roster
+        jerseys.json            # shirt-number scan: per-track suggestions (the numbers read off the footage)
+        roster.json             # per-track manual corrections (team rosters live in data/rosters, shared)
+        identities/             # a still of each appearance, for recognizing who a track is
         highlights/             # exported reels and their manifests
         game.json               # the clip manifest — the recording
         segments/<segment_id>/  # Stage A chunks, status.json, ball scan

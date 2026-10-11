@@ -211,7 +211,15 @@ class MatchRecord:
     format: str = "11v11"
     created: float = field(default_factory=time.time)
     team_names: list[str] = field(default_factory=lambda: ["Team A", "Team B"])
+    # The saved team roster (analysis.rosters) each team's player names come from, by team index; "" = none
+    # linked. Only the *link* lives in the match - the names stay in the roster library, so fixing a roster
+    # updates every match that links it, including already-analyzed ones.
+    team_rosters: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+    def team_roster(self, team: int) -> str:
+        """The roster name linked to ``team``, or "" when none is linked (or the team index is out of range)."""
+        return self.team_rosters[team] if 0 <= team < len(self.team_rosters) else ""
 
     def directory(self, root: str | Path = MATCHES_ROOT) -> Path:
         return Path(root) / self.match_id

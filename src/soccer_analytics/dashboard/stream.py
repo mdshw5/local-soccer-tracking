@@ -43,6 +43,7 @@ from soccer_analytics.analysis import game as game_lib
 from soccer_analytics.analysis.identity import numbers_are_stale
 from soccer_analytics.analysis.library import MatchLibrary, resolve_path
 from soccer_analytics.analysis.projection import segment_poses
+from soccer_analytics.analysis.rosters import RosterLibrary, team_rosters_for
 from soccer_analytics.analysis.stage_a import load_segment
 from soccer_analytics.dashboard.pitch_clicks import pitch_marking_polylines
 from soccer_analytics.dashboard.video import (
@@ -245,17 +246,27 @@ def ball_stamps(records: list[dict], frame_count: int) -> np.ndarray:
     return out
 
 
-def load_numbers(library: MatchLibrary, match_id: str, track_ids) -> tuple[dict[int, dict], dict]:
+def load_numbers(
+    library: MatchLibrary,
+    match_id: str,
+    track_ids,
+    teams: dict[int, int] | None = None,
+    team_rosters: dict[int, dict[int, str]] | None = None,
+) -> tuple[dict[int, dict], dict]:
     """Shirt numbers per track for the footage, plus the raw scan payload.
 
     The number a chip draws comes from the jersey scan only: a number on the footage is a claim about what the
-    camera saw, and only a detection saw it. A manual roster entry still supplies the player's *name* (a name is
-    not read off a shirt), and the staleness note is recomputed from the same scan payload the numbers came
-    from, so a running stream can never disagree with itself.
+    camera saw, and only a detection saw it. A name is not read off a shirt, so it can come from the manual
+    roster (a per-track correction) or from the *team roster* linked to the track's team (``analysis.rosters``:
+    number -> name, typed once per squad and reused across matches) - the manual name wins when both exist.
+    The staleness note is recomputed from the same scan payload the numbers came from, so a running stream can
+    never disagree with itself.
 
     One reader for the two callers that need the same answer: the initial load, and the per-request refresh that
     keeps a running stream in step with roster edits made in the dashboard beside it.
     """
+    teams = teams or {}
+    team_rosters = team_rosters or {}
     jerseys = library.load_jerseys(match_id)
     suggestions = {int(track): entry for track, entry in (jerseys.get("suggestions") or {}).items()}
     roster = {int(track): entry for track, entry in (library.load_roster(match_id) or {}).items()}
@@ -266,6 +277,8 @@ def load_numbers(library: MatchLibrary, match_id: str, track_ids) -> tuple[dict[
         manual = roster.get(track) or {}
         detected = suggestion.get("number")
         name = str(manual.get("name") or "").strip()
+        if not name and detected:
+            name = str((team_rosters.get(int(teams.get(track, -1))) or {}).get(int(detected)) or "")
         if not detected and not name:
             continue
         numbers[track] = {"number": detected, "name": name, "source": "scan" if detected else "roster"}
@@ -389,6 +402,8 @@ class AnnotatedMatch:
         # ``refresh_numbers`` because the roster and the scan are edited beside a running stream.
         self._static_notes = list(notes)
         self._player_ids = [int(player["track_id"]) for player in players]
+        # Each player's team index, so a team roster can name the player behind a scanned number.
+        self._teams = {int(player["track_id"]): int(player.get("team", -1)) for player in players}
         self.pitch_lines = pitch_marking_polylines(*self.pitch)
 
         # Boxes and labels, indexed by analysis frame: exactly what one rendered frame has to walk. The boxes
@@ -447,10 +462,10 @@ class AnnotatedMatch:
         JSON the browser never draws); they live beside it in ``boxes.npz``, and a replay without them is refused
         with the one command that rebuilds both - a stream of boxes labeled "missing" would be worse than one
         that says why it cannot start. A payload that still carries its boxes inline (a build from before the
-        sidecar) is tolerated so the stream works across the transition. The jersey numbers come from the roster
-        and the OCR scan and are matched to tracks by the same ``merge_numbers`` the dashboard uses, so both
-        views name a player the same way; a scan built against an older fit is called out in the notes rather
-        than silently mismapping numbers onto the wrong people.
+        sidecar) is tolerated so the stream works across the transition. The jersey numbers come from the OCR scan
+        and the names from the manual roster or the *team rosters* linked to the match (the same merge rule the
+        dashboard applies), so both views name a player the same way; a scan built against an older fit is called
+        out in the notes rather than silently mismapping numbers onto the wrong people.
         """
         library = MatchLibrary(root)
         match_dir = library.path(match_id)
@@ -482,7 +497,14 @@ class AnnotatedMatch:
         segment = load_segment(segment_dir)
         q, focal = segment_poses(segment)
 
-        numbers, jerseys = load_numbers(library, match_id, [int(p["track_id"]) for p in replay["players"]])
+        teams = {int(p["track_id"]): int(p["team"]) for p in replay["players"]}
+        numbers, jerseys = load_numbers(
+            library,
+            match_id,
+            [int(p["track_id"]) for p in replay["players"]],
+            teams=teams,
+            team_rosters=team_rosters_for(RosterLibrary(), record.team_rosters),
+        )
 
         notes: list[str] = []
         excluded = int(replay.get("bystanders_excluded") or 0)
@@ -1092,7 +1114,19 @@ class MatchStreamServer(ThreadingHTTPServer):
             with self._sessions_lock:
                 session = self._sessions.setdefault(match_id, session)
         library = MatchLibrary(self.root)
-        numbers, jerseys = load_numbers(library, match_id, session._player_ids)
+        # The record carries which team rosters the match links. A match directory without one (or with one too
+        # old to parse) must still stream: it simply draws numbers without roster names.
+        try:
+            record = library.load(match_id)
+        except (OSError, ValueError, TypeError):  # missing, torn, or a record from a different layout
+            record = None
+        numbers, jerseys = load_numbers(
+            library,
+            match_id,
+            session._player_ids,
+            teams=session._teams,
+            team_rosters=team_rosters_for(RosterLibrary(), record.team_rosters if record else None),
+        )
         session.refresh_numbers(numbers, numbers_note(library.path(match_id), jerseys, numbers, session._player_ids))
         return session
 

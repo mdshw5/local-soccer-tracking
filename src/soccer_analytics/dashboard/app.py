@@ -72,6 +72,7 @@ from soccer_analytics.analysis.library import (
 from soccer_analytics.analysis.kit import color_hex, color_name, suggest_team_name
 from soccer_analytics.analysis.jerseys import merge_numbers
 from soccer_analytics.analysis.projection import project_ball_track, project_segment, segment_poses
+from soccer_analytics.analysis.rosters import RosterLibrary, team_rosters_for
 from soccer_analytics.analysis.stage_a import SegmentConfig, load_segment, read_status, resolve_window, segment_dir_for
 from soccer_analytics.geometry.gimbal_motion import segment_has_log, segment_pose_source
 from soccer_analytics.dashboard.pitch_clicks import (
@@ -1319,6 +1320,163 @@ def _appearance_thumbnail(
     return target
 
 
+def _link_team_roster(library: MatchLibrary, match_id: str, team: int, roster: str) -> None:
+    """Point one team of the match at a saved roster ("" to unlink it).
+
+    The record is re-read before writing: saving the copy loaded for the render could clobber an edit made in
+    between, and this page is not the only writer a match can have.
+    """
+    fresh = library.load(match_id)
+    links = (list(fresh.team_rosters) + ["", ""])[:2]
+    links[int(team)] = str(roster or "").strip()
+    fresh.team_rosters = links
+    library.save(fresh)
+
+
+def _team_roster_editors(
+    library: MatchLibrary,
+    roster_library: RosterLibrary,
+    match_id: str,
+    record,  # noqa: ANN001 - library.MatchRecord
+    replay: dict,
+    numbers: dict[int, dict],
+    team_names: list[str],
+) -> None:
+    """Per-team roster editors: connect the shirt numbers seen on the footage with the players' names.
+
+    A number is read off the footage per track - that is all the video can know. A name is knowledge about the
+    squad, so it is typed once per team as a *roster* (number -> name), saved to the roster library and linked to
+    the match. Every track this match - or a future one between the same teams - gives that number to is then
+    labelled with the name, without touching any track. The table rows are every number known for the team: the
+    scan's detections for this match's tracks, plus the linked roster's own numbers (so a squad can be prepared
+    before the scan has seen the shirts).
+    """
+    saved = roster_library.names()
+    stats = {int(player["track_id"]): player["stats"] for player in replay.get("players") or []}
+    team_of = {int(player["track_id"]): int(player["team"]) for player in replay.get("players") or []}
+    st.caption(
+        "The number scan reads each track's shirt; the name beside it is yours to fill once per team. **Save "
+        "roster** stores the associations in the roster library, shared across matches - link the same roster in "
+        "a future game and the names are back without retyping. The *tracks* column lists the tracks a number "
+        "was worn on, the *seen* column for how long. Clear a name and save to drop the entry."
+    )
+
+    def _rows_for(team: int, linked: dict[int, str]) -> dict[int, dict]:
+        rows: dict[int, dict] = {int(number): {"name": str(name), "tracks": []} for number, name in linked.items()}
+        for track, entry in numbers.items():
+            if team_of.get(int(track), -1) != team:
+                continue
+            number = entry.get("number")
+            if number is None:
+                continue
+            row = rows.setdefault(int(number), {"name": "", "tracks": []})
+            if not row["name"]:
+                row["name"] = str(entry.get("name") or "")
+            seen = float((stats.get(int(track)) or {}).get("time_s") or 0.0)
+            row["tracks"].append((int(track), seen))
+        return rows
+
+    columns = st.columns(2)
+    for team in (0, 1):
+        with columns[team]:
+            name = team_name(team, team_names)
+            st.markdown(f"**{name}**")
+            current = record.team_roster(team)
+            # A saved roster with this team's own name is the obvious candidate: offer it first, after "(no
+            # roster)", rather than auto-linking on a guess - the link is the user's choice, not the page's.
+            match_name = next(
+                (entry for entry in saved if entry.strip().casefold() == str(name).strip().casefold()), None
+            )
+            ordered = ([match_name] + [entry for entry in saved if entry != match_name]) if match_name else saved
+            options = ["(no roster)"] + ordered
+            choice = st.selectbox(
+                "Roster",
+                options,
+                index=options.index(current) if current in options else 0,
+                key=f"team_roster_choice::{match_id}::{team}",
+                help="The saved roster whose names label this team's tracks. Rosters are shared between matches.",
+            )
+            if current and current not in saved:
+                st.warning(f"The linked roster '{current}' is no longer in the library - pick another roster above.")
+            picked = "" if choice == "(no roster)" else str(choice)
+            if picked != current:
+                _link_team_roster(library, match_id, team, picked)
+                st.session_state["replay_flash"] = (
+                    "success",
+                    f"'{picked}' now names the players of {name}." if picked else f"{name} is no longer linked to a roster.",
+                )
+                st.rerun()  # the number merge at the top of the page reads the link: rebuild with it applied
+            if match_name and picked != match_name:
+                st.caption(f"A saved roster named '{match_name}' matches this team's name - pick it above to reuse those names.")
+            linked = roster_library.load(picked) if picked else {}
+            rows = _rows_for(team, linked)
+            table = pd.DataFrame(
+                [
+                    {
+                        "number": number,
+                        "name": row["name"],
+                        "seen (s)": round(sum(seen for _track, seen in row["tracks"]), 1),
+                        "tracks": ", ".join(
+                            str(track) for track, _seen in sorted(row["tracks"], key=lambda item: -item[1])
+                        ),
+                    }
+                    for number, row in sorted(rows.items())
+                ],
+                columns=["number", "name", "seen (s)", "tracks"],
+            )
+            edited = st.data_editor(
+                table,
+                column_config={
+                    "number": st.column_config.NumberColumn("number", min_value=1, max_value=99, step=1),
+                    "name": st.column_config.TextColumn("name", max_chars=30),
+                    "seen (s)": st.column_config.NumberColumn("seen (s)", disabled=True),
+                    "tracks": st.column_config.TextColumn("tracks", disabled=True),
+                },
+                num_rows="dynamic",
+                hide_index=True,
+                width="stretch",
+                key=f"team_roster_editor::{match_id}::{team}::{picked}",
+            )
+            save_name = st.text_input(
+                "Roster name",
+                value=picked or match_name or str(name),
+                max_chars=40,
+                key=f"team_roster_save_name::{match_id}::{team}::{picked}",
+                help="Saving under an existing name overwrites that roster - in every match linked to it.",
+            )
+            if st.button(
+                "Save roster",
+                key=f"team_roster_save::{match_id}::{team}::{picked}",
+                disabled=not str(save_name).strip(),
+            ):
+                roster_numbers: dict[int, str] = {}
+                for row in edited.to_dict("records"):
+                    number = row.get("number")
+                    player_name = str(row.get("name") or "").strip()
+                    if number is None or pd.isna(number) or not player_name:
+                        continue
+                    try:
+                        number = int(number)
+                    except (TypeError, ValueError):
+                        continue
+                    if 1 <= number <= 99:
+                        roster_numbers[number] = player_name
+                target = str(save_name).strip()
+                if not roster_numbers:
+                    st.session_state["replay_flash"] = (
+                        "warning",
+                        "Nothing to save yet - type at least one player's name next to a number.",
+                    )
+                else:
+                    roster_library.save(target, roster_numbers)
+                    _link_team_roster(library, match_id, team, target)
+                    st.session_state["replay_flash"] = (
+                        "success",
+                        f"Saved {len(roster_numbers)} name(s) as '{target}' and linked it to {name}.",
+                    )
+                    st.rerun()
+
+
 def identity_section(
     library: MatchLibrary,
     match_id: str,
@@ -1328,8 +1486,8 @@ def identity_section(
 ) -> None:
     """Unique players: group each person's appearances, and cut a clip centered on one of them.
 
-    The grouping is exact and comes from what is *known* - the team plus the shirt number or name, typed in the
-    roster or read by the shirt-number scan. It deliberately does not guess from appearance: measured on this
+    The grouping is exact and comes from what is *known* - the team plus the shirt number or name, from the team
+    rosters and the shirt-number scan. It deliberately does not guess from appearance: measured on this
     footage, embeddings do not separate individual players (the numbers are in the README), and a wrong merge would
     put one player's clips under another player's name. Appearances nobody has named are listed separately, so they
     can still be clipped and can still be named.
@@ -1373,11 +1531,11 @@ def identity_section(
         if stored and stale_reason:
             st.warning(
                 f"The stored shirt numbers cannot be trusted for this report: {stale_reason}. Re-run the number "
-                "scan - or retype the numbers in the roster below - and the grouping here will be right."
+                "scan - or correct the numbers in the per-track table below - and the grouping here will be right."
             )
         st.caption(
             "Appearances are grouped into a person by what is known about them - the shirt number (or name) from "
-            "the roster below and the automatic scan - never by guessing from the picture: measured on this "
+            "the team rosters below and the automatic scan - never by guessing from the picture: measured on this "
             "footage, appearance embeddings do not separate individual players well enough to merge them (see the "
             "README). So the list is exact but incomplete: an appearance nobody has named stays its own row until "
             "it is named below."
@@ -1531,16 +1689,26 @@ def replay_section(
         st.info("The animated replay is built together with the report above - press **Build report**.")
         return
     replay = _load_replay_cached(str(replay_path), replay_path.stat().st_mtime_ns)
-    team_names = library.load(match_id).team_names
+    record = library.load(match_id)
+    team_names = record.team_names
     # The payload on disk carries whatever the names were when the report was built; the record is where renaming
     # lands, so the loaded copy is brought up to date rather than the table disagreeing with the map beside it.
     replay["team_names"] = list(team_names)
     jerseys = library.load_jerseys(match_id)
     roster = library.load_roster(match_id)
+    roster_library = RosterLibrary()
     track_ids = [int(player["track_id"]) for player in replay["players"]]
     suggestions = {int(track): entry for track, entry in (jerseys.get("suggestions") or {}).items()}
-    numbers = merge_numbers(track_ids, auto=suggestions, manual=roster)
     team_of = {int(player["track_id"]): int(player["team"]) for player in replay["players"]}
+    # Names come from the team rosters linked to the match - shared across matches, so a squad is typed once. A
+    # link whose file has gone missing simply contributes no names (the number merge is about display, not data).
+    numbers = merge_numbers(
+        track_ids,
+        auto=suggestions,
+        manual=roster,
+        team_of=team_of,
+        team_rosters=team_rosters_for(roster_library, record.team_rosters),
+    )
     track_stats = {int(player["track_id"]): player["stats"] for player in replay["players"]}
 
     def player_label(track: int) -> str:
@@ -1668,8 +1836,8 @@ def replay_section(
             "the ball itself)."
         )
         + " Trails and a pitch-usage heat map (all players, or just the selected one) are toggled above the map. "
-        "Numbers come from the roster below and the automatic scan; tracks without either show their track id once "
-        "they last 12 s, when the debug layer is on."
+        "Numbers are read off the footage automatically; names come from the team rosters below. A track with "
+        "neither shows its track id once it lasts 12 s, when the debug layer is on."
         + (
             f" {excluded} bystander track(s) - touchline coaches, photographers, spectators - are excluded from "
             "the field of play: they never cover ground the way a player does."
@@ -1697,11 +1865,16 @@ def replay_section(
 
     identity_section(library, match_id, segment, replay, numbers)
 
-    with st.expander("Shirt numbers and names (per track)"):
+    with st.expander("Team rosters - shirt numbers and player names", expanded=True):
+        _team_roster_editors(library, roster_library, match_id, record, replay, numbers, team_names)
+
+    with st.expander("Correct one track (manual override)"):
         st.caption(
-            "Type what you can read off the footage yourself - manual entries win over the automatic scan. "
-            "Distances, speeds and the touch proxy are in the table above; a touch means the player was the nearest "
-            "to the ball proxy while within 12 m of it."
+            "The team rosters above connect each number with a name; use this table to correct a single track "
+            "when the *number* itself is wrong. A manual entry here wins over both the scan and the team roster, "
+            "so use it sparingly - and note it belongs to this match's track ids only. Distances, speeds and the "
+            "touch proxy are in the table above; a touch means the player was the nearest to the ball proxy while "
+            "within 12 m of it."
         )
         editors = []
         for player in replay["players"]:

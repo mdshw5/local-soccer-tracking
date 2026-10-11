@@ -110,31 +110,65 @@ def aggregate_candidates(
     return out
 
 
-def merge_numbers(
-    track_ids: list[int], auto: dict[int, dict] | None = None, manual: dict[int, dict] | None = None
-) -> dict[int, dict]:
-    """Identity per track for the replay and the table. Manual entries win over OCR.
+def _roster_name(team_rosters: dict[int, dict[int, str]] | None, team: int, number) -> str:  # noqa: ANN001
+    """The name a team's roster (number -> name) has for a known shirt number, "" when there is none."""
+    if team_rosters is None or number is None:
+        return ""
+    try:
+        key = int(number)
+    except (TypeError, ValueError):
+        return ""
+    return str((team_rosters.get(int(team)) or {}).get(key) or "")
 
-    A manual entry counts even with only a name, so a roster can be typed in without inventing numbers.
+
+def merge_numbers(
+    track_ids: list[int],
+    auto: dict[int, dict] | None = None,
+    manual: dict[int, dict] | None = None,
+    team_of: dict[int, int] | None = None,
+    team_rosters: dict[int, dict[int, str]] | None = None,
+) -> dict[int, dict]:
+    """Identity per track for the replay and the table. Manual entries win over OCR; team rosters supply names.
+
+    Three sources, each contributing what it can actually know:
+
+    * the scan (``auto``) reads a *number* off the footage and supplies it only when several crops agreed;
+    * the team roster for the track's team (``team_rosters``, from ``analysis.rosters``) is the number -> name
+      association typed once per squad; it names any track whose number is known, this match or a future one;
+    * a manual per-track entry (``manual``) is a correction of one track and wins over both - its number beats
+      the scan, its name beats the roster. A manual number with no name still gets the roster's name.
+
+    A number never comes from the roster alone: a roster can name a known number, but it cannot claim a track
+    wears one - that claim is about what the camera saw. Entries are included when they carry a number or a
+    name, so a track has to be identified by *something* to appear.
     """
     auto = auto or {}
     manual = manual or {}
+    team_of = team_of or {}
+    team_rosters = team_rosters or {}
     out: dict[int, dict] = {}
     for track_id in track_ids:
-        entry = manual.get(int(track_id))
+        track = int(track_id)
+        team = int(team_of.get(track, -1))
+        entry = manual.get(track)
         if entry and (entry.get("number") or entry.get("name")):
-            out[int(track_id)] = {
-                "number": entry.get("number"),
-                "name": entry.get("name") or "",
+            number = entry.get("number")
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                name = _roster_name(team_rosters, team, number)
+            out[track] = {
+                "number": number,
+                "name": name,
                 "source": "manual",
                 "confidence": 1.0,
             }
             continue
-        entry = auto.get(int(track_id))
+        entry = auto.get(track)
         if entry and entry.get("number"):
-            out[int(track_id)] = {
-                "number": entry.get("number"),
-                "name": "",
+            number = entry["number"]
+            out[track] = {
+                "number": number,
+                "name": _roster_name(team_rosters, team, number),
                 "source": "auto",
                 "confidence": float(entry.get("confidence", 0.0)),
             }
