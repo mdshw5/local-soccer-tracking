@@ -2002,8 +2002,8 @@ def replay_section(
     has_ball = any(entry is not None for entry in (replay.get("ball") or []))
     excluded = int(replay.get("bystanders_excluded") or 0)
     st.caption(
-        "Press play or drag the timeline. Player markers wear each team's measured kit color; the yellow dot is "
-        "the camera aim - "
+        "Press play or drag the timeline. Player markers wear each team's measured kit color; the camera icon "
+        "points at the spot the camera was aimed at - "
         + (
             "the ball proxy used when the ball scan has not found the ball. The white football is the ball the "
             "scan tracked: drawn where a detector saw it, a dashed ring where the position is a short forecast "

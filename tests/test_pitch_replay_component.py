@@ -103,15 +103,20 @@ def test_the_markers_wear_the_measured_kit_color() -> None:
     assert "markerTextColor" in html, "the number color must follow the kit color, not be assumed white"
 
 
-def test_the_camera_direction_line_is_drawn_from_the_camera_position() -> None:
-    """The camera's direction is shown as a line from its own ground position to the aim point.
+def test_the_camera_is_a_cartoon_pointing_where_it_aimed() -> None:
+    """The camera is a small icon at its own ground position, turned to face the point the gimbal was aimed at -
+    the direction the real camera pointed, readable on the pitch. It replaced the aim dot and direction line, so
+    both facts ride the one icon.
 
-    The camera sits off the near touchline, so the view bounds must widen to include it - otherwise the line's
-    origin is clipped off the edge of the canvas and the direction reads wrong.
+    The camera sits off the near touchline, so the view bounds must widen to include it - otherwise the icon is
+    clipped off the edge of the canvas.
     """
     html = COMPONENT.read_text()
-    assert "state.data.camera" in html, "the line is drawn from the camera position in the payload"
+    assert "state.data.camera" in html, "the icon is drawn at the camera position in the payload"
+    assert "state.data.aim" in html, "the icon is oriented by the aim point in the payload"
+    assert "drawCamera" in html, "the camera must be drawn as its own icon, not a dot"
     assert "CAMERA_COLOR" in html
+    assert "AIM_COLOR" not in html, "the yellow aim dot was replaced by the camera icon"
     assert "viewBounds" in html, "the view must expand to include the camera position"
     assert "cam[0] - MARGIN_M" in html and "cam[1] - MARGIN_M" in html
 

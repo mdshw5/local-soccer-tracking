@@ -356,7 +356,6 @@
       // ---------------------------------------------------------------------------------------------------
       const TEAM_COLORS = ['#4f8ef7', '#fb7185'];
       const OTHER_COLOR = '#9ca3af';
-      const AIM_COLOR = '#fde047';
       const CAMERA_COLOR = '#38bdf8';
       const BALL_COLOR = '#f8fafc';
       // Role color-coding: the referee and goalkeepers are marked with a fixed-color ring instead of a text
@@ -567,7 +566,7 @@
       // ---------------------------------------------------------------------------------------------------
       function viewBounds() {
         // The pitch plus a margin, widened to include the camera's own ground position: the camera sits off the
-        // near touchline, and the direction line is drawn from there, so it has to be inside the view.
+        // near touchline, and its icon is drawn there, so it has to be inside the view.
         const pitch = state.data.pitch;
         let minX = -MARGIN_M;
         let maxX = pitch[0] + MARGIN_M;
@@ -778,6 +777,59 @@
         }
       }
 
+      function drawCamera(frame, frac) {
+        // The tracked camera, drawn as a small cartoon at its own ground position: the icon is turned to face
+        // the point the gimbal was aimed at, so the direction the real camera pointed is readable on the pitch
+        // at a glance. This replaced the old aim dot and direction line - the icon carries both facts (where
+        // the camera is and where it looks), and the aim point is not marked anywhere else.
+        const cam = state.data.camera;
+        const aims = state.data.aim;
+        if (!cam || !aims || !aims.length) return;
+        const index = Math.min(frame, aims.length - 1);
+        const next = aims[Math.min(index + 1, aims.length - 1)];
+        let aim = aims[index] || next;
+        if (aim && next && frac > 0) {
+          // Interpolated like the players: the aim advances between analysis samples at the source's own rate.
+          aim = [aim[0] + (next[0] - aim[0]) * frac, aim[1] + (next[1] - aim[1]) * frac];
+        }
+        const g = geometry();
+        const x = g.x(cam[0]);
+        const y = g.y(cam[1]);
+        const u = Math.max(7, g.scale); // the icon's unit: on a 1000 px pitch this is ~9 px per meter
+        const ink = 'rgba(15,23,42,0.85)';
+        ctx.save();
+        ctx.translate(x, y);
+        if (aim) ctx.rotate(Math.atan2(g.y(aim[1]) - y, g.x(aim[0]) - x));
+        ctx.lineWidth = Math.max(1, 0.12 * u);
+        ctx.strokeStyle = ink;
+        ctx.fillStyle = CAMERA_COLOR;
+        // viewfinder bump on the back of the body, so "forward" needs no guesswork
+        ctx.beginPath();
+        ctx.roundRect(-0.62 * u, -0.98 * u, 0.44 * u, 0.44 * u, 0.1 * u);
+        ctx.fill();
+        ctx.stroke();
+        // body
+        ctx.beginPath();
+        ctx.roundRect(-0.95 * u, -0.62 * u, 1.5 * u, 1.24 * u, 0.24 * u);
+        ctx.fill();
+        ctx.stroke();
+        // lens barrel and glass, facing the aim
+        ctx.beginPath();
+        ctx.roundRect(0.5 * u, -0.26 * u, 0.4 * u, 0.52 * u, 0.08 * u);
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0.95 * u, 0, 0.3 * u, 0, Math.PI * 2);
+        ctx.fillStyle = BALL_COLOR;
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(0.95 * u, 0, 0.13 * u, 0, Math.PI * 2);
+        ctx.fillStyle = ink;
+        ctx.fill();
+        ctx.restore();
+      }
+
       function draw() {
         if (!state.data || !state.pitchCanvas) return;
         const dpr = window.devicePixelRatio || 1;
@@ -827,37 +879,8 @@
           }
         }
 
-        // ball proxy: the point the gimbal was aimed at
-        const aim = state.data.aim[frame];
-        // camera direction: a line from the camera's own ground position to the aim point, so the direction the
-        // camera is pointing is visible on the pitch. Drawn under the aim dot and the players.
-        const cam = state.data.camera;
-        if (cam && aim) {
-          ctx.beginPath();
-          ctx.moveTo(g.x(cam[0]), g.y(cam[1]));
-          ctx.lineTo(g.x(aim[0]), g.y(aim[1]));
-          ctx.strokeStyle = CAMERA_COLOR;
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([6, 4]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.beginPath();
-          ctx.arc(g.x(cam[0]), g.y(cam[1]), Math.max(3, 0.5 * g.scale), 0, Math.PI * 2);
-          ctx.fillStyle = CAMERA_COLOR;
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        }
-        if (aim) {
-          ctx.beginPath();
-          ctx.arc(g.x(aim[0]), g.y(aim[1]), Math.max(2.5, 0.35 * g.scale), 0, Math.PI * 2);
-          ctx.fillStyle = AIM_COLOR;
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        }
+        // The camera, under the players: a cartoon at its ground position, turned toward the aim point.
+        drawCamera(frame, frac);
 
         const radius = Math.max(4.0, 0.85 * g.scale);
         drawAttackArrows(frame);
@@ -1681,9 +1704,9 @@
               `<span class="chip" style="background:${TEAM_COLORS[1]}"></span>` +
               `arrows = attacking direction (swaps at half-time)</span>`
             : '') +
-          `<span><span class="chip" style="background:${AIM_COLOR}"></span>ball proxy (camera aim)</span>` +
           (state.data.camera
-            ? `<span><span class="chip" style="background:${CAMERA_COLOR}"></span>camera position &amp; direction</span>`
+            ? `<span><span class="chip" style="background:${CAMERA_COLOR}"></span>` +
+              `camera (points where it is aimed)</span>`
             : '') +
           (state.data.ball
             ? `<span><span class="chip" style="background:${BALL_COLOR}"></span>` +
